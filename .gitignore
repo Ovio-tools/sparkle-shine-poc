@@ -1,0 +1,6 @@
+.env
+*.db
+__pycache__/
+.jobber_tokens.json
+.quickbooks_tokens.json
+token.json

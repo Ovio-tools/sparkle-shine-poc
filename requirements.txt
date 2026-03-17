@@ -1,0 +1,11 @@
+python-dotenv
+requests
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+hubspot-api-client
+mailchimp-marketing
+asana
+slack-sdk
+pytest
