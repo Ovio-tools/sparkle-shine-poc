@@ -1,6 +1,12 @@
 .env
 *.db
+*.db-shm
+*.db-wal
 __pycache__/
+.pytest_cache/
+.DS_Store
 .jobber_tokens.json
 .quickbooks_tokens.json
 token.json
+checkpoints/
+logs/

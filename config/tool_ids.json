@@ -1,1 +1,197 @@
-{}
+{
+  "pipedrive": {
+    "pipelines": {
+      "Cleaning Services Sales": 2,
+      "Lost/Inactive": 3
+    },
+    "stages": {
+      "New Lead": 7,
+      "Qualified": 8,
+      "Site Visit Scheduled": 9,
+      "Proposal Sent": 10,
+      "Negotiation": 11,
+      "Closed Won": 12,
+      "Closed Lost": 13
+    },
+    "deal_fields": {
+      "Client Type": "0c33b3b00286f14e71a0e0845a2180d6b524dd39",
+      "Service Type": "29d12ce12832b01642ca5b6b764fed836201ae88",
+      "Estimated Monthly Value": "f25efe3a76061b039c0aeb9482e22ea8a276e6e2",
+      "Lead Source": "a44f485b9f59b407da74b048ed7e09c67852c447"
+    },
+    "person_fields": {
+      "HubSpot Contact ID": "a70495529a73cf3473d1a10528cf7052e56d217e",
+      "Jobber Client ID": "f62df7e3465c734b05eea342e1db1a424a88489a",
+      "Acquisition Source": "d021197a6120bd6de2d5dc329ce66e06b300d311",
+      "Neighborhood": "c522a9fe547842f66319659855399dd086763f9d"
+    }
+  },
+  "mailchimp": {
+    "audience_id": "92f05d2d65",
+    "merge_fields": {
+      "PHONE": 4,
+      "NEIGHBORHD": 5,
+      "CLIENTTYPE": 6,
+      "SVCTYPE": 7,
+      "LEADSOURCE": 8
+    },
+    "segments": {
+      "Active Residential Clients": 18732,
+      "Active Commercial Clients": 18733,
+      "Churned Clients": 18734,
+      "High-Value Clients": 18735
+    },
+    "tags": [
+      "residential-client",
+      "commercial-client",
+      "active",
+      "churned",
+      "recurring-weekly",
+      "recurring-biweekly",
+      "recurring-monthly",
+      "vip",
+      "referral",
+      "campaign-spring-2025",
+      "campaign-summer-2025",
+      "campaign-fall-2025",
+      "campaign-winter-2026"
+    ]
+  },
+  "hubspot": {
+    "contact_properties": [
+      "client_type",
+      "service_frequency",
+      "lead_source_detail",
+      "neighborhood",
+      "jobber_client_id",
+      "quickbooks_customer_id",
+      "lifetime_value",
+      "last_service_date"
+    ],
+    "deal_properties": [
+      "proposal_id",
+      "service_start_date",
+      "monthly_contract_value"
+    ],
+    "lifecycle_stages": [
+      "subscriber",
+      "lead",
+      "marketingqualifiedlead",
+      "salesqualifiedlead",
+      "opportunity",
+      "customer",
+      "evangelist"
+    ]
+  },
+  "asana": {
+    "workspace_gid": "1213704231015587",
+    "team_gid": "1213704231015589",
+    "projects": {
+      "Sales Pipeline Tasks": "1213719393240330",
+      "Marketing Calendar": "1213719401725621",
+      "Admin & Operations": "1213719394454339",
+      "Client Success": "1213719346640011"
+    },
+    "sections": {
+      "Sales Pipeline Tasks": {
+        "New Leads": "1213719534419272",
+        "Contacted": "1213719514126090",
+        "Site Visit": "1213719554196424",
+        "Proposal Sent": "1213719502054201",
+        "Follow-Up": "1213719534446609",
+        "Closed": "1213719534419274"
+      },
+      "Marketing Calendar": {
+        "Planning": "1213719538251310",
+        "In Progress": "1213719534301454",
+        "Scheduled": "1213719554213377",
+        "Completed": "1213719554287338"
+      },
+      "Admin & Operations": {
+        "To Do": "1213719554288488",
+        "In Progress": "1213719554305167",
+        "Waiting": "1213719534413135",
+        "Done": "1213719554164190"
+      },
+      "Client Success": {
+        "Onboarding": "1213719502048514",
+        "Active": "1213719538164393",
+        "At Risk": "1213719514085799",
+        "Churned": "1213719502048516"
+      }
+    },
+    "users": {
+      "Maria Gonzalez": null,
+      "Patricia Nguyen": null,
+      "Kevin Okafor": null
+    }
+  },
+  "slack": {
+    "channels": {
+      "daily-briefing": "C0AML3Q8PSM",
+      "operations": "C0AM76H9K34",
+      "sales-pipeline": "C0ALRNT2Z8F",
+      "new-clients": "C0AN1EFM1A4",
+      "reviews-and-feedback": null
+    }
+  },
+  "quickbooks": {
+    "items": {
+      "Standard Residential Clean": "19",
+      "Deep Clean": "20",
+      "Move-In/Move-Out Clean": "21",
+      "Recurring Weekly": "22",
+      "Recurring Biweekly": "23",
+      "Recurring Monthly": "24",
+      "Commercial Nightly Clean": "25",
+      "Late Payment Fee": "26"
+    },
+    "accounts": {
+      "Cleaning Supplies": "1150040001",
+      "Equipment Maintenance": "1150040002",
+      "Vehicle Expenses": "1150040003",
+      "Employee Wages": "1150040004",
+      "Marketing & Advertising": "1150040005",
+      "Office Expenses": "15",
+      "Insurance": "11",
+      "Subcontractors": "1150040006"
+    },
+    "income_account_id": "1150040000"
+  },
+  "google": {
+    "docs": {
+      "employee_handbook": "1nMBvM4szdxP47AalGcvEpl-_3biJUy38EpCt2XXA_j0",
+      "service_quality_checklist": "15frlFWs7kG6cAf3xhq7UHZ9hUZ4C--R4aP99eR1HaSs",
+      "client_onboarding_guide": "1yAYHjYT3Za4Tg8QQJ88ZLFj9XofzQgAgGfnk-VvRbXE",
+      "safety_chemical_manual": "1LerAOxr2R8B7MuIn3Pg4h0W_ArRqwicigsR7aVmFYQ4",
+      "sales_proposal_templates": "1cG5y6DHVtPa1qYGrStRLvwwJ6h5n-pm3XLA_I-nc-1o",
+      "marketing_playbook": "1XmyKEk2aZ-QOCtyMxvNGqyXxgzkEFNQCgB8vzlSav2s",
+      "vendor_supplier_directory": "1_IfpzM8DdoWxtFWiSDyD97hs7WZc2bWdRjrB2gU8A08",
+      "fy2026_growth_plan": "1oLbD57aqQlIpZcqialm7H10FBMEpVj-v-_cdsXoTzMY"
+    },
+    "sheets": {
+      "rate_card": "1usMDxpSJPXIxigH3mLaXF6CMAFWPpcBLvuLp6abatMw",
+      "budget_tracker": "1wWQYe31SJon2TK-vuyV4o_OCembGAxtdt9JDUbh9EJI",
+      "supply_inventory": "13_ffagqkNtRZ0TPy1OgBHsPva2pJrViFu1RJ6Tmv0pI",
+      "vehicle_equipment_log": "1Yt5eT37UpK8vBTFfjy3xHwLC0vgl8pN1vAhNU7HrLgk",
+      "reviews_sheet": "1QUUE4saUWlPYDAFDHj-_mb0NP_31SnTFTZdBRgrfSos"
+    },
+    "calendar_events": {
+      "cal_001": "bbh24ei67duuibq8sr8aa7sfrs",
+      "cal_002": "5c2ac68s6en6c39kv9vhr0udsg",
+      "cal_003": "kukg3t3je8iv0g1o2c0fevebss",
+      "cal_004": "timol9tg0ll59c9loop1v37igk",
+      "cal_005": "voo62v1u89adr8dorp73ulsik4",
+      "cal_006": "vfcf2rk27ffb9td1n4g6r92eog",
+      "cal_007": "6gdjemm4tupuhn1l13l99f130c",
+      "cal_008": "8e5qa44i6g2gurifpa3k5nqbb8",
+      "cal_009": "9osncueark769lhjj4thoo0g1k",
+      "cal_010": "f7tk7542pf7sssf8kt02ida1nc",
+      "cal_011": "7cfei8jb3tecnm4lrgnqlo13vg",
+      "cal_012": "vsvi0mrn6mgt0f9itdbvej5a9o",
+      "cal_013": "haqu9mqffmqnkgc8h6kjt7d8o8",
+      "cal_014": "ahsbf5qukhf196evepgu48nklg",
+      "cal_015": "m01hv7d3gta698c0efjs199o20"
+    }
+  }
+}

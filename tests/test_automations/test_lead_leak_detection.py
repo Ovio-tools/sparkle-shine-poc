@@ -1,0 +1,196 @@
+"""
+tests/test_automations/test_lead_leak_detection.py
+
+Unit tests for Automation 5 — LeadLeakDetection (scheduled, daily).
+All external API calls are mocked; no real HTTP requests are made.
+"""
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from automations.lead_leak_detection import LeadLeakDetection
+from tests.test_automations.conftest import TEST_TOOL_IDS
+
+
+# ── Per-file autouse ──────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _patch_tool_ids(monkeypatch):
+    monkeypatch.setattr(
+        "automations.lead_leak_detection._load_tool_ids",
+        lambda: TEST_TOOL_IDS,
+    )
+
+
+# ── Shared fixture ────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def auto(mock_db, mock_clients):
+    return LeadLeakDetection(clients=mock_clients, db=mock_db, dry_run=False)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _ts_days_ago(days: int) -> str:
+    """Return an ISO-8601 timestamp for N days in the past (UTC)."""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%S+00:00"
+    )
+
+
+def _ts_hours_ago(hours: int) -> str:
+    """Return an ISO-8601 timestamp for N hours in the past (UTC)."""
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%S+00:00"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core leak detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+@patch("automations.lead_leak_detection.create_tasks")
+def test_leaked_leads_detected(
+    mock_create_tasks, auto, mock_clients, mock_db, sample_triggers
+):
+    """
+    Given 5 HubSpot leads where 3 are already mapped to Pipedrive deals and
+    2 are not, the automation creates 2 Asana follow-up tasks and posts
+    a Slack summary.
+    """
+    mock_create_tasks.return_value = ["gid-a", "gid-b"]
+
+    # Stub _fetch_hubspot_leads to return the 5-lead fixture
+    auto._fetch_hubspot_leads = MagicMock(
+        return_value=sample_triggers["hs_leads_5_total"]
+    )
+
+    # Pipedrive fallback: email search returns no person for leaked leads
+    mock_clients.pipedrive.get.return_value.json.return_value = {
+        "success": True,
+        "data": {"items": []},
+    }
+
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run()
+
+    # create_tasks called with exactly 2 tasks (one per leaked lead)
+    mock_create_tasks.assert_called_once()
+    tasks_arg = mock_create_tasks.call_args[1].get("tasks") or mock_create_tasks.call_args[0][3]
+    assert len(tasks_arg) == 2, f"Expected 2 tasks for 2 leaked leads, got {len(tasks_arg)}"
+
+    # Slack was called
+    mock_slack.assert_called_once()
+    slack_text = mock_slack.call_args[0][2]
+    assert "2" in slack_text or "leak" in slack_text.lower()
+
+
+@patch("automations.lead_leak_detection.create_tasks")
+def test_48_hour_grace_period(mock_create_tasks, auto, mock_clients):
+    """
+    A lead created only 12 hours ago must NOT be flagged as leaked,
+    even if it has no Pipedrive deal (grace period: 48 hours).
+    """
+    mock_create_tasks.return_value = []
+
+    recent_lead = [
+        {
+            "hubspot_id": "999",
+            "email":      "fresh@example.com",
+            "firstname":  "Fresh",
+            "lastname":   "Lead",
+            "lead_source": "Google Ads",
+            "createdate": _ts_hours_ago(12),   # only 12 hours old
+        }
+    ]
+    auto._fetch_hubspot_leads = MagicMock(return_value=recent_lead)
+
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run()
+
+    # The fresh lead must not appear in any Asana task
+    if mock_create_tasks.called:
+        tasks_arg = mock_create_tasks.call_args[1].get("tasks") or []
+        assert len(tasks_arg) == 0, "Grace-period lead should not generate an Asana task"
+
+    # Slack message should indicate no leaks (positive message)
+    mock_slack.assert_called_once()
+    slack_text = mock_slack.call_args[0][2]
+    assert "no leaked" in slack_text.lower() or "all hubspot" in slack_text.lower()
+
+
+@patch("automations.lead_leak_detection.create_tasks")
+def test_no_leaks_posts_positive_message(mock_create_tasks, auto, mock_clients, mock_db):
+    """
+    When all HubSpot leads are already mapped to Pipedrive, the Slack
+    message is the positive 'no leaked leads' message.
+    """
+    mock_create_tasks.return_value = []
+
+    # Only leads 501/502/503 — all have Pipedrive mappings in mock_db
+    all_mapped = [
+        {
+            "hubspot_id": "501",
+            "email":      "jane@example.com",
+            "firstname":  "Jane",
+            "lastname":   "Smith",
+            "lead_source": "Website",
+            "createdate": _ts_days_ago(3),
+        },
+        {
+            "hubspot_id": "502",
+            "email":      "client2@example.com",
+            "firstname":  "Client",
+            "lastname":   "Two",
+            "lead_source": "Referral",
+            "createdate": _ts_days_ago(5),
+        },
+    ]
+    auto._fetch_hubspot_leads = MagicMock(return_value=all_mapped)
+
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run()
+
+    mock_slack.assert_called_once()
+    slack_text = mock_slack.call_args[0][2]
+    assert "no leaked" in slack_text.lower() or "all hubspot" in slack_text.lower(), (
+        f"Expected a positive no-leaks message, got: {slack_text!r}"
+    )
+
+
+@patch("automations.lead_leak_detection.create_tasks")
+def test_deduplication_skips_existing_task(mock_create_tasks, auto, mock_clients):
+    """
+    When create_tasks runs with deduplicate_by_title=True and a task
+    with the same title already exists, no new task is created.
+    """
+    # create_tasks returns empty list → deduplication caused it to skip
+    mock_create_tasks.return_value = []
+
+    leaked_lead = [
+        {
+            "hubspot_id": "504",
+            "email":      "leaked1@example.com",
+            "firstname":  "Leaked",
+            "lastname":   "One",
+            "lead_source": "Facebook Ads",
+            "createdate": _ts_days_ago(4),
+        }
+    ]
+    auto._fetch_hubspot_leads = MagicMock(return_value=leaked_lead)
+
+    # Pipedrive fallback: no person found
+    mock_clients.pipedrive.get.return_value.json.return_value = {
+        "success": True, "data": {"items": []}
+    }
+
+    with patch("automations.base.post_slack_message"):
+        auto.run()
+
+    # create_tasks must have been called with deduplicate_by_title=True
+    mock_create_tasks.assert_called_once()
+    call_kwargs = mock_create_tasks.call_args[1]
+    assert call_kwargs.get("deduplicate_by_title") is True, (
+        "create_tasks must be called with deduplicate_by_title=True for deduplication"
+    )

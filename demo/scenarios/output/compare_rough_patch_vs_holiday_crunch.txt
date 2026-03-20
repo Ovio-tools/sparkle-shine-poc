@@ -1,0 +1,50 @@
+=========================================================
+SCENARIO COMPARISON
+Rough Patch (2025-09-10) vs. Holiday Peak + Cash Crunch (2025-12-18)
+=========================================================
+
+REVENUE
+  Rough Patch: $2,143 yesterday, MTD $21,336 (behind)
+  Holiday Peak + Cash Crunch: $2,947 yesterday, MTD $67,164 (behind)
+  Delta: +$51,354/month (projected)
+
+OPERATIONS
+  Rough Patch: 100% completion, 16 jobs completed yesterday
+  Holiday Peak + Cash Crunch: 100% completion, 16 jobs completed yesterday
+
+CASH HEALTH
+  Rough Patch: DSO 28 days, AR 60+ $8,795
+  Holiday Peak + Cash Crunch: DSO 19 days, AR 60+ $8,795
+
+SALES PIPELINE
+  Rough Patch: 144 open deals, $528,781 pipeline value
+  Holiday Peak + Cash Crunch: 144 open deals, $528,781 pipeline value
+
+TASK HEALTH
+  Rough Patch: 23 overdue (9%)
+  Holiday Peak + Cash Crunch: 23 overdue (9%)
+
+ALERT COMPARISON
+  Only in Rough Patch: (none)
+  Only in Holiday Peak + Cash Crunch: (none)
+  In both:
+    • 35 additional late payers totalling $5,175 — see cash position section for full list
+    • 8 task(s) overdue by 14+ days — requires immediate attention
+    • Alejandra Cooper has $325 outstanding at 299 days overdue
+    • Bad debt risk: $7,790 in invoices 90+ days outstanding
+    • David King has $275 outstanding at 204 days overdue
+    • Emily Aguilar has $275 outstanding at 227 days overdue
+    • High overall task debt: 23 overdue tasks (9% overdue rate)
+    • Jennifer Rodriguez has $270 outstanding at 277 days overdue
+    • Kevin Okafor has 4 overdue tasks (13% overdue rate) vs. team avg of 9%
+    • Maria Gonzalez has 10 overdue tasks (67% overdue rate) vs. team avg of 9%
+    • Patricia Nguyen has 7 overdue tasks (100% overdue rate) vs. team avg of 9%
+    • Revenue is 47% below monthly target pace ($21,336 vs. expected $40,200)
+    • Samantha Turner has $300 outstanding at 271 days overdue
+
+BRIEFING TONE SHIFT
+  Rough Patch: NEUTRAL (cautious words: 6, optimistic words: 6)
+  Holiday Peak + Cash Crunch: NEUTRAL (cautious words: 9, optimistic words: 6)
+  Both periods share a neutral tone.
+
+=========================================================
