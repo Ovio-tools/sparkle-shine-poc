@@ -1,30 +1,40 @@
 """
 intelligence/runner.py
 
-Master orchestrator for the Sparkle & Shine daily intelligence pipeline.
+Master orchestrator for the Sparkle & Shine intelligence pipeline.
+
+Supports two report types:
+    daily  (default) -- tactical ops report: yesterday + today + top 3 actions
+    weekly           -- strategic review covering the past 7 days with TL;DR
 
 Stages:
     0. Preflight -- verify all tokens are valid before syncing (optional)
     1. Sync    -- pull fresh data from all 8 tools into SQLite
     2. Metrics -- compute all 6 metric modules
     3. Context -- assemble the context document for Claude
-    4. Generate -- call the Anthropic API to produce the briefing
+    4. Generate -- call the Anthropic API to produce the report
     5. Publish -- post to Slack; route critical alerts to the right channels
-    6. Archive -- save briefing and context to briefings/
+    6. Archive -- save report and context to briefings/
 
 Usage:
     python -m intelligence.runner
     python -m intelligence.runner --date 2026-03-17
     python -m intelligence.runner --skip-sync --date 2026-03-17
     python -m intelligence.runner --skip-sync --date 2026-03-17 --dry-run
+    python -m intelligence.runner --skip-sync --date 2026-03-17 --report-type weekly
     python -m intelligence.runner --sync-only --verbose
     python -m intelligence.runner --preflight
 
-# To run nightly at 2:00 AM:
-# 0 2 * * * cd /path/to/sparkle-shine-poc && /path/to/python -m intelligence.runner >> logs/cron.log 2>&1
+# ── Cron scheduling ──────────────────────────────────────────────────────────
+# Daily tactical report at 7:00 AM (Mon–Sun):
+# 0 7 * * * cd /path/to/sparkle-shine-poc && /path/to/python -m intelligence.runner --skip-sync >> logs/cron.log 2>&1
+#
+# Weekly strategic report at 7:30 AM every Monday:
+# 30 7 * * 1 cd /path/to/sparkle-shine-poc && /path/to/python -m intelligence.runner --skip-sync --report-type weekly >> logs/cron.log 2>&1
 #
 # For the POC demo, run manually:
 # python -m intelligence.runner --skip-sync --date 2026-03-17
+# python -m intelligence.runner --skip-sync --date 2026-03-17 --report-type weekly
 """
 
 from __future__ import annotations
@@ -328,12 +338,18 @@ def _post_critical_alerts(all_alerts: list[dict]) -> None:
 # Stage 6: Archive
 # ---------------------------------------------------------------------------
 
-def _archive(briefing_date: str, briefing_content: str, context_document: str) -> None:
-    """Save briefing and context documents to briefings/."""
+def _archive(
+    briefing_date: str,
+    briefing_content: str,
+    context_document: str,
+    report_type: str = "daily",
+) -> None:
+    """Save report and context documents to briefings/."""
     os.makedirs(BRIEFINGS_DIR, exist_ok=True)
 
-    briefing_path = os.path.join(BRIEFINGS_DIR, f"briefing_{briefing_date}.md")
-    context_path  = os.path.join(BRIEFINGS_DIR, f"context_{briefing_date}.md")
+    prefix = "weekly_report" if report_type == "weekly" else "daily_report"
+    briefing_path = os.path.join(BRIEFINGS_DIR, f"{prefix}_{briefing_date}.md")
+    context_path  = os.path.join(BRIEFINGS_DIR, f"context_{prefix}_{briefing_date}.md")
 
     with open(briefing_path, "w", encoding="utf-8") as f:
         f.write(briefing_content)
@@ -341,8 +357,8 @@ def _archive(briefing_date: str, briefing_content: str, context_document: str) -
     with open(context_path, "w", encoding="utf-8") as f:
         f.write(context_document)
 
-    logger.info("Briefing archived to %s", briefing_path)
-    logger.info("Context archived to %s",  context_path)
+    logger.info("Report archived to %s", briefing_path)
+    logger.info("Context archived to %s", context_path)
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +474,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run only the token preflight check and exit. "
              "Useful before demos to verify all 8 tool tokens are valid.",
     )
+    parser.add_argument(
+        "--report-type",
+        default="daily",
+        choices=["daily", "weekly"],
+        dest="report_type",
+        help=(
+            "Report type to generate. 'daily' (default) produces a short tactical ops "
+            "report for the current day. 'weekly' produces a strategic review of the "
+            "past 7 days with a TL;DR, posted to #weekly-briefing."
+        ),
+    )
     return parser
 
 
@@ -488,12 +515,15 @@ def main() -> None:
 
     pipeline_start = time.monotonic()
     briefing_date  = _resolve_date(args.date)
+    report_type    = args.report_type
 
     result = PipelineResult(briefing_date=briefing_date)
 
     logger.info(
-        "Intelligence pipeline starting | date=%s | dry_run=%s | skip_sync=%s | sync_only=%s",
+        "Intelligence pipeline starting | date=%s | report_type=%s | "
+        "dry_run=%s | skip_sync=%s | sync_only=%s",
         briefing_date,
+        report_type,
         args.dry_run,
         args.skip_sync,
         args.sync_only,
@@ -548,15 +578,19 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Stage 3: BUILD CONTEXT
     # -----------------------------------------------------------------------
-    logger.info("--- Stage 3: BUILD CONTEXT ---")
-    from intelligence.context_builder import build_briefing_context
+    logger.info("--- Stage 3: BUILD CONTEXT (%s) ---", report_type)
+    from intelligence.context_builder import build_briefing_context, build_weekly_context
 
-    context = build_briefing_context(DB_PATH, briefing_date, briefings_dir=BRIEFINGS_DIR)
-    logger.info(
-        "Context built: ~%d estimated tokens (%d recent briefing(s) injected)",
-        context.token_estimate,
-        context.recent_briefings_loaded,
-    )
+    if report_type == "weekly":
+        context = build_weekly_context(DB_PATH, briefing_date)
+        logger.info("Weekly context built: ~%d estimated tokens", context.token_estimate)
+    else:
+        context = build_briefing_context(DB_PATH, briefing_date, briefings_dir=BRIEFINGS_DIR)
+        logger.info(
+            "Daily context built: ~%d estimated tokens (%d recent briefing(s) injected)",
+            context.token_estimate,
+            context.recent_briefings_loaded,
+        )
 
     # Collect alerts for later use in stages 5 and summary
     all_alerts = _collect_alerts(metrics)
@@ -570,9 +604,9 @@ def main() -> None:
         return
 
     # -----------------------------------------------------------------------
-    # Stage 4: GENERATE BRIEFING
+    # Stage 4: GENERATE REPORT
     # -----------------------------------------------------------------------
-    logger.info("--- Stage 4: GENERATE BRIEFING ---")
+    logger.info("--- Stage 4: GENERATE REPORT (%s) ---", report_type)
     from intelligence.briefing_generator import generate_briefing
 
     briefing = generate_briefing(context)
@@ -583,7 +617,8 @@ def main() -> None:
     result.output_tokens   = briefing.output_tokens
 
     logger.info(
-        "Briefing generated: %d words, %d+%d tokens, %.1fs",
+        "%s report generated: %d words, %d+%d tokens, %.1fs",
+        report_type,
         word_count,
         briefing.input_tokens,
         briefing.output_tokens,
@@ -597,16 +632,22 @@ def main() -> None:
     from intelligence.slack_publisher import post_briefing
     from intelligence.config import SLACK_CONFIG
 
-    publish_channel = args.channel or SLACK_CONFIG["briefing_channel"]
+    if args.channel:
+        publish_channel = args.channel
+    elif report_type == "weekly":
+        publish_channel = SLACK_CONFIG["weekly_channel"]
+    else:
+        publish_channel = SLACK_CONFIG["briefing_channel"]
 
     ok = post_briefing(briefing, channel=publish_channel)
     if ok:
         result.published_channel = publish_channel
         result.published_at      = time.strftime("%I:%M %p")
-        logger.info("Briefing published to %s", publish_channel)
+        logger.info("%s report published to %s", report_type, publish_channel)
     else:
         logger.error(
-            "Failed to publish briefing to %s; briefing will still be archived.",
+            "Failed to publish %s report to %s; report will still be archived.",
+            report_type,
             publish_channel,
         )
 
@@ -623,6 +664,7 @@ def main() -> None:
             briefing_date=briefing_date,
             briefing_content=briefing.content_plain,
             context_document=context.context_document,
+            report_type=report_type,
         )
         result.archived = True
     else:

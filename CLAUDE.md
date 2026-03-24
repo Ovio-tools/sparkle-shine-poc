@@ -231,15 +231,39 @@ Pre-configured `Throttler` instances are in `seeding/utils/throttler.py`. Import
 
 ## Intelligence Layer Pipeline (Phase 4)
 
-The nightly pipeline runs in order: **Sync -> Metrics -> Context -> Generate -> Publish**
+The pipeline supports two report types, both following: **Sync -> Metrics -> Context -> Generate -> Publish**
 
 1. **Sync** (optional, skippable for demos): Pull fresh data from all 8 tools into SQLite.
 2. **Metrics:** 6 deterministic modules (revenue, operations, sales, financial health, marketing, tasks) compute all numbers from SQLite.
-3. **Context:** Assemble a structured text document (~4,000 tokens) with all metrics, alerts, and relevant document excerpts.
-4. **Generate:** Send the context document to Claude (Sonnet) to produce a 400-800 word briefing in 6 sections.
-5. **Publish:** Post to Slack `#daily-briefing` via Block Kit. Post critical alerts to `#operations` or `#sales`.
+3. **Context:** Assemble a structured text document with all metrics, alerts, and relevant document excerpts.
+4. **Generate:** Send the context document to Claude (Sonnet) to produce the report.
+5. **Publish:** Post to Slack via Block Kit. Post critical alerts to `#operations` or `#sales`.
 
-Run the full pipeline: `python -m intelligence.runner --skip-sync --date 2026-03-17`
+### Daily Report (6 sections, 175–450 words, delivered 6 AM Mon–Fri)
+Answers: *"What do I need to act on today?"*
+1. **Yesterday's Numbers** — 3 lines only: jobs completed, revenue, completion rate (+ 1-sentence flag if notably off)
+2. **Today's Operations Snapshot** — crew assignments, utilization, gaps/overloaded flags, overnight cancellations
+3. **Cash That Needs Chasing** — invoices that crossed the 30-day or 60-day overdue threshold today only
+4. **Deals That Need a Nudge** — stale deals (14+ days) + proposals in "Proposal Sent" for 7+ days; max 3 items by value
+5. **Overdue High-Priority Tasks** — count by project/category only (e.g., "3 Sales Pipeline tasks, 1 Operations task")
+6. **One Action Item** — single most important suggestion for today, by urgency and dollar impact
+
+Excluded from daily: campaign performance, review summaries (except 1-star overnight), revenue trend comparisons, conversion rates by source.
+
+Run: `python -m intelligence.runner --skip-sync --date 2026-03-17`
+
+### Weekly Report (8 sections, 700–1400 words, delivered Sunday evening or Monday 6 AM)
+Answers: *"What patterns should I be paying attention to, and where is the business heading?"*
+1. **Week in Review** — revenue vs. target, WoW trend, jobs, cancellations, narrative sentence
+2. **Crew Performance Scorecard** — each crew ranked by efficiency + quality, speed-vs-quality call-outs
+3. **Cash Flow and AR Health** — full AR aging, DSO trend (4 weeks), deteriorating payers
+4. **Sales Pipeline Movement** — entered/moved/won/lost, pipeline value, cycle length, conversion by source
+5. **Marketing and Reputation** — campaign metrics, reviews, audience, day-of-week complaint patterns
+6. **Task and Delegation Health** — overdue rates by person, delegation gap (Maria vs. office manager)
+7. **Neighborhood and Segment Trends** — cancellations by neighborhood (28 days), new client acquisitions by area
+8. **One Big Opportunity** — highest-impact strategic insight with quantified upside
+
+Run: `python -m intelligence.runner --skip-sync --date 2026-03-17 --report-type weekly`
 
 ## Key Files to Read First
 

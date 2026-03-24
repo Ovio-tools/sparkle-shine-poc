@@ -37,12 +37,26 @@ _channel_id_cache: dict[str, str] = {}
 # Section headers used to split the briefing content into Block Kit sections
 # ---------------------------------------------------------------------------
 
-_SECTION_HEADERS = [
+_DAILY_SECTION_HEADERS = [
+    "Yesterday's Operations",
+    "Today's Agenda",
+    "Top Action Items",
+    # Legacy 6-section headers (kept for backward compatibility)
     "Yesterday's Performance",
     "Cash Position",
     "Today's Schedule",
     "Sales Pipeline",
     "Action Items",
+    "One Opportunity",
+]
+
+_WEEKLY_SECTION_HEADERS = [
+    "TL;DR",
+    "Week's Performance",
+    "Cash & Finance",
+    "Operations Recap",
+    "Sales & Marketing",
+    "Priorities for the Week Ahead",
     "One Opportunity",
 ]
 
@@ -106,21 +120,24 @@ def resolve_channel_id(channel_name: str) -> str:
 # Briefing Block Kit builder
 # ---------------------------------------------------------------------------
 
-def _split_briefing_into_sections(content: str) -> list[str]:
+def _split_briefing_into_sections(content: str, headers: list[str] = None) -> list[str]:
     """
-    Split the briefing content into up to 6 named sections.
+    Split the briefing content into named sections.
 
     The content may use any of: *HEADING*, **Heading**, or plain text headers
     matching the known section names.  We find split points by scanning for
     lines that contain a known section header (case-insensitive) and slice.
     """
+    if headers is None:
+        headers = _DAILY_SECTION_HEADERS
+
     lines = content.splitlines()
 
     # Build a list of (line_index, header_label) for each detected section start.
     split_points: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
         stripped = line.strip().strip("*_").strip()
-        for header in _SECTION_HEADERS:
+        for header in headers:
             if header.lower() in stripped.lower():
                 split_points.append((i, header))
                 break
@@ -139,24 +156,32 @@ def _split_briefing_into_sections(content: str) -> list[str]:
 
 
 def _build_briefing_blocks(briefing: Briefing) -> list[dict]:
-    """Assemble the Block Kit payload for a daily briefing."""
+    """Assemble the Block Kit payload for a briefing."""
     date_str = briefing.date
     generated_time = time.strftime("%I:%M %p")
     token_count = briefing.input_tokens + briefing.output_tokens
+    report_type = getattr(briefing, "report_type", "daily")
+
+    if report_type == "weekly":
+        header_text = f":bar_chart: Weekly Report \u2014 Week of {date_str}"
+        section_headers = _WEEKLY_SECTION_HEADERS
+    else:
+        header_text = f":sunrise: Daily Briefing \u2014 {date_str}"
+        section_headers = _DAILY_SECTION_HEADERS
 
     blocks: list[dict] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f":sunrise: Daily Briefing \u2014 {date_str}",
+                "text": header_text,
                 "emoji": True,
             },
         },
         {"type": "divider"},
     ]
 
-    sections = _split_briefing_into_sections(briefing.content_slack)
+    sections = _split_briefing_into_sections(briefing.content_slack, section_headers)
     for i, section_text in enumerate(sections):
         # Slack section text cap is 3000 chars; truncate gracefully
         if len(section_text) > 2990:

@@ -124,6 +124,68 @@ def compute(db, briefing_date: str) -> dict:
     dso = round((total_ar / revenue_90 * 90.0), 1) if revenue_90 > 0 else 0.0
 
     # ------------------------------------------------------------------ #
+    # DSO trend — compute DSO for each of the 4 most recent weeks
+    # (ending on briefing_date, going back 3 more weeks).
+    # Uses the same bank-balance proxy approach (revenue * expense ratio).
+    # ------------------------------------------------------------------ #
+    dso_trend: list[dict] = []
+    for weeks_back in range(3, -1, -1):  # 3, 2, 1, 0 → oldest first
+        week_end = today - timedelta(weeks=weeks_back)
+        week_start_90 = week_end - timedelta(days=90)
+        rev_w = db.execute(
+            "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date BETWEEN ? AND ?",
+            (str(week_start_90), str(week_end)),
+        ).fetchone()[0]
+        # Pull closest AR snapshot on or before week_end
+        snap_w = db.execute(
+            """
+            SELECT open_invoices_value FROM daily_metrics_snapshot
+            WHERE snapshot_date <= ?
+            ORDER BY snapshot_date DESC LIMIT 1
+            """,
+            (str(week_end),),
+        ).fetchone()
+        ar_w = snap_w["open_invoices_value"] if snap_w else total_ar
+        dso_w = round((ar_w / rev_w * 90.0), 1) if rev_w > 0 else 0.0
+        dso_trend.append({"week_ending": str(week_end), "dso": dso_w})
+
+    # ------------------------------------------------------------------ #
+    # AR threshold crossings — invoices that just hit the 30-day or
+    # 60-day overdue mark today (within a ±2 day window to catch any
+    # daily variance in how days_outstanding is updated).
+    # ------------------------------------------------------------------ #
+    crossing_rows = db.execute(
+        """
+        SELECT c.first_name || ' ' || COALESCE(c.last_name, '') AS full_name,
+               COALESCE(c.company_name, '') AS company_name,
+               SUM(i.amount) AS total_outstanding,
+               MAX(COALESCE(i.days_outstanding, 0)) AS max_days
+        FROM invoices i
+        JOIN clients c ON i.client_id = c.id
+        WHERE i.status IN ('sent', 'overdue')
+          AND (
+              COALESCE(i.days_outstanding, 0) BETWEEN 28 AND 32
+              OR COALESCE(i.days_outstanding, 0) BETWEEN 58 AND 62
+          )
+          AND c.status != 'churned'
+        GROUP BY i.client_id
+        ORDER BY total_outstanding DESC
+        """,
+    ).fetchall()
+
+    ar_threshold_crossings: list[dict] = []
+    for row in crossing_rows:
+        display_name = row["company_name"].strip() if row["company_name"].strip() else row["full_name"].strip()
+        max_d = row["max_days"]
+        threshold = 60 if max_d >= 58 else 30
+        ar_threshold_crossings.append({
+            "client_name": display_name,
+            "amount": round(row["total_outstanding"], 2),
+            "days_overdue": max_d,
+            "threshold_crossed": threshold,
+        })
+
+    # ------------------------------------------------------------------ #
     # Late payers (invoices outstanding > warning threshold)
     # ------------------------------------------------------------------ #
     # Exclude churned clients: their unpaid invoices are bad debt (already
@@ -187,7 +249,7 @@ def compute(db, briefing_date: str) -> dict:
 
     if bad_debt_risk > 5_000:
         alerts.append(
-            f"Bad debt risk: ${bad_debt_risk:,.0f} in invoices 90+ days outstanding"
+            f"${bad_debt_risk:,.0f} in invoices have been unpaid for 90+ days — worth reviewing"
         )
 
     # Flag significant 60+ day AR buckets
@@ -197,13 +259,14 @@ def compute(db, briefing_date: str) -> dict:
     aged_60_plus_count = ar_aging["past_due_61_90"]["count"] + ar_aging["past_due_90_plus"]["count"]
     if aged_60_plus > 0:
         alerts.append(
-            f"AR aging: ${aged_60_plus:,.0f} sitting in 60+ day buckets "
-            f"across {aged_60_plus_count} invoices — escalate collections"
+            f"${aged_60_plus:,.0f} in invoices have been unpaid for 60+ days "
+            f"across {aged_60_plus_count} invoices — it may be worth following up"
         )
 
     if dso > 45:
         alerts.append(
-            f"DSO trending up at {dso:.0f} days (target: <30) — collections are running slow"
+            f"On average, invoices are taking {dso:.0f} days to be paid "
+            f"(aim for under 30) — collections may need attention"
         )
 
     return {
@@ -215,6 +278,8 @@ def compute(db, briefing_date: str) -> dict:
         },
         "ar_aging": ar_aging,
         "dso": dso,
+        "dso_trend": dso_trend,
+        "ar_threshold_crossings": ar_threshold_crossings,
         "late_payers": late_payers,
         "bad_debt_risk": round(bad_debt_risk, 2),
         "alerts": alerts,

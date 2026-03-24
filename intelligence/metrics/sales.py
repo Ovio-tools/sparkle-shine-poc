@@ -129,6 +129,39 @@ def compute(db, briefing_date: str) -> dict:
     ]
 
     # ------------------------------------------------------------------ #
+    # Proposals needing a nudge (in "Proposal Sent" for 7–13 days)
+    # These are proposals that are not yet "stale" (14+ days) but have
+    # been sitting without a response long enough to warrant a follow-up.
+    # ------------------------------------------------------------------ #
+    nudge_days = ALERT_THRESHOLDS["stale_proposal_days"]
+    nudge_cutoff_near = today - timedelta(days=stale_days)    # 14 days ago (upper bound)
+    nudge_cutoff_far  = today - timedelta(days=nudge_days)    # 7 days ago (lower bound)
+
+    nudge_rows = db.execute(
+        """
+        SELECT cp.title,
+               COALESCE(cp.monthly_value * 12, 0.0) AS annual_value,
+               CAST(julianday('now') - julianday(cp.sent_date) AS INTEGER) AS days_stale
+        FROM commercial_proposals cp
+        WHERE cp.status = 'sent'
+          AND cp.decision_date IS NULL
+          AND cp.sent_date IS NOT NULL
+          AND cp.sent_date BETWEEN ? AND ?
+        ORDER BY annual_value DESC
+        """,
+        (str(nudge_cutoff_near), str(nudge_cutoff_far)),
+    ).fetchall()
+
+    proposals_needing_nudge = [
+        {
+            "deal_title": r["title"],
+            "days_stale": r["days_stale"] or nudge_days,
+            "value": round(r["annual_value"], 2),
+        }
+        for r in nudge_rows
+    ]
+
+    # ------------------------------------------------------------------ #
     # Conversion rate by lead source
     #
     # Total leads per source = unconverted leads (leads table) + converted
@@ -231,6 +264,7 @@ def compute(db, briefing_date: str) -> dict:
             "lost_value": round(lost_row["val"], 2),
         },
         "stale_deals": stale_deals,
+        "proposals_needing_nudge": proposals_needing_nudge,
         "conversion_by_source": conversion_by_source,
         "avg_cycle_length_days": avg_cycle_length_days,
         "alerts": alerts,

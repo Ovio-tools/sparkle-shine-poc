@@ -107,7 +107,9 @@ class PaymentReceived(BaseAutomation):
             )
 
         # ── Action 2: HubSpot financial properties ────────────────────────────
-        new_outstanding = max(0.0, (ctx.get("hs_outstanding") or 0.0) - ctx["amount"])
+        # Fallback uses the DB-derived outstanding balance minus this payment.
+        # _action_hubspot_financials will replace this with the live HubSpot value.
+        new_outstanding = max(0.0, ctx["hs_outstanding"] - ctx["amount"])
         try:
             new_outstanding = self._action_hubspot_financials(ctx)
             self.log_action(
@@ -183,6 +185,19 @@ class PaymentReceived(BaseAutomation):
                 client_name = f"{fn} {ln}".strip() or client_name
                 client_type = (ct or "residential").lower()
 
+        # Compute unpaid invoice total from SQLite as a fallback for when the
+        # HubSpot action fails. This prevents the Slack notification from always
+        # showing $0.00 outstanding on HubSpot errors.
+        db_outstanding = 0.0
+        if canonical_id:
+            row = self.db.execute(
+                "SELECT COALESCE(SUM(amount), 0.0) AS total FROM invoices "
+                "WHERE client_id = ? AND status != 'paid'",
+                (canonical_id,),
+            ).fetchone()
+            if row:
+                db_outstanding = float(row["total"] if hasattr(row, "keys") else row[0])
+
         return {
             "payment_id":       str(event.get("payment_id", "")),
             "amount":           float(event.get("amount") or 0),
@@ -195,9 +210,9 @@ class PaymentReceived(BaseAutomation):
             "hs_contact_id":    hs_contact_id,
             "client_name":      client_name,
             "client_type":      client_type,
-            # hs_outstanding is pre-populated in _action_hubspot_financials;
-            # kept at None here so _build_context stays API-call-free.
-            "hs_outstanding":   None,
+            # Fallback outstanding balance from local SQLite (unpaid invoices).
+            # _action_hubspot_financials will replace this with the live HubSpot value.
+            "hs_outstanding":   db_outstanding,
         }
 
     # ── Action 1: Pipedrive deal activity ─────────────────────────────────────

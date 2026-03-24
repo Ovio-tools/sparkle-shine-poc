@@ -47,7 +47,9 @@ def _resolve_channel_id(client, channel_name: str) -> str:
         return _channel_id_cache[name]
 
     # 2. Environment variable  SLACK_CHANNEL_<NAME>
-    env_id = _ENV_CHANNEL_IDS.get(name, "")
+    # Also check os.environ live in case load_dotenv() was called after this module was imported
+    live_env_key = f"SLACK_CHANNEL_{name.upper().replace('-', '_')}"
+    env_id = os.environ.get(live_env_key) or _ENV_CHANNEL_IDS.get(name, "")
     if env_id:
         _channel_id_cache[name] = env_id
         return env_id
@@ -87,13 +89,24 @@ def post_slack_message(
     """
     Post a message to a Slack channel identified by name (e.g. 'operations').
 
+    If the bot is not yet a member of the channel, joins it automatically
+    and retries the post once.
+
     Returns the Slack API response dict.
     Raises ValueError if the channel cannot be resolved.
     """
+    from slack_sdk.errors import SlackApiError
+
     channel_id = _resolve_channel_id(client, channel_name)
 
     kwargs: dict = {"channel": channel_id, "text": text}
     if blocks is not None:
         kwargs["blocks"] = blocks
 
-    return client.chat_postMessage(**kwargs)
+    try:
+        return client.chat_postMessage(**kwargs)
+    except SlackApiError as exc:
+        if exc.response.get("error") == "not_in_channel":
+            client.conversations_join(channel=channel_id)
+            return client.chat_postMessage(**kwargs)
+        raise

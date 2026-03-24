@@ -36,8 +36,8 @@ import asana
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BOOKKEEPER_EMAIL     = "sandra.flores@sparkleshineaustin.com"
-_OFFICE_MANAGER_EMAIL = "patricia.nguyen@sparkleshineaustin.com"
+_BOOKKEEPER_EMAIL     = "sandra.flores@oviodigital.com"
+_OFFICE_MANAGER_EMAIL = "patricia.nguyen@oviodigital.com"
 
 _ASANA_PROJECT = "Admin & Operations"
 _ASANA_SECTION = "To Do"

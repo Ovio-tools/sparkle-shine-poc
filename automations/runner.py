@@ -190,8 +190,21 @@ def run_poll(clients, db, dry_run: bool) -> dict:
 def run_scheduled(clients, db, dry_run: bool) -> dict:
     from automations.lead_leak_detection import LeadLeakDetection
     from automations.overdue_invoice import OverdueInvoiceEscalation
+    from automations.hubspot_qualified_sync import HubSpotQualifiedSync
 
     results = {"processed": 0, "succeeded": 0, "failed": 0}
+
+    # HubSpot Qualified Lead → Pipedrive sync -- runs every invocation
+    logger.info("Running HubSpot Qualified Lead Sync...")
+    results["processed"] += 1
+    try:
+        HubSpotQualifiedSync(clients, db, dry_run).run()
+        results["succeeded"] += 1
+    except Exception as e:
+        results["failed"] += 1
+        logger.error("HubSpot qualified sync failed: %s", e)
+
+    time.sleep(0.5)
 
     # Lead Leak Detection -- runs every invocation
     logger.info("Running Lead Leak Detection...")

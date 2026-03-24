@@ -149,7 +149,7 @@ def compute(db, briefing_date: str) -> dict:
     if critical_overdue:
         alerts.append(
             f"{len(critical_overdue)} task(s) overdue by {critical_overdue_days}+ days "
-            f"— requires immediate attention"
+            f"— may need attention soon"
         )
 
     if total_overdue > 20:
@@ -157,6 +157,28 @@ def compute(db, briefing_date: str) -> dict:
             f"High overall task debt: {total_overdue} overdue tasks "
             f"({overdue_rate*100:.0f}% overdue rate)"
         )
+
+    # ------------------------------------------------------------------ #
+    # High-priority overdue tasks grouped by project
+    # ------------------------------------------------------------------ #
+    hp_overdue_rows = db.execute(
+        f"""
+        SELECT COALESCE(t.project_name, 'Unassigned') AS project_name,
+               COUNT(*) AS cnt
+        FROM tasks t
+        WHERE t.priority = 'high'
+          AND (t.status = 'overdue'
+               OR (t.status IN ('not_started', 'in_progress')
+                   AND t.due_date IS NOT NULL
+                   AND t.due_date < '{briefing_date}'))
+        GROUP BY project_name
+        ORDER BY cnt DESC
+        """,
+    ).fetchall()
+
+    high_priority_overdue_by_project = {
+        row["project_name"]: row["cnt"] for row in hp_overdue_rows
+    }
 
     return {
         "overview": {
@@ -169,5 +191,6 @@ def compute(db, briefing_date: str) -> dict:
         "by_project": by_project,
         "by_assignee": by_assignee,
         "critical_overdue": critical_overdue,
+        "high_priority_overdue_by_project": high_priority_overdue_by_project,
         "alerts": alerts,
     }

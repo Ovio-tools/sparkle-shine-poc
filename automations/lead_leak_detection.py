@@ -32,7 +32,7 @@ from automations.utils.id_resolver import MappingNotFoundError
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SALES_ESTIMATOR_EMAIL = "kevin.okafor@sparkleshineaustin.com"
+_SALES_ESTIMATOR_EMAIL = "kevin.okafor@oviodigital.com"
 
 _ASANA_PROJECT  = "Sales Pipeline Tasks"
 _ASANA_SECTION  = "Follow-Up"

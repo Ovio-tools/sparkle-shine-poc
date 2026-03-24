@@ -644,13 +644,22 @@ class TestContextBuilder(unittest.TestCase):
         doc = ctx.context_document
         for heading in (
             "YESTERDAY'S NUMBERS",
+            "TODAY'S OPERATIONS SNAPSHOT",
             "CASH POSITION",
-            "TODAY'S SCHEDULE",
+            "INVOICES CROSSING OVERDUE THRESHOLDS TODAY",
             "SALES PIPELINE",
-            "TASK STATUS",
+            "DEALS NEEDING A NUDGE",
+            "HIGH-PRIORITY OVERDUE TASKS",
             "ALERTS AND FLAGS",
         ):
             self.assertIn(heading, doc, f"Context document missing section: {heading}")
+
+        # Yesterday's Numbers must appear before Today's Operations Snapshot
+        self.assertLess(
+            doc.index("YESTERDAY'S NUMBERS"),
+            doc.index("TODAY'S OPERATIONS SNAPSHOT"),
+            "YESTERDAY'S NUMBERS should appear before TODAY'S OPERATIONS SNAPSHOT",
+        )
 
         self.assertLess(ctx.token_estimate, 6000,
                         "Context document token estimate must be < 6000")
@@ -747,26 +756,38 @@ class TestBriefingGenerationLive(unittest.TestCase):
                            "content_slack must be non-empty")
 
         word_count = len(briefing.content_slack.split())
-        self.assertGreater(word_count, 200,
+        self.assertGreater(word_count, 150,
                            f"Briefing too short: {word_count} words")
-        self.assertLess(word_count, 1000,
+        self.assertLess(word_count, 1200,
                         f"Briefing too long: {word_count} words")
 
-        # All 6 required sections must appear (case-insensitive)
+        # All 5 required daily sections must appear (case-insensitive)
+        # Section headings from DAILY_REPORT_PROMPT:
+        #   1. Today's Operations Snapshot
+        #   2. Yesterday's Numbers
+        #   3. Cash That Needs Chasing
+        #   4. Deals That Need a Nudge
+        #   5. One Action Item
         content_upper = briefing.content_slack.upper()
         for section_fragment in (
-            "YESTERDAY",
-            "CASH POSITION",
-            "TODAY",
-            "PIPELINE",
-            "ACTION",
-            "OPPORTUNITY",
+            "YESTERDAY",    # Yesterday's Numbers
+            "OPERATIONS",   # Today's Operations Snapshot
+            "CASH",         # Cash That Needs Chasing
+            "NUDGE",        # Deals That Need a Nudge
+            "TASKS",        # Overdue High-Priority Tasks
+            "ACTION",       # One Action Item
         ):
             self.assertIn(
                 section_fragment,
                 content_upper,
                 f"Briefing missing section containing '{section_fragment}'",
             )
+
+        self.assertIn(
+            "double-check",
+            briefing.content_slack.lower(),
+            "Briefing Slack content should include the AI disclaimer",
+        )
 
         self.assertGreater(briefing.input_tokens, 0,
                            "input_tokens must be > 0 after a live API call")

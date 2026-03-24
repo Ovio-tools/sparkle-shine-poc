@@ -372,8 +372,9 @@ class JobCompletionFlow(BaseAutomation):
     def _action_hubspot_engagement(self, ctx: dict) -> None:
         """
         1. Create a completion note on the HubSpot contact (with inline association).
-        2. Read the current total_services_completed value.
-        3. PATCH the contact with last_service_date and incremented count.
+        2. Read the current total_services_completed and outstanding_balance values.
+        3. PATCH the contact with last_service_date, incremented count, and
+           outstanding_balance += invoice amount (so payment_received can decrement it).
         """
         crew_str     = ctx["crew"] or "unassigned"
         duration_str = (
@@ -384,6 +385,8 @@ class JobCompletionFlow(BaseAutomation):
             f"Crew: {crew_str}. Duration: {duration_str}."
         )
 
+        invoice_amount = ctx["service_info"]["base_price"]
+
         if self.dry_run:
             print(
                 f"[DRY RUN] Would create HubSpot note for contact "
@@ -393,7 +396,8 @@ class JobCompletionFlow(BaseAutomation):
                 f"[DRY RUN] Would PATCH HubSpot contact "
                 f"{ctx['hs_contact_id'] or 'unknown'}: "
                 f"last_service_date={ctx['completion_date']}, "
-                f"total_services_completed+=1"
+                f"total_services_completed+=1, "
+                f"outstanding_balance+={invoice_amount:.2f}"
             )
             return
 
@@ -435,22 +439,24 @@ class JobCompletionFlow(BaseAutomation):
         )
         hs_client.crm.objects.notes.basic_api.create(note_input)
 
-        # 2. Read current total_services_completed
+        # 2. Read current total_services_completed and outstanding_balance
         contact = hs_client.crm.contacts.basic_api.get_by_id(
             contact_id,
-            properties=["total_services_completed"],
+            properties=["total_services_completed", "outstanding_balance"],
         )
-        current_count = int(
-            (contact.properties or {}).get("total_services_completed") or 0
-        )
+        props = contact.properties or {}
+        current_count       = int(float(props.get("total_services_completed") or 0))
+        current_outstanding = float(props.get("outstanding_balance") or 0.0)
 
-        # 3. Update engagement properties
+        # 3. Update engagement properties and initialize outstanding_balance
+        new_outstanding = round(current_outstanding + invoice_amount, 2)
         hs_client.crm.contacts.basic_api.update(
             contact_id,
             SimplePublicObjectInput(
                 properties={
                     "last_service_date":          ctx["completion_date"].isoformat(),
                     "total_services_completed":   str(current_count + 1),
+                    "outstanding_balance":        str(new_outstanding),
                 }
             ),
         )

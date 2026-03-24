@@ -115,7 +115,7 @@ def test_assignee_bookkeeper_for_tier2(mock_db, mock_clients):
 
     mock_tasks_api.create_task.assert_called_once()
     task_body = mock_tasks_api.create_task.call_args[0][0]
-    assert task_body["data"]["assignee"] == "sandra.flores@sparkleshineaustin.com", (
+    assert task_body["data"]["assignee"] == "sandra.flores@oviodigital.com", (
         "Tier 2 tasks must be assigned to the bookkeeper (sandra.flores)"
     )
 
@@ -142,7 +142,7 @@ def test_assignee_office_manager_for_tier3_plus(mock_db, mock_clients):
     assert mock_tasks_api.create_task.call_count == 2
     for c in mock_tasks_api.create_task.call_args_list:
         assignee = c[0][0]["data"]["assignee"]
-        assert assignee == "patricia.nguyen@sparkleshineaustin.com", (
+        assert assignee == "patricia.nguyen@oviodigital.com", (
             f"Tier 3/4 tasks must be assigned to office manager, got {assignee!r}"
         )
 

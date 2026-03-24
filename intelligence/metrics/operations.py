@@ -213,6 +213,28 @@ def compute(db, briefing_date: str) -> dict:
             f"-- possible competitor activity"
         )
 
+    # Full cancellation breakdown by neighborhood (last 28 days, all counts ≥ 1)
+    # Used by the weekly report to surface neighbourhood trends.
+    neighborhood_28d = today - timedelta(days=28)
+    neighborhood_rows = db.execute(
+        """
+        SELECT c.neighborhood, COUNT(*) AS cancel_count
+        FROM jobs j
+        JOIN clients c ON j.client_id = c.id
+        WHERE j.status = 'cancelled'
+          AND j.scheduled_date BETWEEN ? AND ?
+          AND c.neighborhood IS NOT NULL
+        GROUP BY c.neighborhood
+        ORDER BY cancel_count DESC
+        """,
+        (str(neighborhood_28d), str(yesterday)),
+    ).fetchall()
+
+    cancellation_by_neighborhood = [
+        {"neighborhood": row["neighborhood"], "cancel_count": row["cancel_count"]}
+        for row in neighborhood_rows
+    ]
+
     if yesterday_total := completed + cancelled + no_show:
         if completion_rate < 0.80:
             alerts.append(
@@ -239,5 +261,6 @@ def compute(db, briefing_date: str) -> dict:
             "worst_crew": worst_crew,
             "worst_variance": worst_variance,
         },
+        "cancellation_by_neighborhood": cancellation_by_neighborhood,
         "alerts": alerts,
     }

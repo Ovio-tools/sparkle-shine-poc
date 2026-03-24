@@ -35,8 +35,8 @@ from automations.utils.id_resolver import MappingNotFoundError, register_mapping
 
 _JOBBER_GQL_URL = "https://api.getjobber.com/api/graphql"
 
-_OFFICE_MANAGER_EMAIL = "patricia.nguyen@sparkleshineaustin.com"
-_CREW_LEAD_EMAIL      = "travis.coleman@sparkleshineaustin.com"
+_OFFICE_MANAGER_EMAIL = "patricia.nguyen@oviodigital.com"
+_CREW_LEAD_EMAIL      = "travis.coleman@oviodigital.com"
 
 # QBO sandbox Net 30 term ID (standard in all QBO sandboxes)
 _QBO_NET30_TERM_ID = "3"
@@ -471,8 +471,6 @@ class NewClientOnboarding(BaseAutomation):
                 "province": "TX",
                 "country": "US",
             }
-        client_input["notes"] = f"SS-ID: {ctx['canonical_id']}"
-
         # Create client
         resp = session.post(
             _JOBBER_GQL_URL,
@@ -589,6 +587,32 @@ class NewClientOnboarding(BaseAutomation):
             params={"minorversion": "65"},
             timeout=15,
         )
+
+        # QBO returns 400 if a customer with this DisplayName already exists.
+        # In that case, look up the existing customer and return their ID.
+        if resp.status_code == 400:
+            error_detail = resp.json()
+            fault = error_detail.get("Fault", {})
+            errors = fault.get("Error", [])
+            is_duplicate = any(
+                e.get("code") == "6240" or "Duplicate Name" in e.get("Detail", "")
+                for e in errors
+            )
+            if is_duplicate:
+                display_name = body["DisplayName"].replace("'", "\\'")
+                q = f"SELECT Id FROM Customer WHERE DisplayName = '{display_name}'"
+                qr = requests.get(
+                    f"{base_url}/query",
+                    headers=headers,
+                    params={"query": q, "minorversion": "65"},
+                    timeout=15,
+                )
+                qr.raise_for_status()
+                customers = qr.json().get("QueryResponse", {}).get("Customer", [])
+                if customers:
+                    return str(customers[0]["Id"])
+            resp.raise_for_status()
+
         resp.raise_for_status()
         data = resp.json()
         customer = data.get("Customer") or data.get("customer")
