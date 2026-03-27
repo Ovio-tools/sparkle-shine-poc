@@ -118,7 +118,7 @@ def test_pending_mode_processes_due_actions(
     # Insert a due pending_action (execute_after 1 hour ago)
     past_time = (
         datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
-    ).strftime("%Y-%m-%dT%H:%M:%S")
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     context = json.dumps({"client_email": "test@example.com", "client_name": "Test"})
     with mock_db:
@@ -160,7 +160,7 @@ def test_pending_mode_skips_future_actions(
     """
     future_time = (
         datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=47)
-    ).strftime("%Y-%m-%dT%H:%M:%S")
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     context = json.dumps({"client_email": "future@example.com"})
     with mock_db:

@@ -122,6 +122,16 @@ class JobCompletionFlow(BaseAutomation):
 
         ctx = self._build_context(trigger_event)
 
+        if not ctx["canonical_id"]:
+            self.log_action(
+                run_id, "resolve_canonical_id", None, "failed",
+                error_message=(
+                    f"Jobber client '{trigger_event.get('client_id')}' has no "
+                    "cross_tool_mapping entry — downstream actions will be skipped."
+                ),
+                trigger_source=trigger_source,
+            )
+
         # ── Action 1: QuickBooks invoice ──────────────────────────────────────
         invoice_id     = None
         invoice_amount = 0.0
@@ -129,9 +139,36 @@ class JobCompletionFlow(BaseAutomation):
         try:
             invoice_id, invoice_amount, payment_terms = self._action_quickbooks_invoice(ctx)
             if not self.dry_run and invoice_id:
+                # Generate a proper SS-INV-NNNN canonical ID
+                row = self.db.execute(
+                    "SELECT id FROM invoices ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                last_n = int(
+                    (row[0] if row else "SS-INV-0000").split("-")[-1]
+                )
+                inv_canonical_id = f"SS-INV-{last_n + 1:04d}"
+                # Persist the invoice to SQLite (source of truth)
+                inv_due_date = (
+                    (ctx["completion_date"] + timedelta(days=30)).isoformat()
+                    if ctx["is_commercial"]
+                    else ctx["completion_date"].isoformat()
+                )
+                with self.db:
+                    self.db.execute(
+                        "INSERT INTO invoices "
+                        "(id, client_id, amount, status, issue_date, due_date) "
+                        "VALUES (?, ?, ?, 'sent', ?, ?)",
+                        (
+                            inv_canonical_id,
+                            ctx["canonical_id"],
+                            invoice_amount,
+                            ctx["completion_date"].isoformat(),
+                            inv_due_date,
+                        ),
+                    )
                 register_mapping(
                     self.db,
-                    f"INVOICE:JOB:{ctx['job_id']}",
+                    inv_canonical_id,
                     "quickbooks",
                     invoice_id,
                 )
@@ -408,6 +445,7 @@ class JobCompletionFlow(BaseAutomation):
 
         from hubspot.crm.objects.notes import SimplePublicObjectInputForCreate
         from hubspot.crm.contacts import SimplePublicObjectInput
+        from automations.utils.hubspot_write_lock import contact_write_lock
 
         hs_client  = self.clients("hubspot")
         contact_id = ctx["hs_contact_id"]
@@ -439,27 +477,33 @@ class JobCompletionFlow(BaseAutomation):
         )
         hs_client.crm.objects.notes.basic_api.create(note_input)
 
-        # 2. Read current total_services_completed and outstanding_balance
-        contact = hs_client.crm.contacts.basic_api.get_by_id(
-            contact_id,
-            properties=["total_services_completed", "outstanding_balance"],
-        )
-        props = contact.properties or {}
-        current_count       = int(float(props.get("total_services_completed") or 0))
-        current_outstanding = float(props.get("outstanding_balance") or 0.0)
+        # 2. Read-modify-write counter properties under a per-contact lock.
+        # HubSpot has no atomic increment: without serialization, two concurrent
+        # runner invocations processing events for the same contact would both
+        # read the same counter value before either writes, silently dropping
+        # one increment. The file lock ensures only one process at a time
+        # executes this block for a given contact.
+        with contact_write_lock(contact_id):
+            contact = hs_client.crm.contacts.basic_api.get_by_id(
+                contact_id,
+                properties=["total_services_completed", "outstanding_balance"],
+            )
+            props = contact.properties or {}
+            current_count       = int(float(props.get("total_services_completed") or 0))
+            current_outstanding = float(props.get("outstanding_balance") or 0.0)
 
-        # 3. Update engagement properties and initialize outstanding_balance
-        new_outstanding = round(current_outstanding + invoice_amount, 2)
-        hs_client.crm.contacts.basic_api.update(
-            contact_id,
-            SimplePublicObjectInput(
-                properties={
-                    "last_service_date":          ctx["completion_date"].isoformat(),
-                    "total_services_completed":   str(current_count + 1),
-                    "outstanding_balance":        str(new_outstanding),
-                }
-            ),
-        )
+            # 3. Update engagement properties and outstanding_balance
+            new_outstanding = round(current_outstanding + invoice_amount, 2)
+            hs_client.crm.contacts.basic_api.update(
+                contact_id,
+                SimplePublicObjectInput(
+                    properties={
+                        "last_service_date":          ctx["completion_date"].isoformat(),
+                        "total_services_completed":   str(current_count + 1),
+                        "outstanding_balance":        str(new_outstanding),
+                    }
+                ),
+            )
 
     # ── Action 4: Slack summary ───────────────────────────────────────────────
 

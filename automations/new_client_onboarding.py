@@ -248,7 +248,7 @@ class NewClientOnboarding(BaseAutomation):
         try:
             qbo_customer_id = self._action_quickbooks(ctx)
             if not self.dry_run and qbo_customer_id:
-                register_mapping(self.db, ctx["canonical_id"], "quickbooks", qbo_customer_id)
+                register_mapping(self.db, ctx["canonical_id"], "quickbooks_customer", qbo_customer_id)
             self.log_action(
                 run_id, "create_quickbooks_customer",
                 f"quickbooks:customer:{qbo_customer_id}",
@@ -341,13 +341,30 @@ class NewClientOnboarding(BaseAutomation):
 
         Lookup order:
           1. cross_tool_mapping (Pipedrive deal_id already processed)
+             - If the mapping resolves to an SS-LEAD-* ID, the lead is being
+               won for the first time: promote them to a proper SS-CLIENT-*
+               so all downstream actions use the correct entity type.
           2. clients table (email match from prior seeding)
           3. Generate next sequential ID, insert into clients, register mapping
         """
         # 1. Already processed this deal?
         if deal_id:
             try:
-                return self.reverse_resolve_id(deal_id, "pipedrive")
+                existing_id = self.reverse_resolve_id(deal_id, "pipedrive")
+                # Promote lead → client when a won deal maps to an SS-LEAD-* ID.
+                # This happens when HubSpotQualifiedSync created the deal while
+                # the contact was still a lead; we must not carry the LEAD
+                # canonical ID forward into the client onboarding flow.
+                if existing_id.startswith("SS-LEAD-"):
+                    return self._promote_lead_to_client(
+                        lead_id=existing_id,
+                        deal_id=deal_id,
+                        first_name=first_name,
+                        last_name=last_name,
+                        email=email,
+                        client_type=client_type,
+                    )
+                return existing_id
             except MappingNotFoundError:
                 pass
 
@@ -362,8 +379,15 @@ class NewClientOnboarding(BaseAutomation):
                     register_mapping(self.db, cid, "pipedrive", deal_id)
                 return cid
 
-        # 3. Mint new canonical ID
-        # Check highest-numbered SS-CLIENT across both clients table and mapping
+        # 3. Mint new canonical ID.
+        # BEGIN IMMEDIATE acquires a write lock before the SELECTs so the
+        # read-modify-insert is atomic across concurrent runner processes.
+        # Without it two runs can read the same MAX and generate duplicate
+        # SS-CLIENT-NNNN IDs; the second INSERT OR IGNORE would silently
+        # discard its row while both invocations return the same canonical_id.
+        if not self.dry_run:
+            self.db.execute("BEGIN IMMEDIATE")
+
         row_c = self.db.execute(
             "SELECT id FROM clients WHERE id LIKE 'SS-CLIENT-%' ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -388,22 +412,110 @@ class NewClientOnboarding(BaseAutomation):
 
         if not self.dry_run:
             try:
-                with self.db:
-                    self.db.execute(
-                        """
-                        INSERT OR IGNORE INTO clients
-                            (id, client_type, first_name, last_name, email, status)
-                        VALUES (?, ?, ?, ?, ?, 'active')
-                        """,
-                        (canonical_id, client_type, first_name, last_name, email),
-                    )
+                self.db.execute(
+                    """
+                    INSERT OR IGNORE INTO clients
+                        (id, client_type, first_name, last_name, email, status)
+                    VALUES (?, ?, ?, ?, ?, 'active')
+                    """,
+                    (canonical_id, client_type, first_name, last_name, email),
+                )
+                self.db.commit()
             except Exception as ins_exc:
+                self.db.rollback()
                 print(f"[WARN] Could not insert client row {canonical_id}: {ins_exc}")
+                raise
 
             if deal_id:
                 register_mapping(self.db, canonical_id, "pipedrive", deal_id)
 
         return canonical_id
+
+    def _promote_lead_to_client(
+        self,
+        lead_id: str,
+        deal_id: str,
+        first_name: str,
+        last_name: str,
+        email: str,
+        client_type: str,
+    ) -> str:
+        """
+        Mint a new SS-CLIENT-XXXX for a lead that just had their deal won.
+
+        Steps:
+          1. Allocate the next sequential SS-CLIENT-XXXX using BEGIN IMMEDIATE
+             (same atomic pattern as the mint-new branch above).
+          2. Insert the client row (INSERT OR IGNORE so re-runs are safe).
+          3. Re-point all existing cross_tool_mapping rows for this lead to the
+             new client canonical ID, so downstream tools see the CLIENT entity.
+          4. Return the new client canonical ID.
+
+        The old lead ID (SS-LEAD-*) is intentionally left intact in the leads
+        table / any other tool mappings unrelated to this deal, so historical
+        data is not disturbed.
+        """
+        if self.dry_run:
+            print(
+                f"[DRY RUN] Would promote {lead_id} → SS-CLIENT-XXXX "
+                f"(deal_id={deal_id})"
+            )
+            return lead_id  # dry run: return lead_id so the rest of the flow logs cleanly
+
+        self.db.execute("BEGIN IMMEDIATE")
+
+        row_c = self.db.execute(
+            "SELECT id FROM clients WHERE id LIKE 'SS-CLIENT-%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        row_m = self.db.execute(
+            "SELECT canonical_id FROM cross_tool_mapping "
+            "WHERE canonical_id LIKE 'SS-CLIENT-%' ORDER BY canonical_id DESC LIMIT 1"
+        ).fetchone()
+
+        candidates = []
+        if row_c:
+            candidates.append(row_c["id"] if hasattr(row_c, "keys") else row_c[0])
+        if row_m:
+            candidates.append(row_m["canonical_id"] if hasattr(row_m, "keys") else row_m[0])
+
+        next_n = (int(max(candidates).split("-")[-1]) + 1) if candidates else 1
+        client_id = f"SS-CLIENT-{next_n:04d}"
+
+        try:
+            self.db.execute(
+                """
+                INSERT OR IGNORE INTO clients
+                    (id, client_type, first_name, last_name, email, status)
+                VALUES (?, ?, ?, ?, ?, 'active')
+                """,
+                (client_id, client_type, first_name, last_name, email),
+            )
+            # Re-point only the Pipedrive deal mapping (and pipedrive_person if
+            # it shares the same tool_specific_id) from the lead ID to the new
+            # client ID.  Other lead mappings (e.g. HubSpot) are left untouched.
+            self.db.execute(
+                """
+                UPDATE cross_tool_mapping
+                   SET canonical_id = ?, entity_type = 'CLIENT', synced_at = datetime('now')
+                 WHERE canonical_id = ?
+                   AND tool_name IN ('pipedrive', 'pipedrive_person')
+                """,
+                (client_id, lead_id),
+            )
+            self.db.commit()
+        except Exception as exc:
+            self.db.rollback()
+            print(
+                f"[WARN] Could not promote {lead_id} → {client_id}: {exc}. "
+                f"Falling back to lead ID."
+            )
+            return lead_id
+
+        print(
+            f"[INFO] Promoted {lead_id} → {client_id} "
+            f"(deal_id={deal_id}, {first_name} {last_name})"
+        )
+        return client_id
 
     # ── Action 1: Asana ───────────────────────────────────────────────────────
 
@@ -713,7 +825,7 @@ class NewClientOnboarding(BaseAutomation):
     def _action_verify_mappings(
         self, run_id: str, ctx: dict, trigger_source: str
     ) -> None:
-        required_tools = ["pipedrive", "jobber", "quickbooks", "mailchimp"]
+        required_tools = ["pipedrive", "jobber", "quickbooks_customer", "mailchimp"]
         canonical_id = ctx["canonical_id"]
 
         cursor = self.db.execute(
@@ -735,17 +847,23 @@ class NewClientOnboarding(BaseAutomation):
                     f"— sync gap detected"
                 )
 
+        missing = [t for t in required_tools if t not in registered]
         self.log_action(
             run_id,
             "verify_cross_tool_mappings",
             f"canonical:{canonical_id}",
-            "success" if all_present else "skipped",
+            "success" if all_present else "failed",
             error_message=None if all_present else (
-                f"Missing mappings: "
-                + ", ".join(t for t in required_tools if t not in registered)
+                f"Missing mappings: " + ", ".join(missing)
             ),
             trigger_source=trigger_source,
         )
+        if not all_present:
+            self.send_slack(
+                "operations",
+                f":warning: Onboarding sync gap for `{canonical_id}`: "
+                f"no mapping in {', '.join(missing)}. Manual follow-up required.",
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

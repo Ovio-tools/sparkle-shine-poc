@@ -145,9 +145,6 @@ _SLACK_CHANNEL_IDS: dict = {
     "new-clients":    os.environ.get("SLACK_CHANNEL_NEW_CLIENTS", ""),
     "operations":     os.environ.get("SLACK_CHANNEL_OPERATIONS", ""),
     "sales":          os.environ.get("SLACK_CHANNEL_SALES", ""),
-    # lead_leak_detection posts to "sales-pipeline"; map to SALES env var as
-    # the closest match.  If wrong, the log fallback will still catch it.
-    "sales-pipeline": os.environ.get("SLACK_CHANNEL_SALES", ""),
 }
 
 
@@ -823,7 +820,7 @@ def smoke_test_7(db) -> bool:
     test_email    = "smoke_test_phase3_delayed@example-test.com"
     execute_after = (
         datetime.now(timezone.utc) - timedelta(hours=1)
-    ).strftime("%Y-%m-%dT%H:%M:%S")
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Insert test pending_action row
     test_row_id = None

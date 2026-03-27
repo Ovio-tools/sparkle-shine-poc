@@ -187,6 +187,21 @@ def run_poll(clients, db, dry_run: bool) -> dict:
 # Scheduled mode
 # ─────────────────────────────────────────────────────────────────────────────
 
+_LEAD_LEAK_SENTINEL = os.path.join(_LOGS_DIR, ".lead_leak_last_run")
+
+
+def _should_run_lead_leak() -> bool:
+    """Return True if LeadLeakDetection has not run successfully in the last 24 hours."""
+    if not os.path.exists(_LEAD_LEAK_SENTINEL):
+        return True
+    return (time.time() - os.path.getmtime(_LEAD_LEAK_SENTINEL)) >= 86400
+
+
+def _mark_lead_leak_ran() -> None:
+    """Touch the sentinel file to record that LeadLeakDetection just completed."""
+    open(_LEAD_LEAK_SENTINEL, "w").close()
+
+
 def run_scheduled(clients, db, dry_run: bool) -> dict:
     from automations.lead_leak_detection import LeadLeakDetection
     from automations.overdue_invoice import OverdueInvoiceEscalation
@@ -194,7 +209,7 @@ def run_scheduled(clients, db, dry_run: bool) -> dict:
 
     results = {"processed": 0, "succeeded": 0, "failed": 0}
 
-    # HubSpot Qualified Lead → Pipedrive sync -- runs every invocation
+    # HubSpot Qualified Lead → Pipedrive sync -- runs every invocation (every 5 min)
     logger.info("Running HubSpot Qualified Lead Sync...")
     results["processed"] += 1
     try:
@@ -206,15 +221,20 @@ def run_scheduled(clients, db, dry_run: bool) -> dict:
 
     time.sleep(0.5)
 
-    # Lead Leak Detection -- runs every invocation
-    logger.info("Running Lead Leak Detection...")
-    results["processed"] += 1
-    try:
-        LeadLeakDetection(clients, db, dry_run).run()
-        results["succeeded"] += 1
-    except Exception as e:
-        results["failed"] += 1
-        logger.error("Lead leak detection failed: %s", e)
+    # Lead Leak Detection -- at most once per 24 hours
+    if _should_run_lead_leak():
+        logger.info("Running Lead Leak Detection...")
+        results["processed"] += 1
+        try:
+            LeadLeakDetection(clients, db, dry_run).run()
+            results["succeeded"] += 1
+            if not dry_run:
+                _mark_lead_leak_ran()
+        except Exception as e:
+            results["failed"] += 1
+            logger.error("Lead leak detection failed: %s", e)
+    else:
+        logger.info("Skipping Lead Leak Detection (ran within the last 24 hours)")
 
     time.sleep(0.5)
 
@@ -240,7 +260,7 @@ def run_scheduled(clients, db, dry_run: bool) -> dict:
 
 def run_pending(clients, db, dry_run: bool) -> dict:
     results = {"processed": 0, "succeeded": 0, "failed": 0}
-    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     rows = db.execute(
         """
@@ -264,7 +284,7 @@ def run_pending(clients, db, dry_run: bool) -> dict:
             _dispatch_pending(clients, db, action_name, context, dry_run)
 
             executed_at = datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%S"
+                "%Y-%m-%dT%H:%M:%SZ"
             )
             with db:
                 db.execute(
@@ -416,7 +436,7 @@ def main() -> None:
     mode_label = "+".join(active_modes) if active_modes else "none"
 
     start_time = time.monotonic()
-    start_dt = datetime.datetime.now()
+    start_dt = datetime.datetime.now(datetime.timezone.utc)
     logger.info(
         "=== Run started at %s | mode=%s | dry_run=%s ===",
         start_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -474,7 +494,7 @@ def main() -> None:
     finally:
         db.close()
 
-    end_dt = datetime.datetime.now()
+    end_dt = datetime.datetime.now(datetime.timezone.utc)
     duration_s = time.monotonic() - start_time
 
     logger.info(

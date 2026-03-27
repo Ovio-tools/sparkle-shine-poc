@@ -249,11 +249,18 @@ class PaymentReceived(BaseAutomation):
         if not any(seg in base for seg in ("/v1", "/v2")):
             base = f"{base}/v1"
 
+        try:
+            deal_id = int(ctx["pipedrive_deal_id"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Invalid Pipedrive deal ID: {ctx['pipedrive_deal_id']!r}"
+            ) from exc
+
         body = {
             "subject":  subject,
             "type":     "task",
             "note":     note,
-            "deal_id":  int(ctx["pipedrive_deal_id"]),
+            "deal_id":  deal_id,
             "done":     1,
         }
         resp = session.post(f"{base}/activities", json=body, timeout=15)
@@ -277,7 +284,7 @@ class PaymentReceived(BaseAutomation):
         Raises MappingNotFoundError if no HubSpot contact is mapped.
         """
         if self.dry_run:
-            estimated_remaining = max(0.0, 0.0 - ctx["amount"])
+            estimated_remaining = max(0.0, ctx.get("hs_outstanding", 0.0) - ctx["amount"])
             print(
                 f"[DRY RUN] Would PATCH HubSpot contact "
                 f"{ctx['hs_contact_id'] or 'unknown'}: "
@@ -293,32 +300,39 @@ class PaymentReceived(BaseAutomation):
             )
 
         from hubspot.crm.contacts import SimplePublicObjectInput
+        from automations.utils.hubspot_write_lock import contact_write_lock
 
         hs_client  = self.clients("hubspot")
         contact_id = ctx["hs_contact_id"]
 
-        # Read current financial properties
-        contact = hs_client.crm.contacts.basic_api.get_by_id(
-            contact_id,
-            properties=["total_payments_received", "outstanding_balance"],
-        )
-        props = contact.properties or {}
-        current_payments    = int(props.get("total_payments_received") or 0)
-        current_outstanding = float(props.get("outstanding_balance") or 0.0)
+        # Read-modify-write counter properties under a per-contact lock.
+        # HubSpot has no atomic increment: without serialization, two concurrent
+        # runner invocations processing events for the same contact would both
+        # read the same counter value before either writes, silently dropping
+        # one increment. The file lock ensures only one process at a time
+        # executes this block for a given contact.
+        with contact_write_lock(contact_id):
+            contact = hs_client.crm.contacts.basic_api.get_by_id(
+                contact_id,
+                properties=["total_payments_received", "outstanding_balance"],
+            )
+            props = contact.properties or {}
+            current_payments    = int(props.get("total_payments_received") or 0)
+            current_outstanding = float(props.get("outstanding_balance") or 0.0)
 
-        new_payments    = current_payments + 1
-        new_outstanding = max(0.0, current_outstanding - ctx["amount"])
+            new_payments    = current_payments + 1
+            new_outstanding = max(0.0, current_outstanding - ctx["amount"])
 
-        hs_client.crm.contacts.basic_api.update(
-            contact_id,
-            SimplePublicObjectInput(
-                properties={
-                    "last_payment_date":        ctx["payment_date"].isoformat(),
-                    "total_payments_received":  str(new_payments),
-                    "outstanding_balance":      str(round(new_outstanding, 2)),
-                }
-            ),
-        )
+            hs_client.crm.contacts.basic_api.update(
+                contact_id,
+                SimplePublicObjectInput(
+                    properties={
+                        "last_payment_date":        ctx["payment_date"].isoformat(),
+                        "total_payments_received":  str(new_payments),
+                        "outstanding_balance":      str(round(new_outstanding, 2)),
+                    }
+                ),
+            )
         return new_outstanding
 
     # ── Action 3: Slack notification ──────────────────────────────────────────

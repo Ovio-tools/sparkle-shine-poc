@@ -80,7 +80,17 @@ def register_mapping(
             )
 
     parts = canonical_id.split("-")
-    entity_type = parts[1] if len(parts) >= 3 else "UNKNOWN"
+    if len(parts) >= 3:
+        entity_type = parts[1]
+    else:
+        import warnings
+        warnings.warn(
+            f"register_mapping: canonical_id '{canonical_id}' does not match "
+            f"SS-TYPE-NNNN format; entity_type will be stored as 'UNKNOWN'. "
+            f"This mapping may not be discoverable by entity-type queries.",
+            stacklevel=2,
+        )
+        entity_type = "UNKNOWN"
 
     with db:
         db.execute(

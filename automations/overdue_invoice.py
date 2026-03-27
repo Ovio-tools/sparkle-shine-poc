@@ -67,19 +67,66 @@ def _parse_date(raw: str) -> Optional[date]:
         return None
 
 
+def _us_federal_holidays(year: int) -> frozenset:
+    """
+    Return observed US federal holiday dates for *year*.
+    Fixed-date holidays shift: Saturday -> prior Friday, Sunday -> next Monday.
+    """
+    def nth_weekday(n: int, weekday: int, month: int) -> date:
+        """nth occurrence (1-based) of weekday (0=Mon…6=Sun) in month."""
+        first = date(year, month, 1)
+        first_hit = first + timedelta(days=(weekday - first.weekday()) % 7)
+        return first_hit + timedelta(weeks=n - 1)
+
+    def last_weekday(weekday: int, month: int) -> date:
+        """Last occurrence of weekday (0=Mon…6=Sun) in month."""
+        if month == 12:
+            last = date(year, 12, 31)
+        else:
+            last = date(year, month + 1, 1) - timedelta(days=1)
+        return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+    def observe(d: date) -> date:
+        if d.weekday() == 5:   # Saturday -> Friday
+            return d - timedelta(days=1)
+        if d.weekday() == 6:   # Sunday -> Monday
+            return d + timedelta(days=1)
+        return d
+
+    return frozenset({
+        observe(date(year,  1,  1)),    # New Year's Day
+        nth_weekday(3, 0,  1),          # MLK Day          (3rd Mon of Jan)
+        nth_weekday(3, 0,  2),          # Presidents' Day  (3rd Mon of Feb)
+        last_weekday(0,    5),          # Memorial Day     (last Mon of May)
+        observe(date(year,  6, 19)),    # Juneteenth
+        observe(date(year,  7,  4)),    # Independence Day
+        nth_weekday(1, 0,  9),          # Labor Day        (1st Mon of Sep)
+        nth_weekday(2, 0, 10),          # Columbus Day     (2nd Mon of Oct)
+        observe(date(year, 11, 11)),    # Veterans Day
+        nth_weekday(4, 3, 11),          # Thanksgiving     (4th Thu of Nov)
+        observe(date(year, 12, 25)),    # Christmas Day
+    })
+
+
 def _add_business_days(start: date, days: int) -> date:
-    """Return start + N business days (skips Saturday and Sunday)."""
+    """Return start + N business days (skips weekends and US federal holidays)."""
+    _holidays: dict = {}
     current = start
     added   = 0
     while added < days:
         current += timedelta(days=1)
-        if current.weekday() < 5:  # 0 = Monday, 4 = Friday
+        yr = current.year
+        if yr not in _holidays:
+            _holidays[yr] = _us_federal_holidays(yr)
+        if current.weekday() < 5 and current not in _holidays[yr]:
             added += 1
     return current
 
 
 def _tier(days_past_due: int) -> int:
-    """Map days past due to a tier number (1–4)."""
+    """Map days past due to a tier number (1–4). -1 means due date is unknown."""
+    if days_past_due < 0:
+        return 1   # unknown due date — flag for review
     if days_past_due <= 30:
         return 1
     elif days_past_due <= 60:
@@ -258,18 +305,30 @@ class OverdueInvoiceEscalation(BaseAutomation):
 
         headers  = get_quickbooks_headers()
         base_url = get_base_url()
-        query    = (
-            f"SELECT * FROM Invoice WHERE Balance > '0' "
-            f"AND DueDate < '{today}' MAXRESULTS 1000"
-        )
-        resp = _requests.get(
-            f"{base_url}/query",
-            headers=headers,
-            params={"query": query, "minorversion": "65"},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return resp.json().get("QueryResponse", {}).get("Invoice") or []
+
+        all_invoices: list = []
+        start     = 1
+        page_size = 1000
+        while True:
+            query = (
+                f"SELECT * FROM Invoice WHERE Balance > '0' "
+                f"AND DueDate < '{today}' "
+                f"STARTPOSITION {start} MAXRESULTS {page_size}"
+            )
+            resp = _requests.get(
+                f"{base_url}/query",
+                headers=headers,
+                params={"query": query, "minorversion": "65"},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            page = resp.json().get("QueryResponse", {}).get("Invoice") or []
+            all_invoices.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+
+        return all_invoices
 
     # ── Invoice enrichment ─────────────────────────────────────────────────────
 
@@ -284,7 +343,7 @@ class OverdueInvoiceEscalation(BaseAutomation):
         inv_id          = str(inv.get("Id") or "")
         balance         = float(inv.get("Balance") or 0)
         due_date        = _parse_date(inv.get("DueDate") or "")
-        days_past_due   = (today - due_date).days if due_date else 0
+        days_past_due   = (today - due_date).days if due_date else -1
 
         # Canonical ID from QBO customer ID
         canonical_id: Optional[str] = None
@@ -310,17 +369,18 @@ class OverdueInvoiceEscalation(BaseAutomation):
                 client_name = f"{fn} {ln}".strip() or client_name
 
         return {
-            "inv_id":          inv_id,
-            "doc_number":      doc_number,
-            "balance":         balance,
-            "due_date":        due_date,
-            "days_past_due":   days_past_due,
-            "tier":            _tier(days_past_due),
-            "qbo_customer_id": qbo_customer_id,
-            "canonical_id":    canonical_id,
-            "client_name":     client_name,
-            "email":           email,
-            "phone":           phone,
+            "inv_id":           inv_id,
+            "doc_number":       doc_number,
+            "balance":          balance,
+            "due_date":         due_date,
+            "days_past_due":    days_past_due,
+            "due_date_missing": due_date is None,
+            "tier":             _tier(days_past_due),
+            "qbo_customer_id":  qbo_customer_id,
+            "canonical_id":     canonical_id,
+            "client_name":      client_name,
+            "email":            email,
+            "phone":            phone,
         }
 
     # ── Asana task creation ────────────────────────────────────────────────────
@@ -338,10 +398,11 @@ class OverdueInvoiceEscalation(BaseAutomation):
         assignee = (
             _BOOKKEEPER_EMAIL if record["tier"] == 2 else _OFFICE_MANAGER_EMAIL
         )
-        due_date = _add_business_days(date.today(), 3).isoformat()
+        business_days = 1 if record["tier"] == 4 else 3
+        due_date = _add_business_days(date.today(), business_days).isoformat()
 
         title = (
-            f"Overdue invoice: {record['client_name']} - "
+            f"Overdue invoice #{record['doc_number']}: {record['client_name']} - "
             f"{_fmt_amount(record['balance'])} - "
             f"{record['days_past_due']} days past due"
         )

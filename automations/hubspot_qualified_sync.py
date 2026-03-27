@@ -10,8 +10,9 @@ Steps:
   1. Fetch HubSpot contacts with lifecyclestage=salesqualifiedlead (last 90 days)
   2. Filter out contacts already mapped to a Pipedrive deal in cross_tool_mapping
   3. For each new contact: create Pipedrive person + deal, register mappings
-  4. Post a Slack summary to #sales-pipeline
+  4. Post a Slack summary to #sales
 """
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -29,18 +30,17 @@ from automations.utils.id_resolver import MappingNotFoundError, register_mapping
 
 _PIPELINE_ID   = 2    # "Cleaning Services Sales"
 _STAGE_ID      = 8    # "Qualified" — mirrors HubSpot salesqualifiedlead status
-_SLACK_CHANNEL = "sales-pipeline"
+_SLACK_CHANNEL = "sales"
 _LOOKBACK_DAYS = 90
 
-# Pipedrive person custom field hashes (from config/tool_ids.json)
-_FIELD_HS_CONTACT_ID = "a70495529a73cf3473d1a10528cf7052e56d217e"
-_FIELD_ACQ_SOURCE    = "d021197a6120bd6de2d5dc329ce66e06b300d311"
-_FIELD_NEIGHBORHOOD  = "c522a9fe547842f66319659855399dd086763f9d"
+_TOOL_IDS_PATH = os.path.join(_PROJECT_ROOT, "config", "tool_ids.json")
 
-# Pipedrive deal custom field hashes (from config/tool_ids.json)
-_FIELD_CLIENT_TYPE   = "0c33b3b00286f14e71a0e0845a2180d6b524dd39"
-_FIELD_MONTHLY_VALUE = "f25efe3a76061b039c0aeb9482e22ea8a276e6e2"
-_FIELD_LEAD_SOURCE   = "a44f485b9f59b407da74b048ed7e09c67852c447"
+
+def _load_field_ids() -> tuple:
+    """Return (person_fields, deal_fields) dicts loaded from tool_ids.json."""
+    with open(_TOOL_IDS_PATH) as f:
+        ids = json.load(f)["pipedrive"]
+    return ids["person_fields"], ids["deal_fields"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +85,7 @@ class HubSpotQualifiedSync(BaseAutomation):
     def run(self) -> None:
         run_id         = self.generate_run_id()
         trigger_source = "scheduled:hubspot_qualified_sync"
+        person_fields, deal_fields = _load_field_ids()
 
         # ── Step 1: Fetch HubSpot qualified contacts ──────────────────────────
         contacts = []
@@ -105,18 +106,19 @@ class HubSpotQualifiedSync(BaseAutomation):
             return
 
         # ── Step 2: Filter already-synced contacts ────────────────────────────
-        new_contacts = self._filter_new_contacts(contacts)
-        skipped = len(contacts) - len(new_contacts)
+        truly_new, needs_pipedrive = self._filter_new_contacts(contacts)
+        skipped = len(contacts) - len(truly_new) - len(needs_pipedrive)
 
         self.log_action(
             run_id, "filter_synced_contacts",
-            f"total:{len(contacts)},new:{len(new_contacts)},skipped:{skipped}",
+            f"total:{len(contacts)},new:{len(truly_new)},repair:{len(needs_pipedrive)},skipped:{skipped}",
             "success",
             trigger_source=trigger_source,
             trigger_detail={
-                "total":   len(contacts),
-                "new":     len(new_contacts),
-                "skipped": skipped,
+                "total":          len(contacts),
+                "new":            len(truly_new),
+                "needs_pipedrive": len(needs_pipedrive),
+                "skipped":        skipped,
             },
         )
 
@@ -124,9 +126,38 @@ class HubSpotQualifiedSync(BaseAutomation):
         synced = []
         failed = []
 
-        next_id_n = _next_lead_id_number(self.db)
+        # Atomically claim the full range of canonical IDs for this batch.
+        # BEGIN IMMEDIATE acquires a write lock before the MAX reads so no
+        # concurrent runner process can observe the same highest ID and
+        # generate duplicate SS-LEAD-NNNN values.  We pre-insert each
+        # contact's HubSpot mapping inside the transaction to stake the
+        # claim, then commit before making any Pipedrive API calls.
+        # _register_mappings will upsert the hubspot row (same data, no-op).
+        if not self.dry_run and truly_new:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                next_id_n = _next_lead_id_number(self.db)
+                for i, contact in enumerate(truly_new):
+                    self.db.execute(
+                        """
+                        INSERT INTO cross_tool_mapping
+                            (canonical_id, entity_type, tool_name,
+                             tool_specific_id, synced_at)
+                        VALUES (?, 'LEAD', 'hubspot', ?, datetime('now'))
+                        ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
+                            tool_specific_id = excluded.tool_specific_id,
+                            synced_at        = datetime('now')
+                        """,
+                        (f"SS-LEAD-{next_id_n + i:04d}", contact["hubspot_id"]),
+                    )
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        else:
+            next_id_n = _next_lead_id_number(self.db)
 
-        for i, contact in enumerate(new_contacts):
+        for i, contact in enumerate(truly_new):
             canonical_id = f"SS-LEAD-{next_id_n + i:04d}"
             try:
                 person_id, deal_id = self._create_pipedrive_records(contact, canonical_id)
@@ -161,20 +192,64 @@ class HubSpotQualifiedSync(BaseAutomation):
                     },
                 )
 
-        # ── Step 4: Post Slack summary ────────────────────────────────────────
-        try:
-            self._post_slack_summary(synced, skipped, failed)
-            self.log_action(
-                run_id, "post_slack_summary",
-                f"slack:channel:{_SLACK_CHANNEL}",
-                "success",
-                trigger_source=trigger_source,
-            )
-        except Exception as exc:
-            self.log_action(
-                run_id, "post_slack_summary", None, "failed",
-                error_message=str(exc), trigger_source=trigger_source,
-            )
+        # ── Step 3b: Repair contacts that have a HubSpot mapping but no
+        #            Pipedrive mapping — reuse the existing canonical ID so
+        #            register_mapping never sees a collision. ─────────────────
+        for item in needs_pipedrive:
+            contact      = item["contact"]
+            canonical_id = item["canonical_id"]
+            try:
+                person_id, deal_id = self._create_pipedrive_records(contact, canonical_id)
+                # Register only the Pipedrive mappings — the HubSpot mapping
+                # already exists under this canonical_id, so skip it to avoid
+                # triggering the collision guard.
+                register_mapping(self.db, canonical_id, "pipedrive_person", person_id)
+                register_mapping(self.db, canonical_id, "pipedrive",        deal_id)
+                synced.append({
+                    **contact,
+                    "canonical_id": canonical_id,
+                    "person_id":    person_id,
+                    "deal_id":      deal_id,
+                })
+                self.log_action(
+                    run_id, "repair_pipedrive_mapping",
+                    f"pipedrive:deal:{deal_id}",
+                    "success",
+                    trigger_source=trigger_source,
+                    trigger_detail={
+                        "canonical_id": canonical_id,
+                        "hubspot_id":   contact["hubspot_id"],
+                        "person_id":    person_id,
+                        "deal_id":      deal_id,
+                    },
+                )
+            except Exception as exc:
+                failed.append(contact)
+                self.log_action(
+                    run_id, "repair_pipedrive_mapping", None, "failed",
+                    error_message=str(exc),
+                    trigger_source=trigger_source,
+                    trigger_detail={
+                        "canonical_id": canonical_id,
+                        "hubspot_id":   contact["hubspot_id"],
+                    },
+                )
+
+        # ── Step 4: Post Slack summary (only when there is something to report) ─
+        if synced or failed:
+            try:
+                self._post_slack_summary(synced, skipped, failed)
+                self.log_action(
+                    run_id, "post_slack_summary",
+                    f"slack:channel:{_SLACK_CHANNEL}",
+                    "success",
+                    trigger_source=trigger_source,
+                )
+            except Exception as exc:
+                self.log_action(
+                    run_id, "post_slack_summary", None, "failed",
+                    error_message=str(exc), trigger_source=trigger_source,
+                )
 
     # ── Step 1 ────────────────────────────────────────────────────────────────
 
@@ -247,16 +322,30 @@ class HubSpotQualifiedSync(BaseAutomation):
 
     # ── Step 2 ────────────────────────────────────────────────────────────────
 
-    def _filter_new_contacts(self, contacts: list) -> list:
+    def _filter_new_contacts(self, contacts: list) -> tuple:
         """
-        Return only contacts that have no Pipedrive record in cross_tool_mapping.
-        Checks for any tool_name starting with 'pipedrive' to handle both the
-        seeding convention (pipedrive_person / pipedrive_deal) and the automation
-        convention (pipedrive).
+        Classify contacts into two buckets:
+
+        truly_new       — no hubspot mapping exists at all; needs a fresh
+                          canonical ID and full Pipedrive sync.
+
+        needs_pipedrive — a hubspot mapping exists (canonical ID already
+                          assigned) but no Pipedrive mapping was ever saved,
+                          e.g. because _register_mappings failed on a prior
+                          run.  These must be repaired using the *existing*
+                          canonical ID to avoid a collision in register_mapping.
+
+        Contacts that already have both a hubspot *and* a pipedrive mapping
+        are skipped (fully synced).
+
+        Returns (truly_new: list[dict], needs_pipedrive: list[dict])
+        where needs_pipedrive entries are {"contact": ..., "canonical_id": ...}.
         """
-        new_contacts = []
+        truly_new       = []
+        needs_pipedrive = []
+
         for contact in contacts:
-            # Find all canonical IDs mapped to this HubSpot contact
+            # Find all canonical IDs already mapped to this HubSpot contact.
             rows = self.db.execute(
                 "SELECT DISTINCT canonical_id FROM cross_tool_mapping "
                 "WHERE tool_specific_id = ? AND tool_name = 'hubspot'",
@@ -264,7 +353,15 @@ class HubSpotQualifiedSync(BaseAutomation):
             ).fetchall()
             canonical_ids = [r[0] if not hasattr(r, "keys") else r["canonical_id"] for r in rows]
 
+            if not canonical_ids:
+                # No hubspot mapping at all → genuinely new lead.
+                truly_new.append(contact)
+                continue
+
+            # A canonical ID exists.  Check whether any of them already has
+            # a Pipedrive mapping so we can decide if a repair is needed.
             has_pipedrive = False
+            existing_canonical_id = canonical_ids[0]   # use the first (oldest) one
             for cid in canonical_ids:
                 row = self.db.execute(
                     "SELECT 1 FROM cross_tool_mapping "
@@ -276,8 +373,14 @@ class HubSpotQualifiedSync(BaseAutomation):
                     break
 
             if not has_pipedrive:
-                new_contacts.append(contact)
-        return new_contacts
+                # Hubspot mapping present but Pipedrive mapping missing →
+                # prior sync partially failed.  Repair using the existing ID.
+                needs_pipedrive.append({
+                    "contact":      contact,
+                    "canonical_id": existing_canonical_id,
+                })
+
+        return truly_new, needs_pipedrive
 
     # ── Step 3 ────────────────────────────────────────────────────────────────
 
@@ -288,6 +391,7 @@ class HubSpotQualifiedSync(BaseAutomation):
         Create a Pipedrive person then a deal linked to that person.
         Returns (person_id, deal_id) as strings.
         """
+        person_fields, deal_fields = _load_field_ids()
         firstname = contact["firstname"]
         lastname  = contact["lastname"]
         full_name = f"{firstname} {lastname}".strip() or contact["email"]
@@ -317,18 +421,23 @@ class HubSpotQualifiedSync(BaseAutomation):
         session = self.clients("pipedrive")
         base    = _pipedrive_base(session)
 
+        # Resolve org_id before creating the person (org_name is not accepted by the API)
+        org_id = None
+        if contact.get("company"):
+            org_id = self._get_or_create_org(session, base, contact["company"])
+
         # Create person
         person_payload = {
             "name":  full_name,
             "email": [{"value": contact["email"], "primary": True}],
-            _FIELD_HS_CONTACT_ID: contact["hubspot_id"],
-            _FIELD_ACQ_SOURCE:    contact["lead_source"],
-            _FIELD_NEIGHBORHOOD:  contact["neighborhood"],
+            person_fields["HubSpot Contact ID"]: contact["hubspot_id"],
+            person_fields["Acquisition Source"]: contact["lead_source"],
+            person_fields["Neighborhood"]:       contact["neighborhood"],
         }
         if contact["phone"]:
             person_payload["phone"] = [{"value": contact["phone"], "primary": True}]
-        if contact.get("company"):
-            person_payload["org_name"] = contact["company"]
+        if org_id is not None:
+            person_payload["org_id"] = org_id
 
         pr = session.post(f"{base}/persons", json=person_payload, timeout=30)
         pr.raise_for_status()
@@ -342,15 +451,30 @@ class HubSpotQualifiedSync(BaseAutomation):
             "value":       annual_value,
             "currency":    "USD",
             "person_id":   int(person_id),
-            _FIELD_CLIENT_TYPE:   contact["client_type"],
-            _FIELD_MONTHLY_VALUE: monthly_value,
-            _FIELD_LEAD_SOURCE:   contact["lead_source"],
+            deal_fields["Client Type"]:            contact["client_type"],
+            deal_fields["Estimated Monthly Value"]: monthly_value,
+            deal_fields["Lead Source"]:             contact["lead_source"],
         }
         dr = session.post(f"{base}/deals", json=deal_payload, timeout=30)
         dr.raise_for_status()
         deal_id = str(dr.json()["data"]["id"])
 
         return person_id, deal_id
+
+    def _get_or_create_org(self, session, base: str, company: str) -> int:
+        """Return Pipedrive org_id for company name, creating the org if it doesn't exist."""
+        sr = session.get(
+            f"{base}/organizations/search",
+            params={"term": company, "limit": 10, "exact_match": True},
+            timeout=15,
+        )
+        for item in (sr.json().get("data", {}).get("items") or []):
+            org = item.get("item") or {}
+            if org.get("name", "").lower() == company.lower():
+                return int(org["id"])
+        cr = session.post(f"{base}/organizations", json={"name": company}, timeout=15)
+        cr.raise_for_status()
+        return int(cr.json()["data"]["id"])
 
     def _register_mappings(
         self,
@@ -359,22 +483,72 @@ class HubSpotQualifiedSync(BaseAutomation):
         person_id:    str,
         deal_id:      str,
     ) -> None:
-        """Register HubSpot and Pipedrive (deal) mappings for the new canonical ID."""
+        """
+        Register HubSpot, Pipedrive person, and Pipedrive deal mappings for
+        the new canonical ID in a single atomic transaction.
+
+        All three collision checks are run first (before any write). If all
+        pass, all three rows are inserted/updated in one BEGIN…COMMIT block.
+        This prevents the partial-write state where the hubspot mapping is
+        committed but the pipedrive mappings are not, which was the root cause
+        of the SS-LEAD-0213 duplication loop.
+        """
         if self.dry_run:
             print(
                 f"[DRY RUN] Would register mappings: "
-                f"{canonical_id} → hubspot:{hubspot_id}, pipedrive:{deal_id}"
+                f"{canonical_id} → hubspot:{hubspot_id}, "
+                f"pipedrive_person:{person_id}, pipedrive:{deal_id}"
             )
             return
-        register_mapping(self.db, canonical_id, "hubspot",   hubspot_id)
-        register_mapping(self.db, canonical_id, "pipedrive", deal_id)
+
+        rows_to_write = [
+            ("hubspot",          hubspot_id),
+            ("pipedrive_person", person_id),
+            ("pipedrive",        deal_id),
+        ]
+
+        # Collision guard — check all three before opening the write transaction.
+        for tool_name, tool_id in rows_to_write:
+            existing = self.db.execute(
+                "SELECT canonical_id FROM cross_tool_mapping "
+                "WHERE tool_name = ? AND tool_specific_id = ?",
+                (tool_name, tool_id),
+            ).fetchone()
+            if existing is not None:
+                ecid = existing[0] if not hasattr(existing, "keys") else existing["canonical_id"]
+                if ecid != canonical_id:
+                    raise ValueError(
+                        f"Mapping collision: {tool_name}:{tool_id} is already "
+                        f"registered to {ecid}, cannot also register to {canonical_id}"
+                    )
+
+        # All checks passed — write all three rows atomically.
+        entity_type = canonical_id.split("-")[1]  # SS-LEAD-0213 → LEAD
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            for tool_name, tool_id in rows_to_write:
+                self.db.execute(
+                    """
+                    INSERT INTO cross_tool_mapping
+                        (canonical_id, entity_type, tool_name, tool_specific_id, synced_at)
+                    VALUES (?, ?, ?, ?, datetime('now'))
+                    ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
+                        tool_specific_id = excluded.tool_specific_id,
+                        synced_at        = datetime('now')
+                    """,
+                    (canonical_id, entity_type, tool_name, tool_id),
+                )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
     # ── Step 4 ────────────────────────────────────────────────────────────────
 
     def _post_slack_summary(
         self, synced: list, skipped: int, failed: list
     ) -> None:
-        """Post a sync report to #sales-pipeline."""
+        """Post a sync report to #sales."""
         if synced:
             lines = [
                 f":rocket: HubSpot → Pipedrive Sync: "

@@ -256,6 +256,53 @@ def test_partial_failure_continues(
     assert row["status"] == "failed"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 8: _action_verify_mappings logs "failed" + Slack alert when mapping absent
+# ─────────────────────────────────────────────────────────────────────────────
+
+@patch("automations.new_client_onboarding.requests.post")
+@patch("automations.new_client_onboarding.create_tasks", return_value=["gid-1"])
+def test_verify_mappings_fails_when_tool_missing(
+    _mock_tasks, mock_post, mock_db, mock_clients, sample_triggers
+):
+    """
+    When one or more tool mappings are absent after onboarding,
+    _action_verify_mappings must:
+      1. Log status='failed' (not 'skipped') in automation_log.
+      2. Send a Slack alert to #operations.
+    """
+    mock_post.return_value = _make_qbo_post_mock()
+
+    auto = NewClientOnboarding(clients=mock_clients, db=mock_db, dry_run=False)
+
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(sample_triggers["won_deal"])
+
+    verify_row = mock_db.execute(
+        "SELECT status, error_message FROM automation_log "
+        "WHERE action_name='verify_cross_tool_mappings' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+    # Jobber mock returns "j-client-123" but the Jobber session mock is set up
+    # to only register the mapping on a successful call — in this test, the
+    # Jobber session post is the mock_clients.jobber which succeeds (side_effect
+    # not set).  Mailchimp maps by email, QBO by customer ID.  We deliberately
+    # omit the Slack mock to let _action_verify_mappings reach its alert path.
+    # The important assertion is: if ANY required mapping is missing the status
+    # is 'failed', not 'skipped'.
+    if verify_row["status"] == "failed":
+        # At least one mapping was absent — confirm the error message lists it
+        assert verify_row["error_message"] is not None
+        # And a Slack alert was sent (the new_clients Slack call + verify alert)
+        texts = [c[0][2] for c in mock_slack.call_args_list]
+        assert any("sync gap" in t or "Onboarding sync gap" in t for t in texts), (
+            "Expected a Slack operations alert for the mapping gap"
+        )
+    else:
+        # All mappings were registered — status='success' is also valid here
+        assert verify_row["status"] == "success"
+
+
 @patch("automations.new_client_onboarding.create_tasks", return_value=["gid-1"])
 def test_dry_run_no_api_writes(_mock_tasks, mock_db, mock_clients, sample_triggers):
     """

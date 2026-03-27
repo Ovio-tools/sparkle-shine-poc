@@ -130,7 +130,7 @@ class BaseAutomation:
         """
         execute_after = (
             datetime.now(timezone.utc) + timedelta(hours=delay_hours)
-        ).strftime("%Y-%m-%dT%H:%M:%S")
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         automation_name = self.__class__.__name__
         context_str = json.dumps(trigger_context_dict)

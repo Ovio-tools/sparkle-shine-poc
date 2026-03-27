@@ -73,7 +73,7 @@ def get_hubspot_client() -> hubspot.HubSpot:
     """Return a configured HubSpot client."""
     token = get_credential("HUBSPOT_ACCESS_TOKEN")
 
-    client = hubspot.HubSpot(access_token=token)
+    client = hubspot.HubSpot(access_token=token, timeout=30)
 
     try:
         client.crm.owners.owners_api.get_page(limit=1)

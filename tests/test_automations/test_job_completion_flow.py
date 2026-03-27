@@ -212,3 +212,42 @@ def test_duration_variance_not_flagged_within_20_percent(
     assert not any("Duration variance" in t for t in captured_texts), (
         "Did not expect a duration-variance warning for 8.3% deviation"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 7: unknown Jobber client logs a resolve_canonical_id/failed entry
+# ─────────────────────────────────────────────────────────────────────────────
+
+@patch("automations.job_completion_flow.requests.post")
+def test_unknown_jobber_client_logs_warning(mock_post, mock_db, mock_clients):
+    """
+    When the Jobber client_id has no cross_tool_mapping entry, run() must log
+    a 'resolve_canonical_id' / 'failed' row so operators can identify the root
+    cause of all downstream action failures.
+    """
+    mock_post.return_value = _make_qbo_invoice_mock()
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+
+    unmapped_trigger = {
+        "job_id":           "999",
+        "client_id":        "UNMAPPED-999",   # not in cross_tool_mapping
+        "service_type":     "Standard Residential Clean",
+        "duration_minutes": 120,
+        "crew":             "Crew A",
+        "completion_notes": "",
+        "is_recurring":     False,
+        "completed_at":     "2026-03-25",
+    }
+
+    with patch("automations.base.post_slack_message"):
+        auto.run(unmapped_trigger)
+
+    row = mock_db.execute(
+        "SELECT status, error_message FROM automation_log "
+        "WHERE action_name = 'resolve_canonical_id'"
+    ).fetchone()
+
+    assert row is not None, "Expected a resolve_canonical_id log entry"
+    assert row["status"] == "failed"
+    assert "UNMAPPED-999" in (row["error_message"] or "")

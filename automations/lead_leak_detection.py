@@ -12,7 +12,7 @@ Steps:
      it is more than 48 hours old.
   3. Create Asana follow-up tasks in "Sales Pipeline Tasks → Follow-Up"
      using deduplicate_by_title=True to prevent repeat tasks on consecutive runs.
-  4. Post a summary to #sales-pipeline.
+  4. Post a summary to #sales.
 """
 import json
 import os
@@ -98,6 +98,14 @@ class LeadLeakDetection(BaseAutomation):
         run_id         = self.generate_run_id()
         trigger_source = "scheduled:lead_leak_detection"
 
+        # Validate that the HubSpot property used for lead source attribution exists
+        _configured_props = _load_tool_ids().get("hubspot", {}).get("contact_properties", [])
+        if "lead_source_detail" not in _configured_props:
+            print(
+                "[WARN] 'lead_source_detail' not found in tool_ids hubspot.contact_properties "
+                "— lead source attribution may be empty"
+            )
+
         # ── Step 1: Pull HubSpot leads ────────────────────────────────────────
         leads = []
         try:
@@ -172,7 +180,7 @@ class LeadLeakDetection(BaseAutomation):
         POST /crm/v3/objects/contacts/search
         Filters: lifecyclestage IN (lead, MQL) AND createdate > today-90d.
         Returns list of dicts: hubspot_id, email, firstname, lastname,
-        lead_source, createdate (raw string).
+        lead_source (read from lead_source_detail), createdate (raw string).
         """
         from hubspot.crm.contacts import PublicObjectSearchRequest
 
@@ -198,7 +206,7 @@ class LeadLeakDetection(BaseAutomation):
                     ]
                 }
             ],
-            properties=["email", "firstname", "lastname", "lead_source", "createdate"],
+            properties=["email", "firstname", "lastname", "lead_source_detail", "createdate"],
             limit=200,
         )
 
@@ -221,7 +229,7 @@ class LeadLeakDetection(BaseAutomation):
                 "email":       props.get("email") or "",
                 "firstname":   props.get("firstname") or "",
                 "lastname":    props.get("lastname") or "",
-                "lead_source": props.get("lead_source") or "Unknown",
+                "lead_source": props.get("lead_source_detail") or "Unknown",
                 "createdate":  props.get("createdate") or "",
             })
         return leads
@@ -391,7 +399,7 @@ class LeadLeakDetection(BaseAutomation):
     # ── Step 4 ────────────────────────────────────────────────────────────────
 
     def _post_slack_summary(self, leaked: list) -> None:
-        """Post a lead-leak report to #sales-pipeline."""
+        """Post a lead-leak report to #sales."""
         if leaked:
             lines = [
                 f":mag: Lead Leak Report: {len(leaked)} lead{'s' if len(leaked) != 1 else ''} "

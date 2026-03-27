@@ -8,10 +8,13 @@ Each function:
   3. Updates poll_state before returning.
   4. Returns a list of event dicts for the caller to act on.
 """
+import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+import requests
 
 from automations.state import get_last_poll, update_last_poll
 
@@ -19,6 +22,16 @@ from automations.state import get_last_poll, update_last_poll
 _JOBBER_GRAPHQL_URL = os.getenv(
     "JOBBER_BASE_URL", "https://api.getjobber.com/api/graphql"
 )
+
+_TOOL_IDS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "config", "tool_ids.json"
+)
+
+
+def _load_pipedrive_deal_fields() -> dict:
+    with open(_TOOL_IDS_PATH) as f:
+        return json.load(f)["pipedrive"]["deal_fields"]
+
 
 # QuickBooks base URL helper (avoids importing quickbooks_auth at module level)
 def _qbo_base_url() -> str:
@@ -52,6 +65,7 @@ def poll_pipedrive_won_deals(clients: Any, db: sqlite3.Connection) -> list:
     state = get_last_poll(db, "pipedrive", "deal_won")
     since = state["last_processed_timestamp"] if state else _default_since()
 
+    deal_fields = _load_pipedrive_deal_fields()
     session = clients("pipedrive")
     base = session.base_url.rstrip("/")
     if not any(seg in base for seg in ("/v1", "/v2")):
@@ -74,9 +88,13 @@ def poll_pipedrive_won_deals(clients: Any, db: sqlite3.Connection) -> list:
 
         deals = data.get("data") or []
         for deal in deals:
-            # Skip deals won before our since window
-            won_time = deal.get("won_time") or deal.get("update_time", "")
-            if won_time > latest_timestamp:
+            # Skip deals won at or before our since window (inclusive boundary
+            # prevents re-processing a deal whose won_time equals the stored
+            # last_processed_timestamp on the next poll cycle).
+            won_time = deal.get("won_time") or deal.get("update_time") or ""
+            if won_time and won_time <= since:
+                continue   # skip deals already covered by the last poll
+            if won_time and won_time > latest_timestamp:
                 latest_timestamp = won_time
 
             # Resolve person details
@@ -111,8 +129,8 @@ def poll_pipedrive_won_deals(clients: Any, db: sqlite3.Connection) -> list:
                 "contact_email": contact_email,
                 "contact_phone": contact_phone,
                 "deal_value": deal.get("value") or 0.0,
-                "client_type": deal.get("0c33b3b00286f14e71a0e0845a2180d6b524dd39"),
-                "service_type": deal.get("29d12ce12832b01642ca5b6b764fed836201ae88"),
+                "client_type": deal.get(deal_fields["Client Type"]),
+                "service_type": deal.get(deal_fields["Service Type"]),
                 "service_frequency": None,  # not stored as its own field
                 "notes": deal.get("title", ""),
             })
@@ -263,7 +281,7 @@ def poll_quickbooks_payments(clients: Any, db: sqlite3.Connection) -> list:
     )
     params = {"query": query, "minorversion": "65"}
 
-    resp = __import__("requests").get(
+    resp = requests.get(
         f"{base_url}/query",
         headers=headers,
         params=params,
@@ -393,7 +411,11 @@ def poll_sheets_negative_reviews(clients: Any, db: sqlite3.Connection) -> list:
         try:
             rating = int(padded[_REVIEWS_COL["rating"]])
         except (ValueError, TypeError):
-            latest_row_index = sheet_row_index
+            print(
+                f"[WARN] Google Sheets review row {sheet_row_index} has "
+                f"unparseable rating '{padded[_REVIEWS_COL['rating']]}' — skipping."
+            )
+            latest_row_index = sheet_row_index   # keep advancing to avoid infinite retry
             continue
 
         if rating <= 2:

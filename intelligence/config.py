@@ -45,7 +45,7 @@ CREW_CAPACITY: dict = {
 }
 
 MODEL_CONFIG: dict = {
-    "briefing_model": "claude-sonnet-4-20250514",
+    "briefing_model": "claude-sonnet-4-6",
     "analysis_model": "claude-opus-4-6",    # reserved for complex pattern analysis
     "max_tokens_briefing": 2800,
     "max_tokens_analysis": 1500,

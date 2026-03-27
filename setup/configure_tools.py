@@ -679,7 +679,7 @@ def configure_quickbooks() -> dict:
 _SLACK_CHANNELS = {
     "daily-briefing":       "AI-generated morning briefing — delivered by 6 AM",
     "operations":           "Job completions, scheduling alerts, crew updates",
-    "sales-pipeline":       "New leads, deal updates, commercial proposals",
+    "sales":                "New leads, deal updates, commercial proposals",
     "new-clients":          "New client onboarding notifications",
     "reviews-and-feedback": "Customer reviews and satisfaction alerts",
 }
@@ -688,7 +688,7 @@ _SLACK_CHANNELS = {
 _SLACK_ENV_IDS = {
     "daily-briefing":  os.getenv("SLACK_CHANNEL_DAILY_BRIEFING"),
     "operations":      os.getenv("SLACK_CHANNEL_OPERATIONS"),
-    "sales-pipeline":  os.getenv("SLACK_CHANNEL_SALES"),      # closest match
+    "sales":           os.getenv("SLACK_CHANNEL_SALES"),
     "new-clients":     os.getenv("SLACK_CHANNEL_NEW_CLIENTS"),
 }
 

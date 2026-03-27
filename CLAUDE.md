@@ -21,7 +21,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 - **Language:** Python 3
 - **Database:** SQLite (`sparkle_shine.db`) -- the single source of truth for all cross-tool data
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
-- **LLM:** Anthropic API (`claude-sonnet-4-20250514` for data generation and daily briefings, `claude-opus-4-6` reserved for complex analysis)
+- **LLM:** Anthropic API (`claude-sonnet-4-6` for data generation and daily briefings, `claude-opus-4-6` reserved for complex analysis)
 - **Platform:** macOS
 
 ## Tool Stack (8 SaaS Platforms + Google Workspace)
@@ -177,7 +177,7 @@ Pre-configured `Throttler` instances are in `seeding/utils/throttler.py`. Import
 
 ## Key API Endpoints
 
-**Jobber:** GraphQL at `https://api.getjobber.com/api/graphql` with header `X-JOBBER-GRAPHQL-VERSION: 2024-01-08`
+**Jobber:** GraphQL at `https://api.getjobber.com/api/graphql` with header `X-JOBBER-GRAPHQL-VERSION: 2026-03-10`
 
 **QuickBooks Sandbox:** `https://sandbox-quickbooks.api.intuit.com/v3/company/{COMPANY_ID}`
 

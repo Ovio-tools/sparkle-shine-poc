@@ -2,7 +2,7 @@
 Slack syncer -- lightweight message-count tracker.
 
 Slack is primarily an output channel; this syncer only counts messages in
-#operations and #sales-pipeline over the last 24 hours and writes the totals
+#operations and #sales over the last 24 hours and writes the totals
 to daily_metrics_snapshot.raw_json. Message content is never stored.
 """
 import json
@@ -16,7 +16,7 @@ from intelligence.syncers.base_syncer import BaseSyncer, SyncResult
 # Channel IDs from tool_ids.json
 _CHANNELS = {
     "operations":    "C0AM76H9K34",
-    "sales-pipeline": "C0ALRNT2Z8F",
+    "sales": "C0ALRNT2Z8F",
 }
 
 
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     import os
     import sys
 
-    parser = argparse.ArgumentParser(description="Count Slack messages in #operations and #sales-pipeline")
+    parser = argparse.ArgumentParser(description="Count Slack messages in #operations and #sales")
     parser.add_argument("--dry-run", action="store_true", help="Auth check + live count preview; no DB writes")
     parser.add_argument("--since", metavar="YYYY-MM-DD", help="Count messages since this date (default: last 24h)")
     parser.add_argument("--db", default="sparkle_shine.db", help="Path to SQLite database")

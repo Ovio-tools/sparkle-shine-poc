@@ -186,6 +186,38 @@ def test_deduplication_skips_existing_task(mock_db, mock_clients):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Fix 9: invoice with no DueDate gets sentinel -1 and due_date_missing=True
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_invoice_missing_due_date_flagged(mock_db, mock_clients):
+    """
+    An invoice with no DueDate field must:
+      - Have days_past_due == -1 (sentinel for unknown)
+      - Have due_date_missing == True
+      - Be assigned tier 1 (flag for review, not silently treated as current)
+    """
+    from automations.overdue_invoice import OverdueInvoiceEscalation, _tier
+    from datetime import date
+
+    auto = OverdueInvoiceEscalation(clients=mock_clients, db=mock_db, dry_run=False)
+
+    inv_no_due_date = {
+        "Id":          "NDD-001",
+        "DocNumber":   "9901",
+        "Balance":     250.0,
+        # DueDate intentionally absent
+        "CustomerRef": {"value": "401"},  # QBO customer → SS-CLIENT-0001
+    }
+
+    record = auto._enrich_invoice(inv_no_due_date, date.today())
+
+    assert record["due_date_missing"] is True,  "Expected due_date_missing=True"
+    assert record["days_past_due"] == -1,        "Expected sentinel -1 for unknown due date"
+    assert record["tier"] == 1,                  "Expected tier=1 for unknown due date"
+    assert _tier(-1) == 1,                       "_tier(-1) must return 1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # All-clear message
 # ─────────────────────────────────────────────────────────────────────────────
 

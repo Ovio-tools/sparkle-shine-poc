@@ -60,9 +60,27 @@ def register_mapping(
     tool_specific_url: Optional[str] = None,
     db_path: str = "sparkle_shine.db",
 ) -> None:
-    """Insert or update a cross_tool_mapping row."""
+    """Insert or update a cross_tool_mapping row.
+
+    Raises ValueError if tool_specific_id is already mapped to a *different*
+    canonical_id — guards against cross-contaminated mappings before they are written.
+    """
     conn = get_connection(db_path)
     entity_type = _entity_type_from_canonical(canonical_id)
+    # Collision guard: same external ID must not point to two canonical entities.
+    existing = conn.execute(
+        "SELECT canonical_id FROM cross_tool_mapping "
+        "WHERE tool_name = ? AND tool_specific_id = ?",
+        (tool_name, tool_specific_id),
+    ).fetchone()
+    if existing is not None:
+        existing_cid = existing["canonical_id"] if hasattr(existing, "keys") else existing[0]
+        if existing_cid != canonical_id:
+            conn.close()
+            raise ValueError(
+                f"Mapping collision: {tool_name}:{tool_specific_id} is already "
+                f"registered to {existing_cid}, cannot also register to {canonical_id}"
+            )
     with conn:
         conn.execute(
             """

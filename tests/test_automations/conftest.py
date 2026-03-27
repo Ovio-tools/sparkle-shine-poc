@@ -46,7 +46,7 @@ TEST_TOOL_IDS = {
         "channels": {
             "new-clients":    "C001",
             "operations":     "C002",
-            "sales-pipeline": "C003",
+            "sales": "C003",
         },
         "users": {"Maria Gonzalez": "U123MARIA"},
     },
@@ -294,7 +294,7 @@ class MockClients:
             "channels": [
                 {"name": "new-clients",    "id": "C001"},
                 {"name": "operations",     "id": "C002"},
-                {"name": "sales-pipeline", "id": "C003"},
+                {"name": "sales", "id": "C003"},
             ],
             "response_metadata": {"next_cursor": ""},
         }

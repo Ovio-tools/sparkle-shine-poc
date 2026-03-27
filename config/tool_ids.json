@@ -130,9 +130,9 @@
     "channels": {
       "daily-briefing": "C0AML3Q8PSM",
       "operations": "C0AM76H9K34",
-      "sales-pipeline": "C0ALRNT2Z8F",
+      "sales": "C0ALRNT2Z8F",
       "new-clients": "C0AN1EFM1A4",
-      "reviews-and-feedback": null
+      "reviews-and-feedback": "C0ANYMAEELC"
     }
   },
   "quickbooks": {

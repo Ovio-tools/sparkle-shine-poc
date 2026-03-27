@@ -347,6 +347,60 @@ CREATE_TABLES = [
     "CREATE INDEX IF NOT EXISTS idx_mktg_inter_campaign  ON marketing_interactions(campaign_id)",
     "CREATE INDEX IF NOT EXISTS idx_cross_tool_canonical ON cross_tool_mapping(canonical_id)",
     "CREATE INDEX IF NOT EXISTS idx_doc_index_doc_id     ON document_index(doc_id)",
+
+    # ------------------------------------------------------------------ #
+    # 19. poll_state — tracks last-processed state per tool per entity type
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS poll_state (
+        tool_name                TEXT NOT NULL,
+        entity_type              TEXT NOT NULL,
+        last_processed_id        TEXT,
+        last_processed_timestamp TEXT,
+        last_poll_at             TEXT NOT NULL,
+        PRIMARY KEY (tool_name, entity_type)
+    )
+    """,
+
+    # ------------------------------------------------------------------ #
+    # 20. automation_log — audit trail for every action in every automation
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS automation_log (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id          TEXT NOT NULL,
+        automation_name TEXT NOT NULL,
+        trigger_source  TEXT,
+        trigger_detail  TEXT,
+        action_name     TEXT NOT NULL,
+        action_target   TEXT,
+        status          TEXT NOT NULL CHECK(status IN ('success','failed','skipped')),
+        error_message   TEXT,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+
+    # ------------------------------------------------------------------ #
+    # 21. pending_actions — delayed / scheduled actions
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS pending_actions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        automation_name TEXT NOT NULL,
+        action_name     TEXT NOT NULL,
+        trigger_context TEXT NOT NULL,
+        execute_after   TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending','executed','failed')),
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        executed_at     TEXT
+    )
+    """,
+
+    "CREATE INDEX IF NOT EXISTS idx_automation_log_run_id   ON automation_log(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_automation_log_status   ON automation_log(status)",
+    "CREATE INDEX IF NOT EXISTS idx_pending_actions_status  ON pending_actions(status)",
+    "CREATE INDEX IF NOT EXISTS idx_pending_actions_execute ON pending_actions(execute_after)",
 ]
 
 # Table name → human label (for __main__ summary only)
@@ -356,6 +410,7 @@ _TABLE_NAMES = [
     "marketing_campaigns", "marketing_interactions", "reviews", "tasks",
     "calendar_events", "documents", "cross_tool_mapping",
     "daily_metrics_snapshot", "document_index",
+    "poll_state", "automation_log", "pending_actions",
 ]
 
 
