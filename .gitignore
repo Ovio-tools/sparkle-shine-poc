@@ -10,3 +10,4 @@ __pycache__/
 token.json
 checkpoints/
 logs/
+.worktrees/
