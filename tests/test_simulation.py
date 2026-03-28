@@ -88,5 +88,72 @@ class TestSimulationConfig(unittest.TestCase):
         self.assertAlmostEqual(total, 1.0, places=5)
 
 
+class TestVariation(unittest.TestCase):
+
+    def setUp(self):
+        # Fix RNG for deterministic tests
+        random.seed(42)
+
+    def test_get_daily_multiplier_returns_positive_float(self):
+        from simulation.variation import get_daily_multiplier
+        result = get_daily_multiplier(date(2026, 3, 27))  # Friday in March
+        self.assertIsInstance(result, float)
+        self.assertGreater(result, 0.0)
+
+    def test_get_daily_multiplier_is_deterministic_with_seed(self):
+        from simulation.variation import get_daily_multiplier
+        random.seed(99)
+        first = get_daily_multiplier(date(2026, 6, 15))
+        random.seed(99)
+        second = get_daily_multiplier(date(2026, 6, 15))
+        self.assertEqual(first, second)
+
+    def test_summer_multiplier_greater_than_winter(self):
+        from simulation.variation import get_daily_multiplier
+        # Use many samples to smooth out the noise component
+        random.seed(0)
+        summer_vals = [get_daily_multiplier(date(2026, 7, 7)) for _ in range(50)]  # Monday in July
+        random.seed(0)
+        winter_vals = [get_daily_multiplier(date(2026, 1, 5)) for _ in range(50)]  # Monday in Jan
+        self.assertGreater(sum(summer_vals) / len(summer_vals),
+                           sum(winter_vals) / len(winter_vals))
+
+    def test_get_adjusted_volume_returns_non_negative_int(self):
+        from simulation.variation import get_adjusted_volume
+        result = get_adjusted_volume(3, 8, date(2026, 3, 27))
+        self.assertIsInstance(result, int)
+        self.assertGreaterEqual(result, 0)
+
+    def test_get_adjusted_volume_respects_zero_floor(self):
+        from simulation.variation import get_adjusted_volume
+        # Even a weekend in January should not go negative
+        for _ in range(20):
+            result = get_adjusted_volume(0, 1, date(2026, 1, 4))  # Sunday Jan
+            self.assertGreaterEqual(result, 0)
+
+    def test_should_event_happen_never_for_zero_probability(self):
+        from simulation.variation import should_event_happen
+        for _ in range(100):
+            self.assertFalse(should_event_happen(0.0, date(2026, 3, 27)))
+
+    def test_should_event_happen_always_for_very_high_probability(self):
+        from simulation.variation import should_event_happen
+        # probability=10.0 adjusted by any multiplier still exceeds random() range of [0,1)
+        for _ in range(50):
+            self.assertTrue(should_event_happen(10.0, date(2026, 3, 27)))
+
+    def test_get_next_event_delay_returns_positive_number(self):
+        from simulation.variation import get_next_event_delay
+        result = get_next_event_delay(date(2026, 3, 27))
+        self.assertIsInstance(result, float)
+        self.assertGreaterEqual(result, 30.0)
+
+    def test_get_next_event_delay_minimum_is_30_seconds(self):
+        from simulation.variation import get_next_event_delay
+        for _ in range(30):
+            result = get_next_event_delay(date(2026, 1, 4))  # low-volume day
+            self.assertGreaterEqual(result, 30.0)
+
+
 if __name__ == "__main__":
     unittest.main()
