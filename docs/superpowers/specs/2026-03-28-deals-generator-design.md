@@ -67,16 +67,9 @@ Age = days in current stage, resolved via three-level fallback per deal:
 2. `commercial_proposals.stage_change_time` for matching canonical ID — populated by this generator on prior advances
 3. `deal["update_time"]` — last-resort proxy
 
-Age brackets and advance weights:
+**Selection weighting:** uniform — every open deal has equal pick probability. The advance and loss probability functions already encode age-dependent behavior; applying the same age weights here would double-count them (a deal at 10 days would get 2× pick chance AND 2× advance probability = effectively 4× the daily advance rate of a fresh deal).
 
-| Days in stage | Advance weight |
-|---|---|
-| 0–3  | 1.0x |
-| 4–7  | 1.5x |
-| 8–14 | 2.0x |
-| 15+  | 0.5x (stale) |
-
-`random.choices(deals, weights=weights, k=1)[0]` — one weighted pick per `execute()` call. Returns `None` if the API returns no open deals.
+`random.choices(deals, k=1)[0]` — one uniformly random pick per `execute()` call. Returns `None` if the API returns no open deals.
 
 ---
 
@@ -182,6 +175,7 @@ contract = {
 canonical_id = get_canonical_id("pipedrive", str(deal["id"]), self.db_path)
 ```
 
+- `canonical_id is None` → log warning `"Won deal {deal_id} has no canonical ID mapping — skipping SQLite update"` and skip SQLite write. Pipedrive custom fields and activity note are already written; the reconciler (Step 7) will catch the missing mapping later.
 - `SS-PROP-NNNN` → commercial deal → update `commercial_proposals WHERE id = canonical_id`
   - Set `status='won'`, `start_date`, `crew_assignment`
 - `SS-LEAD-NNNN` → residential deal → no SQLite write; activity note only
