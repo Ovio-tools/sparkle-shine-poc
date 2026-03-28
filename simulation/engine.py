@@ -98,6 +98,19 @@ class SimulationEngine:
         Uses conditional imports so the engine runs cleanly when generator
         modules don't exist yet. Add new generators here as they are built.
         """
+        # OperationsGenerators — simulation/generators/operations.py
+        try:
+            from simulation.generators.operations import (
+                NewClientSetupGenerator,
+                JobSchedulingGenerator,
+                JobCompletionGenerator,
+            )
+            self.register("new_client_setup", NewClientSetupGenerator(self.db_path))
+            self.register("job_scheduling",   JobSchedulingGenerator(self.db_path, queue_fn=self.queue_timed_event))
+            self.register("job_completion",   JobCompletionGenerator(self.db_path))
+        except ImportError:
+            logger.warning("OperationsGenerators not found — skipping")
+
         # ContactGenerator — simulation/generators/contacts.py
         try:
             from simulation.generators.contacts import ContactGenerator
@@ -176,8 +189,14 @@ class SimulationEngine:
             if should_event_happen(daily_com_churn, target_date):
                 plan.append(GeneratorCall("churn", {"client_type": "commercial"}))
 
+        # Operations events: placed BEFORE the shuffle (fixed order, not randomised)
+        ops_prefix = [
+            GeneratorCall("new_client_setup", {}),
+            GeneratorCall("job_scheduling", {}),
+        ]
+
         random.shuffle(plan)
-        return plan
+        return ops_prefix + plan
 
     def pick_next_generator(self, plan: list) -> "GeneratorCall | None":
         """Pop and return the next GeneratorCall from the plan.
@@ -312,6 +331,12 @@ class SimulationEngine:
         while plan and self.running:
             if not self.running:
                 break
+            # Drain any timed events whose fire_at has passed
+            now = datetime.utcnow()
+            while self._timed_queue and self._timed_queue[0].fire_at <= now:
+                timed = heapq.heappop(self._timed_queue)
+                self.dispatch(GeneratorCall(timed.generator_name, timed.kwargs))
+
             generator_call = self.pick_next_generator(plan)
             # Only sleep (and dispatch) when a generator is registered for this event.
             # Unregistered generator names are skipped silently; sleeping for them

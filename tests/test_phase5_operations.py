@@ -85,3 +85,35 @@ class TestTimedQueueCheckpoint(unittest.TestCase):
         self.assertEqual(len(engine2._timed_queue), 1)
         self.assertEqual(engine2._timed_queue[0].generator_name, "job_completion")
         self.assertEqual(engine2._timed_queue[0].fire_at, fire_at)
+
+
+class TestPlanDayOrdering(unittest.TestCase):
+    def test_new_client_setup_is_first(self):
+        from simulation.engine import SimulationEngine, GeneratorCall
+        engine = SimulationEngine(dry_run=True, target_date=date(2026, 3, 28))
+        plan = engine.plan_day(date(2026, 3, 28))
+        self.assertEqual(plan[0], GeneratorCall("new_client_setup", {}))
+
+    def test_job_scheduling_is_second(self):
+        from simulation.engine import SimulationEngine, GeneratorCall
+        engine = SimulationEngine(dry_run=True, target_date=date(2026, 3, 28))
+        plan = engine.plan_day(date(2026, 3, 28))
+        self.assertEqual(plan[1], GeneratorCall("job_scheduling", {}))
+
+
+class TestRunOnceDrainsTimed(unittest.TestCase):
+    def test_timed_event_fired_when_past_due(self):
+        from simulation.engine import SimulationEngine
+        engine = SimulationEngine(dry_run=True, target_date=date(2026, 3, 28))
+        engine.speed = 9999  # skip sleep time
+        fired = []
+
+        class FakeGen:
+            def execute(self, dry_run=False, **kwargs):
+                fired.append(kwargs)
+
+        engine.register("job_completion", FakeGen())
+        past = datetime.utcnow() - timedelta(seconds=1)
+        engine.queue_timed_event(past, "job_completion", {"job_id": "SS-JOB-TEST"})
+        engine.run_once(date(2026, 3, 28))
+        self.assertTrue(any(k.get("job_id") == "SS-JOB-TEST" for k in fired))
