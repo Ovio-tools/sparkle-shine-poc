@@ -2,17 +2,18 @@
 automations/lead_leak_detection.py
 
 Automation — Lead Leak Detection (scheduled, daily)
-No trigger event. Compares HubSpot leads against Pipedrive deals to surface
-leads that entered marketing but were never picked up by sales.
+No trigger event. Fetches net-new HubSpot leads (created since the last run)
+in the lead/MQL lifecycle stage, then cross-checks each against Pipedrive to
+surface leads that entered marketing but were never picked up by sales.
 
 Steps:
-  1. Pull active leads from HubSpot (lifecyclestage in lead/MQL, created < 90d)
+  1. Pull leads from HubSpot (lifecyclestage in lead/MQL, created since last run)
   2. For each lead, check cross_tool_mapping then fall back to a Pipedrive
      person search by email. A lead "leaks" if both checks come up empty AND
      it is more than 48 hours old.
   3. Create Asana follow-up tasks in "Sales Pipeline Tasks → Follow-Up"
      using deduplicate_by_title=True to prevent repeat tasks on consecutive runs.
-  4. Post a summary to #sales.
+  4. Post a count-only summary to #sales.
 """
 import json
 import os
@@ -39,9 +40,11 @@ _ASANA_SECTION  = "Follow-Up"
 
 _SLACK_CHANNEL  = "sales"
 
-_LEAD_STAGES    = ["lead", "marketingqualifiedlead"]
-_LOOKBACK_DAYS  = 90
-_LEAK_HOURS     = 48
+_LEAD_STAGES            = ["lead", "marketingqualifiedlead"]
+_DEFAULT_LOOKBACK_HOURS = 24   # Fallback window when no sentinel file exists
+_LEAK_HOURS             = 48   # Grace period: leads < 48h old are excluded
+
+_SENTINEL_FILE = os.path.join(_PROJECT_ROOT, "logs", ".lead_leak_last_run")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,16 +181,21 @@ class LeadLeakDetection(BaseAutomation):
     def _fetch_hubspot_leads(self) -> list:
         """
         POST /crm/v3/objects/contacts/search
-        Filters: lifecyclestage IN (lead, MQL) AND createdate > today-90d.
+        Filters: lifecyclestage IN (lead, MQL) AND createdate > last run time.
+        The cutoff is read from the sentinel file's mtime; falls back to 24h ago
+        if the sentinel does not yet exist (first run).
         Returns list of dicts: hubspot_id, email, firstname, lastname,
         lead_source (read from lead_source_detail), createdate (raw string).
         """
         from hubspot.crm.contacts import PublicObjectSearchRequest
 
-        cutoff_ms = int(
-            (datetime.now(timezone.utc) - timedelta(days=_LOOKBACK_DAYS))
-            .timestamp() * 1000
-        )
+        if os.path.exists(_SENTINEL_FILE):
+            cutoff_ms = int(os.path.getmtime(_SENTINEL_FILE) * 1000)
+        else:
+            cutoff_ms = int(
+                (datetime.now(timezone.utc) - timedelta(hours=_DEFAULT_LOOKBACK_HOURS))
+                .timestamp() * 1000
+            )
 
         search_request = PublicObjectSearchRequest(
             filter_groups=[
@@ -211,9 +219,10 @@ class LeadLeakDetection(BaseAutomation):
         )
 
         if self.dry_run:
+            window = "last run" if os.path.exists(_SENTINEL_FILE) else f"{_DEFAULT_LOOKBACK_HOURS}h ago (first run)"
             print(
                 f"[DRY RUN] Would POST /crm/v3/objects/contacts/search "
-                f"(lifecyclestage IN {_LEAD_STAGES}, createdate > {_LOOKBACK_DAYS}d ago)"
+                f"(lifecyclestage IN {_LEAD_STAGES}, createdate > {window})"
             )
             return _DRY_RUN_LEADS
 
@@ -399,24 +408,21 @@ class LeadLeakDetection(BaseAutomation):
     # ── Step 4 ────────────────────────────────────────────────────────────────
 
     def _post_slack_summary(self, leaked: list) -> None:
-        """Post a lead-leak report to #sales."""
+        """Post a lead qualification opportunity report to #sales."""
         if leaked:
-            lines = [
-                f":mag: Lead Leak Report: {len(leaked)} lead{'s' if len(leaked) != 1 else ''} "
-                f"found in HubSpot with no Pipedrive deal\n"
-            ]
-            for lead in leaked:
-                name   = f"{lead['firstname']} {lead['lastname']}".strip() or lead["email"]
-                source = lead["lead_source"]
-                days   = lead["days_ago"]
-                lines.append(f"{name} - {source} - Created {days} days ago")
-
-            lines.append("\nAsana tasks created for follow-up.")
-            text = "\n".join(lines)
+            n        = len(leaked)
+            verb     = "is" if n == 1 else "are"
+            plural   = "" if n == 1 else "s"
+            has_have = "hasn't" if n == 1 else "haven't"
+            text = (
+                f":bell: Lead Qualification Opportunity: There {verb} {n} new "
+                f"lead{plural} in HubSpot that {has_have} moved to the "
+                f"Qualified Sales Lead lifecycle stage.\n\n"
+                f"Asana tasks created for follow-up."
+            )
         else:
             text = (
-                ":white_check_mark: No leaked leads today. "
-                "All HubSpot leads have matching Pipedrive deals."
+                ":white_check_mark: No new unqualified leads since the last run."
             )
 
         self.send_slack(_SLACK_CHANNEL, text)

@@ -28,11 +28,11 @@ _DB_PATH  = os.path.join(_ROOT, "sparkle_shine.db")
 CONTACT = {
     "firstname":          "Marcus",
     "lastname":           "Webb",
-    "email":              "marcus.webb@capitolviewproperties.com",
-    "phone":              "(512) 555-0188",
-    "company":            "Capitol View Properties",          # Always include
-    "jobtitle":           "Office Manager",
-    "address":            "901 Congress Ave",
+    "email":              "marcus.webb@zephyrworkspaces.com",
+    "phone":              "(512) 555-0147",
+    "company":            "Zephyr Workspaces",               # Always include
+    "jobtitle":           "Operations Director",
+    "address":            "801 Congress Ave",
     "city":               "Austin",
     "state":              "TX",
     "zip":                "78701",
@@ -40,7 +40,7 @@ CONTACT = {
     "client_type":        "commercial",              # or "residential"
     "service_frequency":  "weekly",                  # weekly / biweekly / monthly
     "neighborhood":       "Downtown",
-    "lead_source_detail": "referral",                # or "website_inquiry", etc.
+    "lead_source_detail": "website_inquiry",         # or "referral", etc.
     "hs_lead_status":     "IN_PROGRESS",
 }
 

@@ -203,7 +203,13 @@ class HubSpotQualifiedSync(BaseAutomation):
                 # Register only the Pipedrive mappings — the HubSpot mapping
                 # already exists under this canonical_id, so skip it to avoid
                 # triggering the collision guard.
-                register_mapping(self.db, canonical_id, "pipedrive_person", person_id)
+                # If the person is already mapped to a different canonical ID
+                # (e.g. they are an existing CLIENT), skip the person mapping;
+                # the deal mapping is all we need here.
+                try:
+                    register_mapping(self.db, canonical_id, "pipedrive_person", person_id)
+                except ValueError:
+                    pass
                 register_mapping(self.db, canonical_id, "pipedrive",        deal_id)
                 synced.append({
                     **contact,
@@ -388,7 +394,13 @@ class HubSpotQualifiedSync(BaseAutomation):
         self, contact: dict, canonical_id: str
     ) -> tuple[str, str]:
         """
-        Create a Pipedrive person then a deal linked to that person.
+        Idempotently create (or locate an existing) Pipedrive person then deal.
+
+        Searches Pipedrive for an existing person by email before creating, so
+        re-running after a failed DB-write never produces a duplicate contact.
+        Similarly, searches for an existing open deal for the person before
+        creating a new one.
+
         Returns (person_id, deal_id) as strings.
         """
         person_fields, deal_fields = _load_field_ids()
@@ -426,7 +438,7 @@ class HubSpotQualifiedSync(BaseAutomation):
         if contact.get("company"):
             org_id = self._get_or_create_org(session, base, contact["company"])
 
-        # Create person
+        # ── Person: find existing or create ──────────────────────────────────
         person_payload = {
             "name":  full_name,
             "email": [{"value": contact["email"], "primary": True}],
@@ -439,11 +451,9 @@ class HubSpotQualifiedSync(BaseAutomation):
         if org_id is not None:
             person_payload["org_id"] = org_id
 
-        pr = session.post(f"{base}/persons", json=person_payload, timeout=30)
-        pr.raise_for_status()
-        person_id = str(pr.json()["data"]["id"])
+        person_id = self._get_or_create_person(session, base, contact["email"], person_payload)
 
-        # Create deal
+        # ── Deal: find existing open deal for this person or create ──────────
         deal_payload = {
             "title":       deal_title,
             "pipeline_id": _PIPELINE_ID,
@@ -455,11 +465,58 @@ class HubSpotQualifiedSync(BaseAutomation):
             deal_fields["Estimated Monthly Value"]: monthly_value,
             deal_fields["Lead Source"]:             contact["lead_source"],
         }
-        dr = session.post(f"{base}/deals", json=deal_payload, timeout=30)
-        dr.raise_for_status()
-        deal_id = str(dr.json()["data"]["id"])
+        deal_id = self._get_or_create_deal(session, base, person_id, deal_payload)
 
         return person_id, deal_id
+
+    def _get_or_create_person(
+        self, session, base: str, email: str, payload: dict
+    ) -> str:
+        """
+        Return the Pipedrive person_id for the given email, creating the person
+        if none exists.  Prevents duplicate persons when _create_pipedrive_records
+        is retried after a failed mapping-registration.
+        """
+        if email:
+            sr = session.get(
+                f"{base}/persons/search",
+                params={"term": email, "fields": "email", "exact_match": True, "limit": 5},
+                timeout=15,
+            )
+            for item in (sr.json().get("data", {}).get("items") or []):
+                person = item.get("item") or {}
+                for e in (person.get("emails") or []):
+                    email_val = e if isinstance(e, str) else e.get("value", "")
+                    if email_val.lower() == email.lower():
+                        return str(person["id"])
+
+        pr = session.post(f"{base}/persons", json=payload, timeout=30)
+        pr.raise_for_status()
+        return str(pr.json()["data"]["id"])
+
+    def _get_or_create_deal(
+        self, session, base: str, person_id: str, payload: dict
+    ) -> str:
+        """
+        Return an existing open deal_id for this person in the Qualified stage,
+        creating a new deal only when none exists.  Prevents duplicate deals on
+        retry runs for the same reason as _get_or_create_person.
+        """
+        sr = session.get(
+            f"{base}/persons/{person_id}/deals",
+            params={"status": "open", "limit": 20},
+            timeout=15,
+        )
+        for deal in (sr.json().get("data") or []):
+            if (
+                deal.get("pipeline_id") == _PIPELINE_ID
+                and deal.get("stage_id") == _STAGE_ID
+            ):
+                return str(deal["id"])
+
+        dr = session.post(f"{base}/deals", json=payload, timeout=30)
+        dr.raise_for_status()
+        return str(dr.json()["data"]["id"])
 
     def _get_or_create_org(self, session, base: str, company: str) -> int:
         """Return Pipedrive org_id for company name, creating the org if it doesn't exist."""

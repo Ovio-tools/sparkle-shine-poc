@@ -156,21 +156,22 @@ query CompletedJobs($after: String, $filter: JobFilterAttributes) {
       id
       title
       completedAt
-      duration
       instructions
-      recurring
+      jobType
       client {
         id
         name
       }
-      assignedTeam {
-        teamMembers {
-          nodes {
-            name
-          }
+      visitSchedule {
+        recurrenceSchedule {
+          calendarRule
         }
       }
-      jobType
+      visits(first: 1) {
+        nodes {
+          duration
+        }
+      }
     }
     pageInfo {
       hasNextPage
@@ -200,7 +201,13 @@ def poll_jobber_completed_jobs(clients: Any, db: sqlite3.Connection) -> list:
     while True:
         variables: dict = {
             "filter": {
-                "completedAtOrAfter": since,
+                # "completedAtOrAfter" is not a valid field in Jobber's
+                # JobFilterAttributes (API version 2026-03-10).  The correct
+                # approach is to filter by status=requires_invoicing (the
+                # status Jobber assigns to closed/completed jobs awaiting an
+                # invoice) and then discard jobs whose completedAt is at or
+                # before the last-poll timestamp in Python.
+                "status": "requires_invoicing",
             }
         }
         if cursor:
@@ -221,21 +228,24 @@ def poll_jobber_completed_jobs(clients: Any, db: sqlite3.Connection) -> list:
 
         for job in nodes:
             completed_at = job.get("completedAt") or ""
+            # Skip jobs completed before (or at) our last-poll window.
+            if completed_at <= since:
+                continue
             if completed_at > latest_timestamp:
                 latest_timestamp = completed_at
 
-            # Crew: join first names of team members
-            team_members = (
-                job.get("assignedTeam", {})
-                .get("teamMembers", {})
-                .get("nodes", [])
-            ) or []
-            crew_names = [m.get("name", "") for m in team_members]
-            crew = ", ".join(crew_names) if crew_names else None
-
-            # Duration: Jobber returns seconds; convert to minutes
-            raw_duration = job.get("duration") or 0
+            # Duration lives on Visit, not Job.
+            visit_nodes = (job.get("visits") or {}).get("nodes") or []
+            first_visit = visit_nodes[0] if visit_nodes else {}
+            raw_duration = first_visit.get("duration") or 0
             duration_minutes = round(raw_duration / 60) if raw_duration else None
+            # Crew is not available without an extra nested connection (cost).
+            # Leave as None; the automation handles missing crew gracefully.
+            crew = None
+
+            # Recurring: non-null recurrenceSchedule means it's a recurring job.
+            recurrence = (job.get("visitSchedule") or {}).get("recurrenceSchedule")
+            is_recurring = recurrence is not None
 
             events.append({
                 "job_id": str(job.get("id", "")),
@@ -244,7 +254,7 @@ def poll_jobber_completed_jobs(clients: Any, db: sqlite3.Connection) -> list:
                 "duration_minutes": duration_minutes,
                 "crew": crew,
                 "completion_notes": job.get("instructions", ""),
-                "is_recurring": bool(job.get("recurring", False)),
+                "is_recurring": is_recurring,
             })
 
         page_info = jobs_data.get("pageInfo", {}) or {}

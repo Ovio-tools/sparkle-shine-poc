@@ -1,11 +1,10 @@
 """
-Reusable script: create a single new HubSpot contact for Sparkle & Shine,
+One-off script: create a single new HubSpot contact for Sparkle & Shine,
 marked as a Sales Qualified Lead, and register the canonical ID in
 cross_tool_mapping.
 
-Usage:
-  1. Update the CONTACT dict below with the new contact's details.
-  2. Run: python3 create_hubspot_contact.py
+Run:
+    python3 create_contact_marco_delgado.py
 """
 
 import os
@@ -27,21 +26,21 @@ _DB_PATH  = os.path.join(_ROOT, "sparkle_shine.db")
 # ---------------------------------------------------------------------------
 
 CONTACT = {
-    "firstname":          "Elena",
-    "lastname":           "Vasquez",
-    "email":              "elena.vasquez@austinsolarpartners.com",
-    "phone":              "(512) 555-0293",
-    "company":            "Austin Solar Partners",
-    "jobtitle":           "Office Operations Manager",
-    "address":            "847 S Lamar Blvd",
+    "firstname":          "Marco",
+    "lastname":           "Delgado",
+    "email":              "marco.delgado@metrictechsolutions.com",
+    "phone":              "(512) 555-0847",
+    "company":            "Metric Tech Solutions",
+    "jobtitle":           "Facilities Manager",
+    "address":            "3420 Domain Dr",
     "city":               "Austin",
     "state":              "TX",
-    "zip":                "78704",
+    "zip":                "78758",
     "lifecyclestage":     "salesqualifiedlead",
     "client_type":        "commercial",
-    "service_frequency":  "weekly",
-    "neighborhood":       "South Austin / Zilker",
-    "lead_source_detail": "referral",
+    "service_frequency":  "biweekly",
+    "neighborhood":       "Domain / North Austin",
+    "lead_source_detail": "google_ads",
     "hs_lead_status":     "IN_PROGRESS",
 }
 

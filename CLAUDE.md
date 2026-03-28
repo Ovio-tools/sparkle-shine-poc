@@ -324,3 +324,13 @@ OAuth tokens for Jobber, QuickBooks, and Google are stored in their respective J
 **Check cross-tool mapping gaps:** `python -c "from db.mappings import find_unmapped; print(find_unmapped('jobber', 'CLIENT'))"`
 
 **Resume an interrupted push:** Just re-run the pusher. The checkpoint system picks up where it left off.
+
+## Skills Reference
+
+When building new modules, read the relevant skill doc first:
+
+- `docs/skills/tool-api-patterns.md` -- Auth patterns, endpoints, headers, rate limits, and error codes for all 8 tools. Read before writing any API call.
+- `docs/skills/canonical-record.md` -- How to create SQLite records and register cross-tool mappings. Read before writing to the database.
+- `docs/skills/generator-template.md` -- Boilerplate class for simulation generators. Copy and fill in. Read before creating a new generator.
+- `docs/skills/project-conventions.md` -- Import paths, naming rules, testing patterns, and error handling. Read at session start.
+- `docs/skills/weekly-report.md` -- Report structure, data analysis standards, confidence levels, citation formatting, and insight repetition rules. Read before building or modifying the weekly report generator.

@@ -80,10 +80,17 @@ def test_leaked_leads_detected(
     tasks_arg = mock_create_tasks.call_args[1].get("tasks") or mock_create_tasks.call_args[0][3]
     assert len(tasks_arg) == 2, f"Expected 2 tasks for 2 leaked leads, got {len(tasks_arg)}"
 
-    # Slack was called
+    # Slack was called with the new count-only format
     mock_slack.assert_called_once()
     slack_text = mock_slack.call_args[0][2]
-    assert "2" in slack_text or "leak" in slack_text.lower()
+    assert "lead qualification opportunity" in slack_text.lower(), (
+        f"Expected 'Lead Qualification Opportunity' in Slack message, got: {slack_text!r}"
+    )
+    assert "2" in slack_text, f"Expected count '2' in Slack message, got: {slack_text!r}"
+    # Names must NOT appear in the message
+    assert "alex" not in slack_text.lower() and "priya" not in slack_text.lower(), (
+        f"Contact names should not appear in Slack message, got: {slack_text!r}"
+    )
 
 
 @patch("automations.lead_leak_detection.create_tasks")
@@ -117,7 +124,7 @@ def test_48_hour_grace_period(mock_create_tasks, auto, mock_clients):
     # Slack message should indicate no leaks (positive message)
     mock_slack.assert_called_once()
     slack_text = mock_slack.call_args[0][2]
-    assert "no leaked" in slack_text.lower() or "all hubspot" in slack_text.lower()
+    assert "no new unqualified" in slack_text.lower() or "no new" in slack_text.lower()
 
 
 @patch("automations.lead_leak_detection.create_tasks")
@@ -154,7 +161,7 @@ def test_no_leaks_posts_positive_message(mock_create_tasks, auto, mock_clients, 
 
     mock_slack.assert_called_once()
     slack_text = mock_slack.call_args[0][2]
-    assert "no leaked" in slack_text.lower() or "all hubspot" in slack_text.lower(), (
+    assert "no new unqualified" in slack_text.lower() or "no new" in slack_text.lower(), (
         f"Expected a positive no-leaks message, got: {slack_text!r}"
     )
 
@@ -193,4 +200,59 @@ def test_deduplication_skips_existing_task(mock_create_tasks, auto, mock_clients
     call_kwargs = mock_create_tasks.call_args[1]
     assert call_kwargs.get("deduplicate_by_title") is True, (
         "create_tasks must be called with deduplicate_by_title=True for deduplication"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sentinel file cutoff
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_sentinel_file_cutoff(auto, tmp_path):
+    """
+    _fetch_hubspot_leads uses the sentinel file's mtime as the createdate
+    cutoff when the file exists, and falls back to now-24h when it doesn't.
+    """
+    import time
+    from unittest.mock import patch as _patch
+    from hubspot.crm.contacts import PublicObjectSearchRequest
+
+    sentinel = tmp_path / ".lead_leak_last_run"
+
+    # ── Case 1: sentinel exists ───────────────────────────────────────────────
+    sentinel.touch()
+    expected_mtime_ms = int(sentinel.stat().st_mtime * 1000)
+
+    captured = {}
+
+    def _capture_search(search_request):
+        captured["request"] = search_request
+        mock_resp = MagicMock()
+        mock_resp.results = []
+        return mock_resp
+
+    hs_mock = auto.clients("hubspot")
+    hs_mock.crm.contacts.search_api.do_search.side_effect = _capture_search
+
+    with _patch("automations.lead_leak_detection._SENTINEL_FILE", str(sentinel)):
+        auto._fetch_hubspot_leads()
+
+    filters = captured["request"].filter_groups[0]["filters"]
+    cutoff_filter = next(f for f in filters if f["propertyName"] == "createdate")
+    assert int(cutoff_filter["value"]) == expected_mtime_ms, (
+        "When sentinel exists, cutoff should match sentinel mtime"
+    )
+
+    # ── Case 2: sentinel does not exist ──────────────────────────────────────
+    missing = tmp_path / ".does_not_exist"
+    before_ms = int((datetime.now(timezone.utc) - timedelta(hours=25)).timestamp() * 1000)
+    after_ms  = int((datetime.now(timezone.utc) - timedelta(hours=23)).timestamp() * 1000)
+
+    with _patch("automations.lead_leak_detection._SENTINEL_FILE", str(missing)):
+        auto._fetch_hubspot_leads()
+
+    filters2 = captured["request"].filter_groups[0]["filters"]
+    cutoff_filter2 = next(f for f in filters2 if f["propertyName"] == "createdate")
+    cutoff_val = int(cutoff_filter2["value"])
+    assert before_ms < cutoff_val < after_ms, (
+        f"Without sentinel, cutoff should be ~24h ago; got {cutoff_val}"
     )
