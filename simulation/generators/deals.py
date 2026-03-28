@@ -119,7 +119,28 @@ class DealGenerator:
     """
 
     def __init__(self, db_path: str = "sparkle_shine.db"):
-        raise NotImplementedError("Task 2 — implement __init__")
+        self.db_path = db_path
+        tool_ids = json.loads(Path("config/tool_ids.json").read_text())
+        stages = tool_ids["pipedrive"]["stages"]
+        self._stage_order = [
+            stages["New Lead"],
+            stages["Qualified"],
+            stages["Site Visit Scheduled"],
+            stages["Proposal Sent"],
+            stages["Negotiation"],
+            stages["Closed Won"],
+        ]
+        self._won_stage_id  = stages["Closed Won"]
+        self._lost_stage_id = stages["Closed Lost"]
+        self._stage_names   = {v: k for k, v in stages.items()}
+
+        fields = tool_ids["pipedrive"]["deal_fields"]
+        self._client_type_field = fields["Client Type"]
+        self._service_type_field = fields["Service Type"]
+        self._emv_field          = fields["Estimated Monthly Value"]
+
+        with sqlite3.connect(self.db_path) as conn:
+            self._ensure_schema(conn)
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
         raise NotImplementedError("Task 6 — implement execute")
@@ -149,7 +170,17 @@ class DealGenerator:
         raise NotImplementedError("Task 3 — implement _log_activity")
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        raise NotImplementedError("Task 2 — implement _ensure_schema")
+        """Add missing columns to commercial_proposals (SQLite < 3.35 compatible)."""
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(commercial_proposals)")}
+        for col_name, col_type in [
+            ("start_date",        "TEXT"),
+            ("crew_assignment",   "TEXT"),
+            ("stage_change_time", "TEXT"),
+        ]:
+            if col_name not in existing:
+                conn.execute(
+                    f"ALTER TABLE commercial_proposals ADD COLUMN {col_name} {col_type}"
+                )
 
     # ── Internal helpers ────────────────────────────────────────────────────
 

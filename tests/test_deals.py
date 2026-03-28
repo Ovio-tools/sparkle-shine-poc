@@ -92,5 +92,69 @@ class TestProbabilities(unittest.TestCase):
         self.assertAlmostEqual(gen.calculate_loss_probability(self._deal(20)), 0.075, places=3)
 
 
+class TestEnsureSchema(unittest.TestCase):
+
+    def test_adds_missing_columns_to_commercial_proposals(self):
+        from simulation.generators.deals import DealGenerator
+        gen = _bare_gen()
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE commercial_proposals "
+            "(id TEXT PRIMARY KEY, title TEXT, status TEXT DEFAULT 'draft')"
+        )
+        gen._ensure_schema(conn)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(commercial_proposals)")}
+        self.assertIn("start_date", cols)
+        self.assertIn("crew_assignment", cols)
+        self.assertIn("stage_change_time", cols)
+        conn.close()
+
+    def test_idempotent_on_second_call(self):
+        """Running _ensure_schema twice must not raise."""
+        from simulation.generators.deals import DealGenerator
+        gen = _bare_gen()
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE commercial_proposals "
+            "(id TEXT PRIMARY KEY, title TEXT, status TEXT DEFAULT 'draft')"
+        )
+        gen._ensure_schema(conn)
+        gen._ensure_schema(conn)  # second call — should not raise
+        conn.close()
+
+
+class TestInit(unittest.TestCase):
+
+    def setUp(self):
+        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        from database.schema import init_db
+        init_db(self._db_path)
+
+    def tearDown(self):
+        os.close(self._fd)
+        os.unlink(self._db_path)
+
+    def test_loads_stage_ids_from_tool_ids_json(self):
+        from simulation.generators.deals import DealGenerator
+        gen = DealGenerator(db_path=self._db_path)
+        # Values from config/tool_ids.json
+        self.assertEqual(gen._won_stage_id, 12)
+        self.assertEqual(gen._lost_stage_id, 13)
+        self.assertEqual(len(gen._stage_order), 6)
+        self.assertIn(7, gen._stage_order)   # New Lead
+        self.assertIn(11, gen._stage_order)  # Negotiation
+        self.assertEqual(gen._stage_order[-1], 12)  # Closed Won is last
+
+    def test_schema_columns_added_on_init(self):
+        from simulation.generators.deals import DealGenerator
+        DealGenerator(db_path=self._db_path)
+        conn = sqlite3.connect(self._db_path)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(commercial_proposals)")}
+        conn.close()
+        self.assertIn("start_date", cols)
+        self.assertIn("crew_assignment", cols)
+        self.assertIn("stage_change_time", cols)
+
+
 if __name__ == "__main__":
     unittest.main()
