@@ -793,3 +793,197 @@ class TestJobCompletionGeneratorCompleted(unittest.TestCase):
         # dry_run: no API calls, no writes, no review
         review = conn.execute("SELECT * FROM reviews WHERE job_id = ?", ("SS-JOB-0001",)).fetchone()
         self.assertIsNone(review)
+
+
+class TestJobCompletionGeneratorOutcomes(unittest.TestCase):
+    """cancelled, no-show, rescheduled outcome paths."""
+
+    def _make_conn(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT, scheduled_time TEXT,
+                duration_minutes_actual INTEGER,
+                status TEXT DEFAULT 'scheduled', address TEXT, notes TEXT,
+                review_requested INTEGER DEFAULT 0, completed_at TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT,
+                first_name TEXT, last_name TEXT, company_name TEXT,
+                email TEXT, phone TEXT, address TEXT,
+                neighborhood TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                acquisition_source TEXT, first_service_date TEXT,
+                last_service_date TEXT, lifetime_value REAL DEFAULT 0,
+                notes TEXT, created_at TEXT,
+                churn_risk TEXT DEFAULT 'normal'
+            );
+            CREATE TABLE reviews (
+                id TEXT PRIMARY KEY, client_id TEXT, job_id TEXT,
+                rating INTEGER, review_text TEXT, platform TEXT,
+                review_date TEXT, response_text TEXT, response_date TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("SS-JOB-0001", "SS-LEAD-0001", "crew-b", "recurring-biweekly",
+             "2026-03-30", "08:00", None, "scheduled", None, None, 0, None),
+        )
+        conn.execute(
+            "INSERT INTO clients VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("SS-LEAD-0001", "residential", "Bob", "Jones", None,
+             "b@test.com", None, None, None, None, "active",
+             None, None, None, 0.0, None, "2025-01-01", "normal"),
+        )
+        conn.execute(
+            "INSERT INTO cross_tool_mapping VALUES (?,?,?,?,?)",
+            ("SS-JOB-0001", "jobber", "GQL-JOB-0001", None, "2026-03-30"),
+        )
+        conn.commit()
+        return conn
+
+    def _no_close(self, conn):
+        class _NoCloseConn:
+            def __init__(self, c): self._c = c
+            def close(self): pass
+            def __getattr__(self, name): return getattr(self._c, name)
+        return _NoCloseConn(conn)
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_cancelled_sets_status(self, mock_gql, mock_get_tool_id, mock_get_client):
+        from simulation.generators.operations import JobCompletionGenerator
+        conn = self._make_conn()
+        mock_get_tool_id.return_value = "GQL-JOB-0001"
+        mock_gql.return_value = {
+            "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
+        }
+        gen = JobCompletionGenerator(db_path=":memory:")
+        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+            # roll lands in cancelled window: 0.92 <= x < 0.95
+            with patch("random.random", return_value=0.93):
+                result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
+        self.assertTrue(result.success)
+        job = dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("SS-JOB-0001",)).fetchone())
+        self.assertEqual(job["status"], "cancelled")
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_noshow_sets_status(self, mock_gql, mock_get_tool_id, mock_get_client):
+        from simulation.generators.operations import JobCompletionGenerator
+        conn = self._make_conn()
+        mock_get_tool_id.return_value = "GQL-JOB-0001"
+        mock_gql.return_value = {
+            "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
+        }
+        gen = JobCompletionGenerator(db_path=":memory:")
+        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+            # no-show window: 0.95 <= x < 0.97
+            with patch("random.random", return_value=0.96):
+                result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
+        self.assertTrue(result.success)
+        job = dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("SS-JOB-0001",)).fetchone())
+        self.assertEqual(job["status"], "no-show")
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_rescheduled_creates_new_job_for_tomorrow(
+        self, mock_gql, mock_get_tool_id, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        from simulation.generators.operations import JobCompletionGenerator
+        conn = self._make_conn()
+        mock_get_tool_id.side_effect = lambda cid, tool, **kw: (
+            "GQL-JOB-0001" if tool == "jobber" else "GQL-PROP-0001"
+        )
+        mock_gen_id.return_value = "SS-JOB-9999"
+        mock_gql.side_effect = [
+            {"data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}},
+            {"data": {"jobCreate": {"job": {"id": "GQL-JOB-9999"}, "userErrors": []}}},
+        ]
+        gen = JobCompletionGenerator(db_path=":memory:")
+        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+            # rescheduled window: x >= 0.97
+            with patch("random.random", return_value=0.98):
+                result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
+
+        self.assertTrue(result.success)
+        # Original job cancelled
+        orig = dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("SS-JOB-0001",)).fetchone())
+        self.assertEqual(orig["status"], "cancelled")
+        # New job exists with status=scheduled
+        new_job = conn.execute("SELECT * FROM jobs WHERE id = ?", ("SS-JOB-9999",)).fetchone()
+        self.assertIsNotNone(new_job)
+        self.assertEqual(dict(new_job)["status"], "scheduled")
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_churn_risk_set_to_high_after_3_cancellations(
+        self, mock_gql, mock_get_tool_id, mock_get_client
+    ):
+        from simulation.generators.operations import JobCompletionGenerator
+        conn = self._make_conn()
+        # Pre-populate 2 existing cancellations in the last 60 days
+        conn.execute("""
+            INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, ("SS-JOB-OLD1", "SS-LEAD-0001", "crew-b", "recurring-biweekly",
+              "2026-02-15", None, None, "cancelled", None, None, 0, None))
+        conn.execute("""
+            INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, ("SS-JOB-OLD2", "SS-LEAD-0001", "crew-b", "recurring-biweekly",
+              "2026-03-01", None, None, "cancelled", None, None, 0, None))
+        conn.commit()
+
+        mock_get_tool_id.return_value = "GQL-JOB-0001"
+        mock_gql.return_value = {
+            "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
+        }
+        gen = JobCompletionGenerator(db_path=":memory:")
+        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+            with patch("random.random", return_value=0.93):  # cancelled
+                gen.execute(dry_run=False, job_id="SS-JOB-0001")
+
+        client = dict(conn.execute(
+            "SELECT churn_risk FROM clients WHERE id = ?", ("SS-LEAD-0001",)
+        ).fetchone())
+        self.assertEqual(client["churn_risk"], "high")
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_churn_risk_not_set_for_only_2_cancellations(
+        self, mock_gql, mock_get_tool_id, mock_get_client
+    ):
+        from simulation.generators.operations import JobCompletionGenerator
+        conn = self._make_conn()
+        # Only 1 prior cancellation in 60 days (total will be 2 after this)
+        conn.execute("""
+            INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, ("SS-JOB-OLD1", "SS-LEAD-0001", "crew-b", "recurring-biweekly",
+              "2026-03-01", None, None, "cancelled", None, None, 0, None))
+        conn.commit()
+
+        mock_get_tool_id.return_value = "GQL-JOB-0001"
+        mock_gql.return_value = {
+            "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
+        }
+        gen = JobCompletionGenerator(db_path=":memory:")
+        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+            with patch("random.random", return_value=0.93):  # cancelled
+                gen.execute(dry_run=False, job_id="SS-JOB-0001")
+
+        client = dict(conn.execute(
+            "SELECT churn_risk FROM clients WHERE id = ?", ("SS-LEAD-0001",)
+        ).fetchone())
+        self.assertNotEqual(client["churn_risk"], "high")
