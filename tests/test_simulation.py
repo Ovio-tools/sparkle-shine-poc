@@ -704,5 +704,43 @@ class TestCLI(unittest.TestCase):
             "dry-run must not create simulation/checkpoint.json")
 
 
+class TestRevenueTargets(unittest.TestCase):
+
+    def test_all_expected_months_present(self):
+        from intelligence.config import REVENUE_TARGETS
+        expected_months = [
+            (2025, 4), (2025, 5), (2025, 6), (2025, 7), (2025, 8),
+            (2025, 9), (2025, 10), (2025, 11), (2025, 12),
+            (2026, 1), (2026, 2), (2026, 3), (2026, 4), (2026, 5),
+            (2026, 6), (2026, 7), (2026, 8), (2026, 9), (2026, 10),
+            (2026, 11), (2026, 12),
+        ]
+        for month in expected_months:
+            self.assertIn(month, REVENUE_TARGETS,
+                          f"Missing REVENUE_TARGETS key: {month}")
+
+    def test_each_target_is_low_high_tuple(self):
+        from intelligence.config import REVENUE_TARGETS
+        for key, value in REVENUE_TARGETS.items():
+            self.assertIsInstance(value, tuple, f"Expected tuple for {key}")
+            self.assertEqual(len(value), 2, f"Expected (low, high) tuple for {key}")
+            low, high = value
+            self.assertLess(low, high, f"Low must be less than high for {key}")
+
+    def test_ramp_up_targets_are_lower_than_mature(self):
+        """Apr 2025 ramp-up target must be below Oct 2025 mature target."""
+        from intelligence.config import REVENUE_TARGETS
+        ramp_high = REVENUE_TARGETS[(2025, 4)][1]
+        mature_low = REVENUE_TARGETS[(2025, 10)][0]
+        self.assertLess(ramp_high, mature_low,
+                        "Ramp-up upper bound should be below mature lower bound")
+
+    def test_forward_months_cover_simulation_era(self):
+        """Simulation-era months (Apr 2026 onward) must have targets."""
+        from intelligence.config import REVENUE_TARGETS
+        for month in range(4, 13):
+            self.assertIn((2026, month), REVENUE_TARGETS)
+
+
 if __name__ == "__main__":
     unittest.main()
