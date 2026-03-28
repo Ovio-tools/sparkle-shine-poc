@@ -295,6 +295,12 @@ class SimulationEngine:
             if not self.running:
                 break
             generator_call = self.pick_next_generator(plan)
+            # Only sleep (and dispatch) when a generator is registered for this event.
+            # Unregistered generator names are skipped silently; sleeping for them
+            # would inflate the sleep count and cause test_run_once_sleeps_between_events
+            # to fail (sleep count must equal execute count).
+            if generator_call.generator_name not in self._generators:
+                continue
             delay = get_next_event_delay(target_date) / max(self.speed, 0.001)
             time.sleep(delay)
             self.dispatch(generator_call)
