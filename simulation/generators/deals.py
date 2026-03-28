@@ -6,7 +6,7 @@ Each execute() call picks one open deal and probabilistically
 advances it, marks it lost, or leaves it unchanged.
 
 Type 2 generator: progresses existing records (does not create new ones).
-# Dry-run convention: reads always allowed; writes (API + SQLite) skipped.
+Dry-run convention: reads always allowed; writes (API + SQLite) skipped.
 """
 from __future__ import annotations
 

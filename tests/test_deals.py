@@ -32,6 +32,14 @@ def _bare_gen(db_path=":memory:"):
     return gen
 
 
+def _mock_pipedrive(deals):
+    """Return a mock Pipedrive client whose GET /deals returns the given deals list."""
+    mc = MagicMock()
+    mc.get.return_value.raise_for_status = MagicMock()
+    mc.get.return_value.json.return_value = {"data": deals}
+    return mc
+
+
 class TestProbabilities(unittest.TestCase):
     """Pure unit tests — no API calls, no SQLite writes.
 
@@ -169,21 +177,15 @@ class TestPickDeal(unittest.TestCase):
         os.close(self._fd)
         os.unlink(self._db_path)
 
-    def _mock_pipedrive(self, deals):
-        mc = MagicMock()
-        mc.get.return_value.raise_for_status = MagicMock()
-        mc.get.return_value.json.return_value = {"data": deals}
-        return mc
-
     def test_returns_none_when_no_open_deals(self):
-        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(None)):
+        with patch("simulation.generators.deals.get_client", return_value=_mock_pipedrive(None)):
             with patch("time.sleep"):
                 result = self.gen._pick_deal()
         self.assertIsNone(result)
 
     def test_returns_one_deal_from_list(self):
         deals = [{"id": i, "stage_id": 8} for i in range(1, 6)]
-        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(deals)):
+        with patch("simulation.generators.deals.get_client", return_value=_mock_pipedrive(deals)):
             with patch("time.sleep"):
                 result = self.gen._pick_deal()
         self.assertIn(result, deals)
@@ -193,7 +195,7 @@ class TestPickDeal(unittest.TestCase):
         deals = [{"id": i, "stage_id": 8} for i in range(1, 6)]
         counts = {i: 0 for i in range(1, 6)}
         random.seed(0)
-        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(deals)):
+        with patch("simulation.generators.deals.get_client", return_value=_mock_pipedrive(deals)):
             with patch("time.sleep"):
                 for _ in range(500):
                     d = self.gen._pick_deal()
@@ -341,6 +343,22 @@ class TestAdvanceDeal(unittest.TestCase):
         self.assertTrue(result.success)
         mc.put.assert_not_called()
         mc.post.assert_not_called()
+
+    def test_unknown_stage_returns_failure(self):
+        """Deal with a stage_id not in _stage_order → GeneratorResult(success=False)."""
+        unknown_stage_deal = dict(self.deal, stage_id=999)
+        with patch("random.random", return_value=0.01):
+            result = self.gen._advance_deal(unknown_stage_deal, dry_run=False)
+        self.assertFalse(result.success)
+        self.assertIn("unknown stage", result.message)
+
+    def test_deal_already_at_last_stage_returns_no_change(self):
+        """Deal at Closed Won (stage_id=12) with advance firing → returns no change (not an error)."""
+        won_deal = dict(self.deal, stage_id=12)
+        with patch("random.random", return_value=0.01):
+            result = self.gen._advance_deal(won_deal, dry_run=False)
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "no change")
 
 
 class TestCompleteWonDeal(unittest.TestCase):
@@ -514,25 +532,19 @@ class TestExecute(unittest.TestCase):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
         from database.schema import init_db
         init_db(self._db_path)
-        from simulation.generators.deals import DealGenerator
+        from simulation.generators.deals import DealGenerator, GeneratorResult
         self.gen = DealGenerator(db_path=self._db_path)
+        self.GeneratorResult = GeneratorResult
 
     def tearDown(self):
         os.close(self._fd)
         os.unlink(self._db_path)
 
-    def _mock_pipedrive(self, deals):
-        mc = MagicMock()
-        mc.get.return_value.raise_for_status = MagicMock()
-        mc.get.return_value.json.return_value = {"data": deals}
-        return mc
-
     def test_returns_failure_when_no_open_deals(self):
-        from simulation.generators.deals import GeneratorResult
-        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(None)):
+        with patch("simulation.generators.deals.get_client", return_value=_mock_pipedrive(None)):
             with patch("time.sleep"):
                 result = self.gen.execute(dry_run=False)
-        self.assertIsInstance(result, GeneratorResult)
+        self.assertIsInstance(result, self.GeneratorResult)
         self.assertFalse(result.success)
         self.assertIn("no open deals", result.message)
 
@@ -541,7 +553,7 @@ class TestExecute(unittest.TestCase):
         now = datetime.utcnow()
         sct = (now - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
         deals = [{"id": 1, "stage_id": 8, "stage_change_time": sct, "update_time": sct}]
-        mc = self._mock_pipedrive(deals)
+        mc = _mock_pipedrive(deals)
         with patch("simulation.generators.deals.get_client", return_value=mc):
             with patch("time.sleep"):
                 with patch("random.random", return_value=0.01):  # force advance roll
