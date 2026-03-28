@@ -737,22 +737,11 @@ class JobSchedulingGenerator:
                         minutes=random.uniform(-duration * 0.15, duration * 0.15)
                     )
 
-                    job_id = generate_id("JOB", db_path=self.db_path)
-
                     if not dry_run:
+                        job_id = generate_id("JOB", db_path=self.db_path)
                         property_id = _get_or_fetch_property_id(
                             agreement["client_id"], session, self.db_path
                         )
-                        price = agreement["price_per_visit"]
-                        if job_type == "deep_clean":
-                            price = price * JOB_VARIETY["residential_recurring"]["deep_clean_price_multiplier"]
-                        elif job_type == "add_on":
-                            add_on = random.choice(JOB_VARIETY["residential_recurring"]["add_on_options"])
-                            price = price + add_on["price"]
-                        elif job_type == "extra_service":
-                            extra = random.choice(JOB_VARIETY["commercial_recurring"]["extra_service_options"])
-                            price = price + extra["price"]
-
                         job_input = {
                             "propertyId": property_id or "",
                             "title": agreement["service_type_id"].replace("-", " ").title(),
@@ -779,6 +768,8 @@ class JobSchedulingGenerator:
                             scheduled_dt.strftime("%H:%M"), "scheduled",
                         ))
                         register_mapping(job_id, "jobber", jobber_job_id, db_path=self.db_path)
+                    else:
+                        job_id = f"dry-run-{agreement['id']}"
 
                     if self._queue_fn:
                         self._queue_fn(
@@ -839,8 +830,10 @@ class JobSchedulingGenerator:
                     results.append(("ok_existing", job["id"]))
                 except Exception as e:
                     logger.exception("Completion queuing failed for existing job %s", job.get("id"))
+                    results.append(("failed", job.get("id"), str(e)))
 
-            conn.commit()
+            if not dry_run:
+                conn.commit()
             succeeded = sum(1 for r in results if r[0] in ("ok", "ok_existing"))
             failed = sum(1 for r in results if r[0] == "failed")
             if failed:

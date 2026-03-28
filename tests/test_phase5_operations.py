@@ -617,3 +617,67 @@ class TestJobSchedulingGeneratorQueueFn(unittest.TestCase):
             self.assertIsInstance(fire_at, datetime)
             # fire_at should be after window start (7 AM on 2026-03-30)
             self.assertGreater(fire_at, datetime(2026, 3, 30, 7, 0))
+
+
+class TestJobSchedulingGeneratorPass2(unittest.TestCase):
+    """Pre-existing scheduled jobs get completion events queued (Pass 2)."""
+
+    def test_existing_job_queued_without_creating_new(self):
+        from simulation.generators.operations import JobSchedulingGenerator
+
+        today = date(2026, 3, 30)
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT
+            );
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT, scheduled_time TEXT,
+                duration_minutes_actual INTEGER,
+                status TEXT DEFAULT 'scheduled', address TEXT, notes TEXT,
+                review_requested INTEGER DEFAULT 0, completed_at TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        # No recurring agreements — Pass 1 creates nothing
+        # Pre-existing scheduled job for today
+        conn.execute(
+            "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("SS-JOB-EXIST", "SS-CLIENT-0001", "crew-a", "recurring-weekly",
+             "2026-03-30", "07:00", None, "scheduled", None, None, 0, None),
+        )
+        conn.commit()
+
+        queue_calls = []
+        def fake_queue(fire_at, generator_name, kwargs):
+            queue_calls.append((fire_at, generator_name, kwargs))
+
+        gen = JobSchedulingGenerator(db_path=":memory:", queue_fn=fake_queue)
+
+        class _NoCloseConn:
+            def __init__(self, c): self._c = c
+            def close(self): pass
+            def __getattr__(self, name): return getattr(self._c, name)
+
+        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+            with patch("simulation.generators.operations.date") as mock_date:
+                mock_date.today.return_value = today
+                mock_date.fromisoformat.side_effect = date.fromisoformat
+                result = gen.execute(dry_run=True)
+
+        self.assertTrue(result.success)
+        # Pass 2 should have queued the pre-existing job
+        self.assertEqual(len(queue_calls), 1)
+        self.assertEqual(queue_calls[0][1], "job_completion")
+        self.assertEqual(queue_calls[0][2]["job_id"], "SS-JOB-EXIST")
+        self.assertGreater(queue_calls[0][0], datetime(2026, 3, 30, 7, 0))
