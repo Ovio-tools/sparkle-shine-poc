@@ -49,7 +49,7 @@ class TestTimedQueueCheckpoint(unittest.TestCase):
     def setUp(self):
         from simulation.engine import SimulationEngine
         self._tmp = Path("/tmp/test_checkpoint_ops.json")
-        self.engine = SimulationEngine(dry_run=False)
+        self.engine = SimulationEngine(dry_run=False, target_date=date(2026, 3, 28))
         self.engine._checkpoint_file = self._tmp
 
     def tearDown(self):
@@ -81,7 +81,6 @@ class TestTimedQueueCheckpoint(unittest.TestCase):
         self._tmp.write_text(json.dumps(state))
         engine2 = SimulationEngine(dry_run=True)
         engine2._checkpoint_file = self._tmp
-        engine2._timed_queue = []
         engine2.load_checkpoint()
         self.assertEqual(len(engine2._timed_queue), 1)
         self.assertEqual(engine2._timed_queue[0].generator_name, "job_completion")
