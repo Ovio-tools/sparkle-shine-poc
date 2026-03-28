@@ -969,10 +969,13 @@ class JobCompletionGenerator:
     ) -> None:
         conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (outcome, job_id))
 
-        _gql(session, _JOB_CLOSE, {
+        close_resp = _gql(session, _JOB_CLOSE, {
             "jobId": jobber_job_id,
             "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
         })
+        close_errs = _gql_user_errors(close_resp, "jobClose")
+        if close_errs:
+            raise RuntimeError(f"jobClose errors: {close_errs}")
 
         # Churn risk: 3+ cancelled/no-show in 60 days → high
         count_row = conn.execute("""
@@ -992,10 +995,13 @@ class JobCompletionGenerator:
     ) -> None:
         # Cancel original slot
         conn.execute("UPDATE jobs SET status = 'cancelled' WHERE id = ?", (job_id,))
-        _gql(session, _JOB_CLOSE, {
+        close_resp = _gql(session, _JOB_CLOSE, {
             "jobId": jobber_job_id,
             "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
         })
+        close_errs = _gql_user_errors(close_resp, "jobClose")
+        if close_errs:
+            raise RuntimeError(f"jobClose errors: {close_errs}")
 
         # New job for next business day
         tomorrow = _add_business_days(date.today(), 1)
