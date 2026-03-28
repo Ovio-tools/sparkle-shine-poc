@@ -675,3 +675,183 @@ class NewClientSetupGenerator:
             start_date.isoformat(), "scheduled",
         ))
         register_mapping(job_id, "jobber", jobber_job_id, db_path=self.db_path)
+
+
+# ── JobSchedulingGenerator ────────────────────────────────────────────────────
+
+class JobSchedulingGenerator:
+    """Type 2 generator: creates today's jobs for active recurring clients.
+
+    Run once per day (placed second in plan_day before shuffle).
+    Also picks up already-scheduled jobs (rescheduled or one-time) that need
+    completion events queued.
+
+    Args:
+        db_path: Path to sparkle_shine.db.
+        queue_fn: Callable(fire_at, generator_name, kwargs) — injected by engine.
+                  None in tests that don't need the queue.
+    """
+
+    def __init__(self, db_path: str = "sparkle_shine.db", queue_fn: Optional[Callable] = None):
+        self.db_path = db_path
+        self._queue_fn = queue_fn
+
+    def execute(self, dry_run: bool = False) -> GeneratorResult:
+        today = date.today()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            session = get_client("jobber") if not dry_run else None
+            results = []
+            jobs_created_this_run: list[str] = []  # canonical job IDs created here
+
+            # ── Pass 1: recurring_agreements ──────────────────────────────────
+            agreements = conn.execute("""
+                SELECT * FROM recurring_agreements WHERE status = 'active'
+            """).fetchall()
+            agreements = [dict(a) for a in agreements]
+
+            # Track prior jobs per crew for sequential time assignment
+            prior_jobs_by_crew: dict[str, list[dict]] = {}
+
+            for agreement in agreements:
+                if not _is_due_today(agreement, today):
+                    continue
+
+                # Idempotent guard: skip if job already exists for this client+date
+                existing = conn.execute(
+                    "SELECT id FROM jobs WHERE client_id = ? AND scheduled_date = ?",
+                    (agreement["client_id"], today.isoformat()),
+                ).fetchone()
+                if existing:
+                    continue
+
+                try:
+                    job_type = _pick_job_type(agreement, today)
+                    crew_id = agreement.get("crew_id") or "crew-a"
+                    prior = prior_jobs_by_crew.get(crew_id, [])
+                    scheduled_dt = _assign_scheduled_time(crew_id, prior, today)
+                    duration = _expected_duration(agreement["service_type_id"], job_type)
+                    completion_dt = scheduled_dt + timedelta(minutes=duration)
+                    completion_dt += timedelta(
+                        minutes=random.uniform(-duration * 0.15, duration * 0.15)
+                    )
+
+                    job_id = generate_id("JOB", db_path=self.db_path)
+
+                    if not dry_run:
+                        property_id = _get_or_fetch_property_id(
+                            agreement["client_id"], session, self.db_path
+                        )
+                        price = agreement["price_per_visit"]
+                        if job_type == "deep_clean":
+                            price = price * JOB_VARIETY["residential_recurring"]["deep_clean_price_multiplier"]
+                        elif job_type == "add_on":
+                            add_on = random.choice(JOB_VARIETY["residential_recurring"]["add_on_options"])
+                            price = price + add_on["price"]
+                        elif job_type == "extra_service":
+                            extra = random.choice(JOB_VARIETY["commercial_recurring"]["extra_service_options"])
+                            price = price + extra["price"]
+
+                        job_input = {
+                            "propertyId": property_id or "",
+                            "title": agreement["service_type_id"].replace("-", " ").title(),
+                            "invoicing": {
+                                "invoicingType": "FIXED_PRICE",
+                                "invoicingSchedule": "ON_COMPLETION",
+                            },
+                            "timeframe": {"startAt": today.isoformat()},
+                        }
+                        resp = _gql(session, _JOB_CREATE, {"input": job_input})
+                        errs = _gql_user_errors(resp, "jobCreate")
+                        if errs:
+                            raise RuntimeError(f"jobCreate errors: {errs}")
+                        jobber_job_id = resp["data"]["jobCreate"]["job"]["id"]
+
+                        conn.execute("""
+                            INSERT OR IGNORE INTO jobs
+                            (id, client_id, crew_id, service_type_id,
+                             scheduled_date, scheduled_time, status)
+                            VALUES (?,?,?,?,?,?,?)
+                        """, (
+                            job_id, agreement["client_id"], crew_id,
+                            agreement["service_type_id"], today.isoformat(),
+                            scheduled_dt.strftime("%H:%M"), "scheduled",
+                        ))
+                        register_mapping(job_id, "jobber", jobber_job_id, db_path=self.db_path)
+
+                    if self._queue_fn:
+                        self._queue_fn(
+                            fire_at=completion_dt,
+                            generator_name="job_completion",
+                            kwargs={"job_id": job_id},
+                        )
+
+                    prior_jobs_by_crew.setdefault(crew_id, []).append(
+                        {"expected_duration": duration}
+                    )
+                    jobs_created_this_run.append(job_id)
+                    results.append(("ok", job_id))
+
+                except Exception as e:
+                    logger.exception("Job scheduling failed for agreement %s", agreement.get("id"))
+                    results.append(("failed", agreement.get("id"), str(e)))
+
+            # ── Pass 2: already-scheduled jobs (rescheduled + one-time) ──────
+            already_scheduled = conn.execute("""
+                SELECT * FROM jobs
+                WHERE status = 'scheduled'
+                  AND scheduled_date = ?
+            """, (today.isoformat(),)).fetchall()
+            already_scheduled = [dict(j) for j in already_scheduled]
+
+            for job in already_scheduled:
+                if job["id"] in jobs_created_this_run:
+                    continue  # just created this run — already has a completion event
+                try:
+                    crew_id = job.get("crew_id") or "crew-a"
+                    prior = prior_jobs_by_crew.get(crew_id, [])
+                    if job.get("scheduled_time"):
+                        try:
+                            h, m = map(int, job["scheduled_time"].split(":"))
+                            scheduled_dt = datetime.combine(today, time(h, m))
+                        except Exception:
+                            scheduled_dt = _assign_scheduled_time(crew_id, prior, today)
+                    else:
+                        scheduled_dt = _assign_scheduled_time(crew_id, prior, today)
+
+                    duration = _expected_duration(job.get("service_type_id", "std-residential"), "regular")
+                    completion_dt = scheduled_dt + timedelta(minutes=duration)
+                    completion_dt += timedelta(
+                        minutes=random.uniform(-duration * 0.15, duration * 0.15)
+                    )
+
+                    if self._queue_fn:
+                        self._queue_fn(
+                            fire_at=completion_dt,
+                            generator_name="job_completion",
+                            kwargs={"job_id": job["id"]},
+                        )
+
+                    prior_jobs_by_crew.setdefault(crew_id, []).append(
+                        {"expected_duration": duration}
+                    )
+                    results.append(("ok_existing", job["id"]))
+                except Exception as e:
+                    logger.exception("Completion queuing failed for existing job %s", job.get("id"))
+
+            conn.commit()
+            succeeded = sum(1 for r in results if r[0] in ("ok", "ok_existing"))
+            failed = sum(1 for r in results if r[0] == "failed")
+            if failed:
+                return GeneratorResult(
+                    success=False,
+                    message=f"scheduled {succeeded} jobs, {failed} failed",
+                )
+            return GeneratorResult(success=True, message=f"scheduled {succeeded} jobs")
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()

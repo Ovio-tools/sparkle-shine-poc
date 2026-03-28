@@ -529,3 +529,91 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
         self.assertIn("SS-LEAD-0001", committed_ids)
         self.assertIn("SS-LEAD-0003", committed_ids)
         self.assertNotIn("SS-LEAD-0002", committed_ids)
+
+
+class TestJobSchedulingGeneratorQueueFn(unittest.TestCase):
+    """queue_fn is called with correct fire_at times after creating each job."""
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_queue_fn_called_for_each_due_job(
+        self, mock_gql, mock_get_tool_id, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        from simulation.generators.operations import JobSchedulingGenerator
+
+        # Monday 2026-03-30 — weekly agreement due
+        today = date(2026, 3, 30)
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT
+            );
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT, scheduled_time TEXT,
+                duration_minutes_actual INTEGER,
+                status TEXT DEFAULT 'scheduled', address TEXT, notes TEXT,
+                review_requested INTEGER DEFAULT 0, completed_at TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        # Two weekly agreements both due on Monday
+        conn.execute(
+            "INSERT INTO recurring_agreements VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("SS-RECUR-0001", "SS-LEAD-0001", "recurring-weekly",
+             "crew-a", "weekly", 135.0, "2026-03-23", None, "active", "monday"),
+        )
+        conn.execute(
+            "INSERT INTO recurring_agreements VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("SS-RECUR-0002", "SS-LEAD-0002", "recurring-biweekly",
+             "crew-b", "biweekly", 150.0, "2026-03-16", None, "active", "monday"),
+        )
+        conn.commit()
+
+        # get_tool_id: return property IDs for both clients
+        mock_get_tool_id.side_effect = lambda cid, tool, **kw: (
+            "GQL-PROP-" + cid[-4:] if tool == "jobber_property" else None
+        )
+        mock_gen_id.side_effect = ["SS-JOB-9001", "SS-JOB-9002"]
+        mock_gql.return_value = {
+            "data": {"jobCreate": {"job": {"id": "GQL-JOB-X"}, "userErrors": []}}
+        }
+
+        queue_calls = []
+        def fake_queue(fire_at, generator_name, kwargs):
+            queue_calls.append((fire_at, generator_name, kwargs))
+
+        gen = JobSchedulingGenerator(db_path=":memory:", queue_fn=fake_queue)
+
+        class _NoCloseConn:
+            def __init__(self, c): self._c = c
+            def close(self): pass
+            def __getattr__(self, name): return getattr(self._c, name)
+
+        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+            with patch("simulation.generators.operations.date") as mock_date:
+                mock_date.today.return_value = today
+                mock_date.fromisoformat.side_effect = date.fromisoformat
+                result = gen.execute(dry_run=False)
+
+        self.assertTrue(result.success)
+        # Two jobs queued (one per due agreement)
+        self.assertEqual(len(queue_calls), 2)
+        for fire_at, gen_name, kwargs in queue_calls:
+            self.assertEqual(gen_name, "job_completion")
+            self.assertIn("job_id", kwargs)
+            self.assertIsInstance(fire_at, datetime)
+            # fire_at should be after window start (7 AM on 2026-03-30)
+            self.assertGreater(fire_at, datetime(2026, 3, 30, 7, 0))
