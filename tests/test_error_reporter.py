@@ -495,5 +495,121 @@ class TestEscalation(unittest.TestCase):
         assert er._channel_id == "C12345"
 
 
+class TestReportReconciliationIssue(unittest.TestCase):
+    def setUp(self):
+        _reset_module_state()
+
+    @patch("simulation.error_reporter.get_client")
+    def test_mismatch_posts_info_color(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_reconciliation_issue, _SEVERITY_COLORS
+        report_reconciliation_issue({
+            "category": "reconciliation_mismatch",
+            "tool": "quickbooks",
+            "entity": "SS-CLIENT-0047",
+        })
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert call_kwargs["attachments"][0]["color"] == _SEVERITY_COLORS["info"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_missing_posts_warning_color(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_reconciliation_issue, _SEVERITY_COLORS
+        report_reconciliation_issue({
+            "category": "reconciliation_missing",
+            "tool": "quickbooks",
+            "entity": "SS-CLIENT-0047",
+        })
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert call_kwargs["attachments"][0]["color"] == _SEVERITY_COLORS["warning"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_automation_gap_posts_critical_color(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_reconciliation_issue, _SEVERITY_COLORS
+        report_reconciliation_issue({
+            "category": "reconciliation_automation_gap",
+            "tool": "jobber",
+            "entity": "batch",
+            "count": 5,
+        })
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert call_kwargs["attachments"][0]["color"] == _SEVERITY_COLORS["critical"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_header_uses_mag_and_data_mismatch(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_reconciliation_issue
+        report_reconciliation_issue({
+            "category": "reconciliation_missing",
+            "tool": "quickbooks",
+            "entity": "SS-CLIENT-0047",
+        })
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        header_text = call_kwargs["blocks"][0]["text"]["text"]
+        assert ":mag:" in header_text
+        assert "Data Mismatch" in header_text
+
+    @patch("simulation.error_reporter.get_client")
+    def test_details_appended_as_extra_section(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_reconciliation_issue
+        report_reconciliation_issue({
+            "category": "reconciliation_missing",
+            "tool": "quickbooks",
+            "entity": "SS-CLIENT-0047",
+            "details": "Job SS-JOB-8201 completed 2026-03-26, no invoice found.",
+        })
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        blocks_text = str(call_kwargs["blocks"])
+        assert "SS-JOB-8201" in blocks_text
+
+    @patch("simulation.error_reporter.get_client")
+    def test_automation_gap_interpolates_count(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_reconciliation_issue
+        report_reconciliation_issue({
+            "category": "reconciliation_automation_gap",
+            "tool": "jobber",
+            "entity": "batch",
+            "count": 7,
+        })
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        blocks_text = str(call_kwargs["blocks"])
+        assert "7" in blocks_text
+
+    @patch("simulation.error_reporter.get_client")
+    def test_context_footer_includes_category(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_reconciliation_issue
+        report_reconciliation_issue({
+            "category": "reconciliation_missing",
+            "tool": "quickbooks",
+            "entity": "SS-CLIENT-0047",
+        })
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        context_text = call_kwargs["blocks"][-1]["elements"][0]["text"]
+        assert "reconciliation_missing" in context_text
+
+    def test_dry_run_returns_true_without_api_call(self):
+        from simulation.error_reporter import report_reconciliation_issue
+        result = report_reconciliation_issue(
+            {
+                "category": "reconciliation_mismatch",
+                "tool": "quickbooks",
+                "entity": "SS-CLIENT-0001",
+            },
+            dry_run=True,
+        )
+        assert result is True
+
+
 if __name__ == "__main__":
     unittest.main()

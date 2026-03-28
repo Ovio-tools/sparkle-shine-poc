@@ -449,5 +449,64 @@ def report_reconciliation_issue(
     finding: dict,
     dry_run: bool = False,
 ) -> bool:
-    """Post a reconciliation finding to #automation-failure."""
-    raise NotImplementedError
+    """Post a reconciliation finding to #automation-failure.
+
+    Uses :mag: *Data Mismatch Detected* header.
+    Returns True if posted (or dry_run=True). Never raises.
+    """
+    try:
+        channel_id = setup_channel(dry_run=dry_run)
+        if channel_id is None:
+            logger.warning(
+                "Slack #automation-failure unavailable — skipping reconciliation report"
+            )
+            return False
+
+        category = finding["category"]
+        tool = finding["tool"]
+        entity = finding.get("entity", "")
+        count = finding.get("count", 0)
+        details = finding.get("details")
+
+        defaults = _RECONCILIATION_DEFAULTS[category]
+        what_happened = (
+            defaults["what_happened"]
+            .replace("{tool}", tool.title())
+            .replace("{entity}", entity)
+            .replace("{count}", str(count))
+        )
+        what_to_do = defaults["what_to_do"]
+        severity = defaults["severity"]
+
+        blocks = _build_reconciliation_blocks(
+            what_happened=what_happened,
+            what_was_affected=entity,
+            what_to_do=what_to_do,
+            severity=severity,
+            tool_name=tool,
+            category=category,
+            details=details,
+        )
+
+        if dry_run:
+            logger.info(
+                "[DRY RUN] Would post reconciliation finding to #automation-failure: %s",
+                what_happened,
+            )
+            return True
+
+        client = get_client("slack")
+        response = client.chat_postMessage(
+            channel=channel_id,
+            text=f"Data Mismatch Detected — {what_happened}",
+            blocks=blocks,
+            attachments=[{"color": _SEVERITY_COLORS[severity], "blocks": []}],
+        )
+        if response["ok"]:
+            return True
+        logger.error("chat_postMessage returned ok=False for reconciliation: %s", response)
+        return False
+
+    except Exception as exc:
+        logger.error("Unexpected error in report_reconciliation_issue: %s", exc)
+        return False
