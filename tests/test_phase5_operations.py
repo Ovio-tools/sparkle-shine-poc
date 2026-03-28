@@ -411,3 +411,5 @@ class TestNewClientSetupGeneratorRecurring(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["frequency"], "biweekly")
         self.assertEqual(row["price_per_visit"], 150.0)
+        self.assertEqual(row["day_of_week"], "monday")  # 2026-03-01 is Sunday → bumped to Monday
+        self.assertEqual(row["start_date"], "2026-03-02")  # bumped from Sunday 2026-03-01

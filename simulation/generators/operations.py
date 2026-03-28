@@ -74,6 +74,8 @@ _JOBBER_FREQ_MAP = {
     "monthly":  {"type": "MONTHLY", "interval": 1},
 }
 
+_DOW_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
 _ONE_TIME_FREQS = {
     "one_time_standard", "one_time_deep_clean",
     "one_time_move_in_out", "one_time_project",
@@ -427,9 +429,13 @@ class NewClientSetupGenerator:
                     if dry_run:
                         results.append(("ok", deal["canonical_id"]))
                         continue
+                    conn.execute(f"SAVEPOINT deal_{deal['canonical_id'].replace('-', '_')}")
                     self._setup_client(deal, session, conn)
+                    conn.execute(f"RELEASE SAVEPOINT deal_{deal['canonical_id'].replace('-', '_')}")
                     results.append(("ok", deal["canonical_id"]))
                 except Exception as e:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT deal_{deal['canonical_id'].replace('-', '_')}")
+                    conn.execute(f"RELEASE SAVEPOINT deal_{deal['canonical_id'].replace('-', '_')}")
                     logger.exception("Setup failed for %s", deal["canonical_id"])
                     results.append(("failed", deal["canonical_id"], str(e)))
 
@@ -496,13 +502,25 @@ class NewClientSetupGenerator:
         if phone:
             client_input["phones"] = [{"description": "MAIN", "number": phone}]
         if address:
-            parts = [p.strip() for p in address.split(",")]
-            client_input["billingAddress"] = {
-                "street1": parts[0],
-                "city": parts[1] if len(parts) > 1 else "Austin",
-                "province": "TX",
-                "country": "US",
-            }
+            addr_parts = [p.strip() for p in address.split(",")]
+            # Residential fallback is "Austin, TX" — no real street number.
+            # Use the full address string as street1 only when it looks like
+            # a real street (more than 2 parts or starts with a digit).
+            if len(addr_parts) >= 3 or (addr_parts and addr_parts[0][:1].isdigit()):
+                client_input["billingAddress"] = {
+                    "street1": addr_parts[0],
+                    "city": addr_parts[1] if len(addr_parts) > 1 else "Austin",
+                    "province": "TX",
+                    "country": "US",
+                }
+            else:
+                # City-only fallback: don't set a street, just city
+                city = addr_parts[0] if addr_parts else "Austin"
+                client_input["billingAddress"] = {
+                    "city": city,
+                    "province": "TX",
+                    "country": "US",
+                }
 
         resp = _gql(session, _CLIENT_CREATE, {"input": client_input})
         errs = _gql_user_errors(resp, "clientCreate")
@@ -515,15 +533,21 @@ class NewClientSetupGenerator:
 
         # 4. propertyCreate → jobber_property_id
         prop_parts = [p.strip() for p in address.split(",")]
+        if len(prop_parts) >= 3 or (prop_parts and prop_parts[0][:1].isdigit()):
+            prop_addr = {
+                "street1": prop_parts[0],
+                "city": prop_parts[1] if len(prop_parts) > 1 else "Austin",
+                "province": "TX",
+                "country": "US",
+            }
+        else:
+            prop_addr = {
+                "city": prop_parts[0] if prop_parts else "Austin",
+                "province": "TX",
+                "country": "US",
+            }
         prop_input = {
-            "properties": [{
-                "address": {
-                    "street1": prop_parts[0],
-                    "city": prop_parts[1] if len(prop_parts) > 1 else "Austin",
-                    "province": "TX",
-                    "country": "US",
-                }
-            }]
+            "properties": [{"address": prop_addr}]
         }
         resp2 = _gql(session, _PROPERTY_CREATE,
                      {"clientId": jobber_client_id, "input": prop_input})
@@ -585,7 +609,6 @@ class NewClientSetupGenerator:
         if day_of_week_int >= 5:  # Sat or Sun → move to Monday
             day_of_week_int = 0
             start_date = start_date + timedelta(days=(7 - start_date.weekday()))
-        _DOW_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         day_of_week_name = _DOW_NAMES[day_of_week_int]
 
         # jobCreate with recurrence
