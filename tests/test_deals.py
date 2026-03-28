@@ -240,5 +240,97 @@ class TestLogActivity(unittest.TestCase):
         mc.post.assert_not_called()
 
 
+class TestAdvanceDeal(unittest.TestCase):
+    """Seed random, mock Pipedrive PUT. No SQLite fixture needed for these cases."""
+
+    def setUp(self):
+        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        from database.schema import init_db
+        init_db(self._db_path)
+        from simulation.generators.deals import DealGenerator
+        self.gen = DealGenerator(db_path=self._db_path)
+        # Deal in Qualified (stage_id=8), 5 days in stage
+        now = datetime.utcnow()
+        sct = (now - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+        self.deal = {"id": 100, "stage_id": 8, "stage_change_time": sct, "update_time": sct}
+
+    def tearDown(self):
+        os.close(self._fd)
+        os.unlink(self._db_path)
+
+    def _mock_client(self, put_status=200, post_status=201):
+        mc = MagicMock()
+        mc.put.return_value.status_code = put_status
+        mc.post.return_value.status_code = post_status
+        return mc
+
+    def test_advance_fires_and_puts_next_stage(self):
+        """random.random()=0.01 → advance fires → PUT with stage_id=9 (Site Visit)."""
+        mc = self._mock_client()
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                with patch("random.random", return_value=0.01):
+                    result = self.gen._advance_deal(self.deal, dry_run=False)
+
+        self.assertTrue(result.success)
+        mc.put.assert_called_once_with(
+            "https://api.pipedrive.com/v1/deals/100",
+            json={"stage_id": 9},  # Site Visit Scheduled
+        )
+
+    def test_no_advance_no_loss_returns_no_change(self):
+        """random.random()=0.99 → neither roll fires → no PUT, message='no change'."""
+        mc = self._mock_client()
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                with patch("random.random", return_value=0.99):
+                    result = self.gen._advance_deal(self.deal, dry_run=False)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "no change")
+        mc.put.assert_not_called()
+
+    def test_loss_fires_when_advance_misses(self):
+        """First roll=0.99 misses advance, second roll=0.01 fires loss → PUT status=lost."""
+        mc = self._mock_client()
+        call_count = [0]
+
+        def _alternating():
+            call_count[0] += 1
+            return 0.01 if call_count[0] == 2 else 0.99
+
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                with patch("random.random", side_effect=_alternating):
+                    result = self.gen._advance_deal(self.deal, dry_run=False)
+
+        self.assertTrue(result.success)
+        self.assertIn("lost", result.message)
+        mc.put.assert_called_once_with(
+            "https://api.pipedrive.com/v1/deals/100",
+            json={"status": "lost", "stage_id": 13},  # Closed Lost
+        )
+
+    def test_advance_to_won_calls_complete_won_deal(self):
+        """Deal in Negotiation (stage_id=11) + advance fires → _complete_won_deal called once."""
+        now = datetime.utcnow()
+        sct = (now - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+        negotiation_deal = {
+            "id": 200,
+            "stage_id": 11,  # Negotiation
+            "stage_change_time": sct,
+            "update_time": sct,
+            self.gen._client_type_field: "residential",
+            self.gen._emv_field: None,
+        }
+        with patch.object(self.gen, "_complete_won_deal") as mock_won:
+            with patch("random.random", return_value=0.01):
+                result = self.gen._advance_deal(negotiation_deal, dry_run=False)
+
+        mock_won.assert_called_once()
+        self.assertTrue(result.success)
+        self.assertIn("Won", result.message)
+
+
 if __name__ == "__main__":
     unittest.main()

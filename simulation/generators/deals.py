@@ -172,7 +172,73 @@ class DealGenerator:
         return base * _loss_age_weight(age)
 
     def _advance_deal(self, deal: dict, dry_run: bool = False) -> GeneratorResult:
-        raise NotImplementedError("Task 4 — implement _advance_deal")
+        """Roll advance and loss dice; execute the winning action or return no-change."""
+        deal_id = deal["id"]
+
+        # ── Roll 1: advance ──────────────────────────────────────────────────────
+        if random.random() < self.calculate_advance_probability(deal):
+            current_stage_id = deal.get("stage_id")
+            if current_stage_id not in self._stage_order:
+                return GeneratorResult(
+                    success=False,
+                    message=f"deal {deal_id}: unknown stage {current_stage_id}",
+                )
+            idx = self._stage_order.index(current_stage_id)
+            if idx >= len(self._stage_order) - 1:
+                return GeneratorResult(success=True, message="no change")
+            next_stage_id = self._stage_order[idx + 1]
+
+            if next_stage_id == self._won_stage_id:
+                contract = self._build_contract(deal)
+                self._complete_won_deal(deal, contract, dry_run=dry_run)
+                return GeneratorResult(success=True, message=f"deal {deal_id} advanced to Won")
+
+            if not dry_run:
+                time.sleep(0.15)
+                client = get_client("pipedrive")
+                resp = client.put(
+                    f"https://api.pipedrive.com/v1/deals/{deal_id}",
+                    json={"stage_id": next_stage_id},
+                )
+                if resp.status_code not in (200, 201):
+                    logger.warning("PUT deals/%s failed: %s", deal_id, resp.status_code)
+                    return GeneratorResult(success=False, message=f"PUT deals failed: {resp.status_code}")
+
+                # Write stage_change_time to SQLite for SS-PROP deals only
+                canonical_id = get_canonical_id("pipedrive", str(deal_id), self.db_path)
+                if canonical_id and canonical_id.startswith("SS-PROP-"):
+                    with sqlite3.connect(self.db_path) as conn:
+                        conn.execute(
+                            "UPDATE commercial_proposals SET stage_change_time = ? WHERE id = ?",
+                            (datetime.utcnow().isoformat(), canonical_id),
+                        )
+
+                stage_name = self._stage_names.get(next_stage_id, str(next_stage_id))
+                self._log_activity(deal_id, f"Deal advanced to {stage_name}.", dry_run=False)
+            else:
+                logger.debug("[dry_run] Would advance deal %s to stage %s", deal_id, next_stage_id)
+
+            return GeneratorResult(success=True, message=f"deal {deal_id} advanced to stage {next_stage_id}")
+
+        # ── Roll 2: loss (only if advance did not fire) ──────────────────────────
+        if random.random() < self.calculate_loss_probability(deal):
+            if not dry_run:
+                reason = random.choice(DAILY_VOLUMES["deal_progression"]["lost_reasons"])
+                time.sleep(0.15)
+                client = get_client("pipedrive")
+                resp = client.put(
+                    f"https://api.pipedrive.com/v1/deals/{deal_id}",
+                    json={"status": "lost", "stage_id": self._lost_stage_id},
+                )
+                if resp.status_code not in (200, 201):
+                    logger.warning("PUT deals/%s (loss) failed: %s", deal_id, resp.status_code)
+                    return GeneratorResult(success=False, message=f"PUT deals failed: {resp.status_code}")
+                self._log_activity(deal_id, f"Deal lost. Reason: {reason}", dry_run=False)
+            else:
+                logger.debug("[dry_run] Would mark deal %s as lost", deal_id)
+            return GeneratorResult(success=True, message=f"deal {deal_id} marked lost")
+
+        return GeneratorResult(success=True, message="no change")
 
     def _complete_won_deal(self, deal: dict, contract: dict, dry_run: bool = False) -> None:
         raise NotImplementedError("Task 5 — implement _complete_won_deal")
@@ -242,11 +308,50 @@ class DealGenerator:
         return 0.0
 
     def _pick_service_frequency(self, client_type: str, emv: float) -> str:
-        raise NotImplementedError("Task 4 — implement _pick_service_frequency")
+        """Pick service frequency from the pool matching client type and EMV."""
+        if client_type == "commercial":
+            return random.choices(
+                list(COMMERCIAL_SERVICE_WEIGHTS.keys()),
+                weights=list(COMMERCIAL_SERVICE_WEIGHTS.values()),
+                k=1,
+            )[0]
+        if emv > 0:
+            pool = ["weekly_recurring", "biweekly_recurring", "monthly_recurring"]
+        else:
+            pool = ["one_time_standard", "one_time_deep_clean", "one_time_move_in_out"]
+        weights = [SERVICE_TYPE_WEIGHTS[k] for k in pool]
+        return random.choices(pool, weights=weights, k=1)[0]
 
     def _build_contract(self, deal: dict) -> dict:
-        raise NotImplementedError("Task 4 — implement _build_contract")
+        """Build the contract dict when a deal advances to Won."""
+        client_type = deal.get(self._client_type_field) or "residential"
+        emv_raw = deal.get(self._emv_field)
+        try:
+            emv = float(emv_raw) if emv_raw is not None else 0.0
+        except (TypeError, ValueError):
+            emv = 0.0
+
+        service_frequency = self._pick_service_frequency(client_type, emv)
+        contract_value    = self._get_contract_value(service_frequency)
+        crew = random.choices(
+            list(CREW_ASSIGNMENT_WEIGHTS.keys()),
+            weights=list(CREW_ASSIGNMENT_WEIGHTS.values()),
+            k=1,
+        )[0]
+        start_date = _add_business_days(date.today(), random.randint(5, 10))
+        return {
+            "contract_type":     client_type,
+            "service_frequency": service_frequency,
+            "contract_value":    contract_value,
+            "start_date":        start_date,
+            "crew_assignment":   crew,
+        }
 
     @staticmethod
     def _get_contract_value(service_frequency: str) -> float:
-        raise NotImplementedError("Task 4 — implement _get_contract_value")
+        """Return contract value derived from service type base price."""
+        service_id = _FREQ_TO_SERVICE_ID.get(service_frequency)
+        if service_id:
+            return _SERVICE_ID_PRICES.get(service_id, 150.00)
+        lo, hi = _COMMERCIAL_RANGES.get(service_frequency, (500, 2000))
+        return round(random.uniform(lo, hi), 2)
