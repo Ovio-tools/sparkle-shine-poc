@@ -451,10 +451,12 @@ class TestCompleteWonDeal(unittest.TestCase):
     def test_dry_run_skips_put_post_and_sqlite(self):
         mc = MagicMock()
         with patch("simulation.generators.deals.get_client", return_value=mc):
-            self.gen._complete_won_deal(self._deal(200), self.contract, dry_run=True)
+            with patch.object(self.gen, "_log_activity") as mock_log:
+                self.gen._complete_won_deal(self._deal(200), self.contract, dry_run=True)
 
         mc.put.assert_not_called()
         mc.post.assert_not_called()
+        mock_log.assert_called_once()  # _log_activity is always called (respects dry_run internally)
 
         conn = sqlite3.connect(self._db_path)
         row = conn.execute(

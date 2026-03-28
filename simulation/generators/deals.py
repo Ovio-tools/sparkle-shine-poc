@@ -264,6 +264,7 @@ class DealGenerator:
             logger.debug("[dry_run] Would mark deal %s as won", deal_id)
 
         # SQLite: commercial deals (SS-PROP) only
+        # canonical ID lookup always performed — reads are permitted in dry_run (Type 2 generator)
         canonical_id = get_canonical_id("pipedrive", str(deal_id), self.db_path)
         if canonical_id is None:
             logger.warning(
