@@ -325,5 +325,99 @@ class TestBuildErrorBlocks(unittest.TestCase):
         assert header_block["text"].get("emoji") is True
 
 
+class TestReportError(unittest.TestCase):
+    def setUp(self):
+        _reset_module_state()
+
+    @patch("simulation.error_reporter.get_client")
+    def test_returns_true_on_successful_post(self, mock_get_client):
+        mock_get_client.return_value = _make_slack_mock()
+        from simulation.error_reporter import report_error
+        result = report_error(
+            Exception("HTTP 401"), tool_name="quickbooks",
+            context="Creating invoice for Sarah Chen",
+        )
+        assert result is True
+
+    @patch("simulation.error_reporter.get_client")
+    def test_posts_to_correct_channel(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+        report_error(Exception("HTTP 500"), tool_name="jobber", context="Sync run")
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert call_kwargs["channel"] == "C12345"
+
+    @patch("simulation.error_reporter.get_client")
+    def test_message_includes_top_level_blocks_and_color_attachment(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+        report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx")
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert "blocks" in call_kwargs
+        assert "attachments" in call_kwargs
+        assert len(call_kwargs["attachments"]) == 1
+        assert "color" in call_kwargs["attachments"][0]
+        # Content must NOT be inside attachments
+        assert "blocks" not in call_kwargs["attachments"][0] or call_kwargs["attachments"][0]["blocks"] == []
+
+    @patch("simulation.error_reporter.get_client")
+    def test_severity_override_sets_critical_color(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error, _SEVERITY_COLORS
+        report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx", severity="critical")
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert call_kwargs["attachments"][0]["color"] == _SEVERITY_COLORS["critical"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_str_exc_appears_as_what_happened(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+        report_error(
+            "3 completed jobs don't have invoices",
+            tool_name="jobber",
+            context="daily reconciliation check",
+        )
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        blocks_text = str(call_kwargs["blocks"])
+        assert "3 completed jobs don't have invoices" in blocks_text
+
+    @patch("simulation.error_reporter.get_client")
+    def test_context_param_appears_as_what_was_affected(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+        report_error(Exception("HTTP 500"), tool_name="jobber", context="Invoice for Sarah Chen was skipped")
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        blocks_text = str(call_kwargs["blocks"])
+        assert "Invoice for Sarah Chen was skipped" in blocks_text
+
+    @patch("simulation.error_reporter.get_client")
+    def test_chat_post_exception_returns_false_never_raises(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_client.chat_postMessage.side_effect = Exception("Network error")
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+        result = report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx")
+        assert result is False
+
+    @patch("simulation.error_reporter.get_client")
+    def test_channel_none_returns_false_never_raises(self, mock_get_client):
+        mock_get_client.side_effect = Exception("Slack down")
+        from simulation.error_reporter import report_error
+        result = report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx")
+        assert result is False
+
+    def test_dry_run_returns_true_without_api_call(self):
+        from simulation.error_reporter import report_error
+        result = report_error(
+            Exception("HTTP 500"), tool_name="jobber", context="ctx", dry_run=True
+        )
+        assert result is True
+
+
 if __name__ == "__main__":
     unittest.main()

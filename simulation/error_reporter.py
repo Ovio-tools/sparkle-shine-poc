@@ -368,8 +368,81 @@ def report_error(
     severity: Optional[str] = None,
     dry_run: bool = False,
 ) -> bool:
-    """Translate exc to plain language and post to #automation-failure."""
-    raise NotImplementedError
+    """Translate exc to plain language and post to #automation-failure.
+
+    exc may be a caught Exception or a plain string (for findings that aren't exceptions).
+    severity override bypasses escalation logic entirely.
+    Returns True if posted (or dry_run=True). Never raises.
+    """
+    try:
+        channel_id = setup_channel(dry_run=dry_run)
+        if channel_id is None:
+            logger.warning(
+                "Slack #automation-failure unavailable — skipping error report for %s", tool_name
+            )
+            return False
+
+        category = _classify(exc)
+        translation = _resolve_translation(
+            tool_name=tool_name,
+            category=category,
+            exc_str=str(exc) if isinstance(exc, str) else "",
+        )
+
+        what_happened = translation["what_happened"]
+        what_to_do = translation["what_to_do"]
+        base_severity = translation["severity"]
+
+        # Determine final severity and header text
+        header_text = "Automation Issue"
+        if severity is not None:
+            final_severity = severity
+        else:
+            final_severity = base_severity
+            if base_severity == "warning":
+                now = time.time()
+                _warning_log.setdefault(tool_name, [])
+                _warning_log[tool_name].append(now)
+                cutoff = now - ESCALATION_WINDOW_MINUTES * 60
+                _warning_log[tool_name] = [
+                    t for t in _warning_log[tool_name] if t >= cutoff
+                ]
+                if len(_warning_log[tool_name]) >= ESCALATION_THRESHOLD:
+                    final_severity = "critical"
+                    header_text = "Automation Issue — Repeated Failures"
+
+        blocks = _build_error_blocks(
+            what_happened=what_happened,
+            what_was_affected=context,
+            what_to_do=what_to_do,
+            severity=final_severity,
+            tool_name=tool_name,
+            header_text=header_text,
+        )
+
+        if dry_run:
+            logger.info(
+                "[DRY RUN] Would post to #automation-failure: %s — %s",
+                header_text,
+                what_happened,
+            )
+            return True
+
+        client = get_client("slack")
+        response = client.chat_postMessage(
+            channel=channel_id,
+            text=f"{header_text} — {what_happened}",
+            blocks=blocks,
+            attachments=[{"color": _SEVERITY_COLORS[final_severity], "blocks": []}],
+        )
+        if response["ok"]:
+            return True
+        logger.error("chat_postMessage returned ok=False: %s", response)
+        return False
+
+    except Exception as exc_inner:
+        logger.error("Unexpected error in report_error: %s", exc_inner)
+        return False
 
 
 def report_reconciliation_issue(
