@@ -419,5 +419,81 @@ class TestReportError(unittest.TestCase):
         assert result is True
 
 
+class TestEscalation(unittest.TestCase):
+    def setUp(self):
+        _reset_module_state()
+
+    @patch("simulation.error_reporter.get_client")
+    def test_escalates_to_critical_after_threshold(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error, ESCALATION_THRESHOLD, _SEVERITY_COLORS
+        for i in range(ESCALATION_THRESHOLD):
+            report_error(Exception("HTTP 500"), tool_name="jobber", context=f"attempt {i}")
+        last_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert last_kwargs["attachments"][0]["color"] == _SEVERITY_COLORS["critical"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_escalated_message_has_repeated_failures_header(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error, ESCALATION_THRESHOLD
+        for i in range(ESCALATION_THRESHOLD):
+            report_error(Exception("HTTP 500"), tool_name="jobber", context=f"attempt {i}")
+        last_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert "Repeated Failures" in last_kwargs["text"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_severity_override_does_not_add_to_warning_log(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        import simulation.error_reporter as er
+        from simulation.error_reporter import report_error, ESCALATION_THRESHOLD
+        for i in range(ESCALATION_THRESHOLD + 5):
+            report_error(
+                Exception("HTTP 500"), tool_name="jobber", context="ctx", severity="critical"
+            )
+        assert er._warning_log.get("jobber", []) == []
+
+    @patch("simulation.error_reporter.get_client")
+    def test_expired_warnings_pruned_before_count(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        import simulation.error_reporter as er
+        from simulation.error_reporter import (
+            report_error, ESCALATION_THRESHOLD, ESCALATION_WINDOW_MINUTES, _SEVERITY_COLORS,
+        )
+        # Inject stale timestamps directly — just below threshold
+        stale_time = time.time() - (ESCALATION_WINDOW_MINUTES * 60 + 10)
+        er._warning_log["jobber"] = [stale_time] * (ESCALATION_THRESHOLD - 1)
+        # One fresh warning — after pruning, total is 1 (below threshold)
+        report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx")
+        last_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert last_kwargs["attachments"][0]["color"] != _SEVERITY_COLORS["critical"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_escalation_is_per_tool_independent(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error, ESCALATION_THRESHOLD, _SEVERITY_COLORS
+        for i in range(ESCALATION_THRESHOLD):
+            report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx")
+        # Different tool — must NOT be escalated
+        report_error(Exception("HTTP 500"), tool_name="quickbooks", context="ctx")
+        last_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert last_kwargs["attachments"][0]["color"] != _SEVERITY_COLORS["critical"]
+
+    @patch("simulation.error_reporter.get_client")
+    def test_cold_start_lazy_init_populates_channel_id(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        import simulation.error_reporter as er
+        assert er._channel_id is None  # confirm cold start
+        from simulation.error_reporter import report_error
+        result = report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx")
+        assert result is True
+        assert er._channel_id == "C12345"
+
+
 if __name__ == "__main__":
     unittest.main()
