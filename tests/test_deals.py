@@ -508,5 +508,58 @@ class TestServiceFrequencyBranching(unittest.TestCase):
                 f"Iteration {i}: got '{result}' for commercial, expected pool={pool}")
 
 
+class TestExecute(unittest.TestCase):
+
+    def setUp(self):
+        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        from database.schema import init_db
+        init_db(self._db_path)
+        from simulation.generators.deals import DealGenerator
+        self.gen = DealGenerator(db_path=self._db_path)
+
+    def tearDown(self):
+        os.close(self._fd)
+        os.unlink(self._db_path)
+
+    def _mock_pipedrive(self, deals):
+        mc = MagicMock()
+        mc.get.return_value.raise_for_status = MagicMock()
+        mc.get.return_value.json.return_value = {"data": deals}
+        return mc
+
+    def test_returns_failure_when_no_open_deals(self):
+        from simulation.generators.deals import GeneratorResult
+        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(None)):
+            with patch("time.sleep"):
+                result = self.gen.execute(dry_run=False)
+        self.assertIsInstance(result, GeneratorResult)
+        self.assertFalse(result.success)
+        self.assertIn("no open deals", result.message)
+
+    def test_dry_run_reads_deals_but_skips_put_and_post(self):
+        """dry_run=True with open deals → GET called, no PUT/POST regardless of roll."""
+        now = datetime.utcnow()
+        sct = (now - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+        deals = [{"id": 1, "stage_id": 8, "stage_change_time": sct, "update_time": sct}]
+        mc = self._mock_pipedrive(deals)
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                with patch("random.random", return_value=0.01):  # force advance roll
+                    result = self.gen.execute(dry_run=True)
+        self.assertTrue(result.success)
+        mc.get.assert_called_once()
+        mc.put.assert_not_called()
+        mc.post.assert_not_called()
+
+    def test_returns_failure_on_pipedrive_fetch_error(self):
+        mc = MagicMock()
+        mc.get.return_value.raise_for_status.side_effect = Exception("Connection refused")
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                result = self.gen.execute(dry_run=False)
+        self.assertFalse(result.success)
+        self.assertIn("pipedrive fetch failed", result.message)
+
+
 if __name__ == "__main__":
     unittest.main()

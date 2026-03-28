@@ -143,7 +143,16 @@ class DealGenerator:
             self._ensure_schema(conn)
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
-        raise NotImplementedError("Task 6 — implement execute")
+        """Pick one open deal and advance, lose, or leave it unchanged."""
+        try:
+            deal = self._pick_deal()
+        except Exception as e:
+            return GeneratorResult(success=False, message=f"pipedrive fetch failed: {e}")
+
+        if deal is None:
+            return GeneratorResult(success=False, message="no open deals")
+
+        return self._advance_deal(deal, dry_run=dry_run)
 
     def _pick_deal(self) -> Optional[dict]:
         """Fetch open deals from Pipedrive and return one at random (uniform)."""
