@@ -13,6 +13,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import logging
 import random
@@ -31,6 +32,7 @@ from simulation.variation import get_adjusted_volume, get_next_event_delay, shou
 logger = setup_logging(__name__)
 
 GeneratorCall = namedtuple("GeneratorCall", ["generator_name", "kwargs"])
+TimedEvent = namedtuple("TimedEvent", ["fire_at", "generator_name", "kwargs"])
 
 CHECKPOINT_FILE = Path("simulation/checkpoint.json")
 
@@ -68,6 +70,7 @@ class SimulationEngine:
         self.event_count: int = 0
         self.error_count: int = 0
         self._generators: dict = {}
+        self._timed_queue: list = []  # heapq sorted by fire_at
 
         # --date wins: seed RNG and skip checkpoint (L7)
         if target_date is not None:
@@ -84,6 +87,10 @@ class SimulationEngine:
     def register(self, name: str, generator) -> None:
         """Register a generator instance under the given event name."""
         self._generators[name] = generator
+
+    def queue_timed_event(self, fire_at: datetime, generator_name: str, kwargs: dict) -> None:
+        """Queue a timed event to be dispatched when fire_at is reached."""
+        heapq.heappush(self._timed_queue, TimedEvent(fire_at, generator_name, kwargs))
 
     def _register_generators(self) -> None:
         """Attempt to import and register each generator module.
