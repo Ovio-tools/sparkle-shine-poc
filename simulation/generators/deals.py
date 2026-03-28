@@ -146,7 +146,18 @@ class DealGenerator:
         raise NotImplementedError("Task 6 — implement execute")
 
     def _pick_deal(self) -> Optional[dict]:
-        raise NotImplementedError("Task 3 — implement _pick_deal")
+        """Fetch open deals from Pipedrive and return one at random (uniform)."""
+        time.sleep(0.15)
+        client = get_client("pipedrive")
+        resp = client.get(
+            "https://api.pipedrive.com/v1/deals",
+            params={"status": "open", "sort": "update_time DESC", "limit": 100},
+        )
+        resp.raise_for_status()
+        deals = resp.json().get("data") or []
+        if not deals:
+            return None
+        return random.choices(deals, k=1)[0]
 
     def calculate_advance_probability(self, deal: dict) -> float:
         """Return probability [0, 1] that this deal advances today."""
@@ -167,7 +178,24 @@ class DealGenerator:
         raise NotImplementedError("Task 5 — implement _complete_won_deal")
 
     def _log_activity(self, deal_id: int, note: str, dry_run: bool = False) -> None:
-        raise NotImplementedError("Task 3 — implement _log_activity")
+        """POST a note activity to Pipedrive for the given deal."""
+        if dry_run:
+            logger.debug("[dry_run] Activity note for deal %s: %s", deal_id, note)
+            return
+        time.sleep(0.15)
+        client = get_client("pipedrive")
+        resp = client.post(
+            "https://api.pipedrive.com/v1/activities",
+            json={
+                "deal_id": deal_id,
+                "subject": "Stage update",
+                "type": "note",
+                "note": note,
+                "done": 1,
+            },
+        )
+        if resp.status_code not in (200, 201):
+            logger.warning("POST activities for deal %s failed: %s", deal_id, resp.status_code)
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         """Add missing columns to commercial_proposals (SQLite < 3.35 compatible)."""

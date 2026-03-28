@@ -156,5 +156,89 @@ class TestInit(unittest.TestCase):
         self.assertIn("stage_change_time", cols)
 
 
+class TestPickDeal(unittest.TestCase):
+
+    def setUp(self):
+        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        from database.schema import init_db
+        init_db(self._db_path)
+        from simulation.generators.deals import DealGenerator
+        self.gen = DealGenerator(db_path=self._db_path)
+
+    def tearDown(self):
+        os.close(self._fd)
+        os.unlink(self._db_path)
+
+    def _mock_pipedrive(self, deals):
+        mc = MagicMock()
+        mc.get.return_value.raise_for_status = MagicMock()
+        mc.get.return_value.json.return_value = {"data": deals}
+        return mc
+
+    def test_returns_none_when_no_open_deals(self):
+        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(None)):
+            with patch("time.sleep"):
+                result = self.gen._pick_deal()
+        self.assertIsNone(result)
+
+    def test_returns_one_deal_from_list(self):
+        deals = [{"id": i, "stage_id": 8} for i in range(1, 6)]
+        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(deals)):
+            with patch("time.sleep"):
+                result = self.gen._pick_deal()
+        self.assertIn(result, deals)
+
+    def test_uniform_selection_over_500_trials(self):
+        """Each of 5 deals should be picked ~100 times; assert within [50, 150]."""
+        deals = [{"id": i, "stage_id": 8} for i in range(1, 6)]
+        counts = {i: 0 for i in range(1, 6)}
+        random.seed(0)
+        with patch("simulation.generators.deals.get_client", return_value=self._mock_pipedrive(deals)):
+            with patch("time.sleep"):
+                for _ in range(500):
+                    d = self.gen._pick_deal()
+                    counts[d["id"]] += 1
+        for deal_id, count in counts.items():
+            self.assertGreater(count, 50, f"deal {deal_id} picked only {count} times")
+            self.assertLess(count, 150, f"deal {deal_id} picked {count} times (too often)")
+
+
+class TestLogActivity(unittest.TestCase):
+
+    def setUp(self):
+        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        from database.schema import init_db
+        init_db(self._db_path)
+        from simulation.generators.deals import DealGenerator
+        self.gen = DealGenerator(db_path=self._db_path)
+
+    def tearDown(self):
+        os.close(self._fd)
+        os.unlink(self._db_path)
+
+    def test_posts_note_activity_to_pipedrive(self):
+        mc = MagicMock()
+        mc.post.return_value.status_code = 201
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                self.gen._log_activity(deal_id=42, note="Stage updated", dry_run=False)
+        mc.post.assert_called_once_with(
+            "https://api.pipedrive.com/v1/activities",
+            json={
+                "deal_id": 42,
+                "subject": "Stage update",
+                "type": "note",
+                "note": "Stage updated",
+                "done": 1,
+            },
+        )
+
+    def test_dry_run_skips_post(self):
+        mc = MagicMock()
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            self.gen._log_activity(deal_id=42, note="Stage updated", dry_run=True)
+        mc.post.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
