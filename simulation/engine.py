@@ -241,6 +241,10 @@ class SimulationEngine:
             "last_event_time": datetime.utcnow().isoformat(),
             "event_count": self.event_count,
             "error_count": self.error_count,
+            "timed_queue": [
+                (e.fire_at.isoformat(), e.generator_name, e.kwargs)
+                for e in self._timed_queue
+            ],
         }
         checkpoint_file = getattr(self, "_checkpoint_file", CHECKPOINT_FILE)
         checkpoint_file.write_text(json.dumps(state, indent=2))
@@ -260,6 +264,13 @@ class SimulationEngine:
         self.counters = defaultdict(int, state.get("counters", {}))
         self.event_count = state.get("event_count", 0)
         self.error_count = state.get("error_count", 0)
+        raw_queue = state.get("timed_queue", [])
+        self._timed_queue = []
+        for fire_at_iso, gen_name, kwargs in raw_queue:
+            heapq.heappush(
+                self._timed_queue,
+                TimedEvent(datetime.fromisoformat(fire_at_iso), gen_name, kwargs),
+            )
         logger.info(
             f"Resumed from checkpoint: {self.current_date}, "
             f"{self.event_count} events already processed"
