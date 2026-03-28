@@ -413,3 +413,105 @@ class TestNewClientSetupGeneratorRecurring(unittest.TestCase):
         self.assertEqual(row["price_per_visit"], 150.0)
         self.assertEqual(row["day_of_week"], "monday")  # 2026-03-01 is Sunday → bumped to Monday
         self.assertEqual(row["start_date"], "2026-03-02")  # bumped from Sunday 2026-03-01
+
+
+class TestNewClientSetupErrorIsolation(unittest.TestCase):
+    """Second of three clients fails; first and third still succeed."""
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_one_failure_does_not_abort_others(
+        self, mock_gql, mock_get_tool_id, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        from simulation.generators.operations import NewClientSetupGenerator
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE won_deals (
+                canonical_id TEXT PRIMARY KEY,
+                client_type TEXT NOT NULL,
+                service_frequency TEXT NOT NULL,
+                contract_value REAL,
+                start_date TEXT NOT NULL,
+                crew_assignment TEXT,
+                pipedrive_deal_id INTEGER
+            );
+            CREATE TABLE leads (
+                id TEXT PRIMARY KEY, first_name TEXT, last_name TEXT,
+                company_name TEXT, email TEXT, phone TEXT,
+                lead_type TEXT, source TEXT, status TEXT DEFAULT 'new',
+                estimated_value REAL, created_at TEXT, last_activity_at TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT
+            );
+        """)
+        for i in (1, 2, 3):
+            conn.execute(
+                "INSERT INTO won_deals VALUES (?,?,?,?,?,?,?)",
+                (f"SS-LEAD-{i:04d}", "residential", "biweekly_recurring",
+                 150.0, "2026-03-01", "Crew A", None),
+            )
+            conn.execute(
+                "INSERT INTO leads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"SS-LEAD-{i:04d}", f"Client{i}", "Test", None,
+                 f"c{i}@test.com", "5125550000", "residential",
+                 "test", "new", 0.0, "2025-01-01", None),
+            )
+        conn.commit()
+
+        mock_get_tool_id.return_value = None
+        mock_gen_id.return_value = "SS-RECUR-0001"
+
+        success_response = [
+            {"data": {"clientCreate": {"client": {"id": "GQL-C-OK"}, "userErrors": []}}},
+            {"data": {"propertyCreate": {"properties": [{"id": "GQL-P-OK"}], "userErrors": []}}},
+            {"data": {"__type": {"inputFields": [{"name": "recurrences"}]}}},
+            {"data": {"jobCreate": {"job": {"id": "GQL-J-OK"}, "userErrors": []}}},
+        ]
+        # Client 1: success (4 calls), Client 2: raises on clientCreate,
+        # Client 3: success (4 calls — but recurrence already cached, so 3 calls)
+        call_count = [0]
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            # Calls 1-4: client 1 (success)
+            if call_count[0] <= 4:
+                return success_response[call_count[0] - 1]
+            # Call 5: client 2 clientCreate → raises
+            if call_count[0] == 5:
+                raise RuntimeError("Simulated Jobber error for client 2")
+            # Calls 6+: client 3 (success, reusing success_response cyclically)
+            return success_response[(call_count[0] - 6) % 4]
+
+        mock_gql.side_effect = side_effect
+
+        import simulation.generators.operations as ops_mod
+        ops_mod._recurrence_field_checked = False
+        ops_mod._recurrence_field_cache = None
+
+        gen = NewClientSetupGenerator(db_path=":memory:")
+
+        class _NoCloseConn:
+            def __init__(self, c): self._c = c
+            def close(self): pass
+            def __getattr__(self, name): return getattr(self._c, name)
+
+        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+            result = gen.execute(dry_run=False)
+
+        # 2 succeeded, 1 failed → success=False with summary message
+        self.assertFalse(result.success)
+        self.assertIn("2", result.message)
+        self.assertIn("1", result.message)
