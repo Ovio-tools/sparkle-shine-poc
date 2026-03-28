@@ -214,7 +214,7 @@ class DealGenerator:
                         )
 
                 stage_name = self._stage_names.get(next_stage_id, str(next_stage_id))
-                self._log_activity(deal_id, f"Deal advanced to {stage_name}.", dry_run=False)
+                self._log_activity(deal_id, f"Deal advanced to {stage_name}.", dry_run=dry_run)
             else:
                 logger.debug("[dry_run] Would advance deal %s to stage %s", deal_id, next_stage_id)
 
@@ -233,7 +233,7 @@ class DealGenerator:
                 if resp.status_code not in (200, 201):
                     logger.warning("PUT deals/%s (loss) failed: %s", deal_id, resp.status_code)
                     return GeneratorResult(success=False, message=f"PUT deals failed: {resp.status_code}")
-                self._log_activity(deal_id, f"Deal lost. Reason: {reason}", dry_run=False)
+                self._log_activity(deal_id, f"Deal lost. Reason: {reason}", dry_run=dry_run)
             else:
                 logger.debug("[dry_run] Would mark deal %s as lost", deal_id)
             return GeneratorResult(success=True, message=f"deal {deal_id} marked lost")

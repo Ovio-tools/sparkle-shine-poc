@@ -331,6 +331,17 @@ class TestAdvanceDeal(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertIn("Won", result.message)
 
+    def test_advance_dry_run_does_not_call_put(self):
+        """dry_run=True with advance firing → GET not called, PUT not called, result.success=True."""
+        mc = self._mock_client()
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                with patch("random.random", return_value=0.01):
+                    result = self.gen._advance_deal(self.deal, dry_run=True)
+        self.assertTrue(result.success)
+        mc.put.assert_not_called()
+        mc.post.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
