@@ -167,5 +167,75 @@ class TestResolveTranslation(unittest.TestCase):
         assert result["severity"] == "info"
 
 
+class TestSetupChannel(unittest.TestCase):
+    def setUp(self):
+        _reset_module_state()
+
+    @patch("simulation.error_reporter.get_client")
+    def test_returns_existing_channel_id(self, mock_get_client):
+        mock_get_client.return_value = _make_slack_mock()
+        from simulation.error_reporter import setup_channel
+        result = setup_channel()
+        assert result == "C12345"
+
+    @patch("simulation.error_reporter.get_client")
+    def test_idempotent_second_call_skips_api(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import setup_channel
+        setup_channel()
+        setup_channel()
+        assert mock_client.conversations_list.call_count == 1
+
+    @patch("simulation.error_reporter.get_client")
+    def test_creates_channel_when_not_found(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_client.conversations_list.return_value = {"ok": True, "channels": []}
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import setup_channel
+        result = setup_channel()
+        assert result == "C99999"
+        mock_client.conversations_create.assert_called_once_with(name="automation-failure")
+
+    @patch("simulation.error_reporter.get_client")
+    def test_sets_topic_after_creating_channel(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_client.conversations_list.return_value = {"ok": True, "channels": []}
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import setup_channel
+        setup_channel()
+        mock_client.conversations_setTopic.assert_called_once()
+        topic_arg = mock_client.conversations_setTopic.call_args.kwargs.get("topic", "")
+        assert "plain language" in topic_arg
+
+    @patch("simulation.error_reporter.get_client")
+    def test_sets_topic_on_existing_channel(self, mock_get_client):
+        mock_get_client.return_value = _make_slack_mock()
+        from simulation.error_reporter import setup_channel
+        setup_channel()
+        # Should also set topic when channel already exists
+        mock_get_client.return_value.conversations_setTopic.assert_called_once()
+
+    @patch("simulation.error_reporter.get_client")
+    def test_returns_none_on_exception(self, mock_get_client):
+        mock_get_client.side_effect = Exception("Slack unreachable")
+        from simulation.error_reporter import setup_channel
+        result = setup_channel()
+        assert result is None
+
+    def test_dry_run_returns_constant_no_api(self):
+        from simulation.error_reporter import setup_channel
+        result = setup_channel(dry_run=True)
+        assert result == "DRY-RUN-CHANNEL-ID"
+
+    @patch("simulation.error_reporter.get_client")
+    def test_uses_limit_200_on_conversations_list(self, mock_get_client):
+        mock_get_client.return_value = _make_slack_mock()
+        from simulation.error_reporter import setup_channel
+        setup_channel()
+        call_kwargs = mock_get_client.return_value.conversations_list.call_args.kwargs
+        assert call_kwargs.get("limit") == 200
+
+
 if __name__ == "__main__":
     unittest.main()

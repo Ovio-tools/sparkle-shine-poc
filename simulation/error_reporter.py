@@ -214,8 +214,49 @@ def _classify(exc: Union[Exception, str]) -> str:
 
 
 def setup_channel(dry_run: bool = False) -> Optional[str]:
-    """Create #automation-failure if it doesn't exist, set its topic, cache and return channel ID."""
-    raise NotImplementedError
+    """Create #automation-failure if it doesn't exist, set its topic, cache and return channel ID.
+
+    Idempotent: subsequent calls return the cached ID immediately.
+    Returns None if Slack is unreachable — callers must handle None gracefully.
+    """
+    global _channel_id
+
+    if _channel_id is not None:
+        return _channel_id
+
+    if dry_run:
+        logger.info("[DRY RUN] Would create/find #automation-failure and set its topic")
+        return "DRY-RUN-CHANNEL-ID"
+
+    try:
+        client = get_client("slack")
+
+        # Search for existing channel.
+        # Most workspaces have fewer than 200 channels. Exhaustive pagination on a
+        # large workspace would slow engine startup for no benefit. If not found in
+        # first 200 results, skip further pages and go straight to conversations_create.
+        response = client.conversations_list(types="public_channel", limit=200)
+        for ch in response["channels"]:
+            if ch["name"] == "automation-failure":
+                _channel_id = ch["id"]
+                client.conversations_setTopic(
+                    channel=_channel_id,
+                    topic="Simulation and automation errors — plain language only, no stack traces",
+                )
+                return _channel_id
+
+        # Not found — create it
+        create_response = client.conversations_create(name="automation-failure")
+        _channel_id = create_response["channel"]["id"]
+        client.conversations_setTopic(
+            channel=_channel_id,
+            topic="Simulation and automation errors — plain language only, no stack traces",
+        )
+        return _channel_id
+
+    except Exception as exc:
+        logger.warning("Could not set up #automation-failure: %s", exc)
+        return None
 
 
 def report_error(
