@@ -32,7 +32,7 @@ _channel_id: Optional[str] = None
 # Cached channel ID for #automation-failure.
 # None until setup_channel() succeeds.
 
-_warning_log: dict = {}
+_warning_log: dict[str, list[float]] = {}
 # Sliding-window escalation tracker.
 # Key: tool_name. Value: list of unix timestamps for warning-level errors from that tool.
 # On each report_error() call, only _warning_log[tool_name] is pruned (entries older than
