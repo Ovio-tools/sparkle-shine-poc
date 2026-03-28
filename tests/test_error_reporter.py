@@ -102,5 +102,70 @@ class TestClassify(unittest.TestCase):
         assert _classify(ValueError("something completely unexpected")) == "unknown"
 
 
+class TestResolveTranslation(unittest.TestCase):
+    def setUp(self):
+        _reset_module_state()
+
+    def test_quickbooks_token_expired_uses_tool_override(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("quickbooks", "token_expired")
+        assert "quickbooks_auth" in result["what_to_do"]
+
+    def test_jobber_token_expired_uses_tool_override(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("jobber", "token_expired")
+        assert "jobber_auth" in result["what_to_do"]
+
+    def test_google_token_expired_uses_tool_override(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("google", "token_expired")
+        assert "google_auth" in result["what_to_do"]
+
+    def test_asana_permission_error_appends_note(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("asana", "permission_error")
+        # Base text still present
+        assert "Check that the" in result["what_to_do"]
+        # Appended text also present
+        assert "Asana occasionally" in result["what_to_do"]
+
+    def test_generic_tool_token_expired_uses_default(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("pipedrive", "token_expired")
+        assert "token_preflight" in result["what_to_do"]
+
+    def test_tool_name_interpolated_in_what_happened(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("quickbooks", "server_error")
+        assert "Quickbooks" in result["what_happened"]
+        assert "{tool}" not in result["what_happened"]
+
+    def test_tool_name_interpolated_in_what_to_do(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("jobber", "server_error")
+        assert "Jobber" in result["what_to_do"]
+        assert "{tool}" not in result["what_to_do"]
+
+    def test_manual_category_uses_exc_string(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("jobber", "manual", exc_str="3 invoices are missing")
+        assert result["what_happened"] == "3 invoices are missing"
+
+    def test_not_found_severity_is_warning(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("quickbooks", "not_found")
+        assert result["severity"] == "warning"
+
+    def test_token_expired_severity_is_critical(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("jobber", "token_expired")
+        assert result["severity"] == "critical"
+
+    def test_client_error_severity_is_info(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("quickbooks", "client_error")
+        assert result["severity"] == "info"
+
+
 if __name__ == "__main__":
     unittest.main()

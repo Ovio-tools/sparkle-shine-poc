@@ -40,6 +40,144 @@ _warning_log: dict[str, list[float]] = {}
 # against ESCALATION_THRESHOLD.
 
 
+# ---------------------------------------------------------------------------
+# Translation tables
+# ---------------------------------------------------------------------------
+
+_CATEGORY_DEFAULTS: dict[str, dict] = {
+    "token_expired": {
+        "what_happened": "The connection to {tool} has expired.",
+        "what_to_do": "Run: `python -m demo.hardening.token_preflight`",
+        "severity": "critical",
+    },
+    "permission_error": {
+        "what_happened": "{tool} rejected the request — it may have lost a required permission.",
+        "what_to_do": "Check that the {tool} token still has all required scopes.",
+        "severity": "warning",
+    },
+    "rate_limited": {
+        "what_happened": "{tool} asked us to slow down.",
+        "what_to_do": "The engine will retry automatically. No action needed.",
+        "severity": "warning",
+    },
+    "server_error": {
+        "what_happened": "{tool} returned a server error.",
+        "what_to_do": "The engine will retry. If this persists, check {tool}'s status page.",
+        "severity": "warning",
+    },
+    "connection_error": {
+        "what_happened": "Could not reach {tool}.",
+        "what_to_do": "Check network connectivity. The engine will retry.",
+        "severity": "warning",
+    },
+    "timeout": {
+        "what_happened": "The request to {tool} timed out.",
+        "what_to_do": "The engine will retry. If this persists, check {tool}'s status page.",
+        "severity": "warning",
+    },
+    "client_error": {
+        "what_happened": "A data error occurred sending a record to {tool}.",
+        "what_to_do": "Check the log file for the rejected record's details.",
+        "severity": "info",
+    },
+    "not_found": {
+        "what_happened": "A record expected in {tool} was not found.",
+        "what_to_do": "Check the log file for the missing record's ID.",
+        "severity": "warning",
+    },
+    "manual": {
+        "what_happened": "",  # replaced with the exc string at resolution time
+        "what_to_do": "Review the log file for details.",
+        "severity": "info",
+    },
+    "unknown": {
+        "what_happened": "An unexpected error occurred with {tool}.",
+        "what_to_do": "Check the log file for the full stack trace.",
+        "severity": "warning",
+    },
+}
+
+_TOOL_OVERRIDES: dict[str, dict[str, dict]] = {
+    "quickbooks": {
+        "token_expired": {"what_to_do": "Refresh the token: `python -m auth.quickbooks_auth`"},
+    },
+    "jobber": {
+        "token_expired": {"what_to_do": "Refresh the token: `python -m auth.jobber_auth`"},
+    },
+    "google": {
+        "token_expired": {"what_to_do": "Re-authenticate: `python -m auth.google_auth`"},
+    },
+    "asana": {
+        "permission_error": {
+            "what_to_do_append": (
+                "Asana occasionally returns 403 for tasks in restricted projects"
+                " — check if this is a one-off before escalating."
+            ),
+        },
+    },
+}
+
+_RECONCILIATION_DEFAULTS: dict[str, dict] = {
+    "reconciliation_mismatch": {
+        "what_happened": "{tool} record for {entity} doesn't match the canonical database.",
+        "what_to_do": "Review the mismatch details below. Auto-repaired mismatches need no action.",
+        "severity": "info",
+    },
+    "reconciliation_missing": {
+        "what_happened": "Expected record in {tool} for {entity} was not found.",
+        "what_to_do": "The record may need to be recreated. Check the log for the canonical ID.",
+        "severity": "warning",
+    },
+    "reconciliation_automation_gap": {
+        "what_happened": "{count} completed jobs have no invoices after 24 hours.",
+        "what_to_do": (
+            "The Jobber-to-QuickBooks automation may have missed them."
+            " Check poll_state and QuickBooks auth."
+        ),
+        "severity": "critical",
+    },
+}
+
+_SEVERITY_COLORS: dict[str, str] = {
+    "info": "#2196F3",
+    "warning": "#FFC107",
+    "critical": "#D32F2F",
+}
+
+_SEVERITY_EMOJIS: dict[str, str] = {
+    "info": "",
+    "warning": ":warning: ",
+    "critical": ":rotating_light: ",
+}
+
+
+def _resolve_translation(
+    tool_name: str,
+    category: str,
+    exc_str: str = "",
+) -> dict:
+    """Return {what_happened, what_to_do, severity} with tool overrides and {tool} interpolated."""
+    entry = _CATEGORY_DEFAULTS[category].copy()
+
+    # manual category: the exc string IS the what_happened
+    if category == "manual":
+        entry["what_happened"] = exc_str
+
+    # Apply tool-specific overrides
+    override = _TOOL_OVERRIDES.get(tool_name, {}).get(category, {})
+    if "what_to_do" in override:
+        entry["what_to_do"] = override["what_to_do"]
+    if "what_to_do_append" in override:
+        entry["what_to_do"] = entry["what_to_do"] + " " + override["what_to_do_append"]
+
+    # Interpolate {tool} placeholder
+    tool_title = tool_name.title()
+    entry["what_happened"] = entry["what_happened"].replace("{tool}", tool_title)
+    entry["what_to_do"] = entry["what_to_do"].replace("{tool}", tool_title)
+
+    return entry
+
+
 def _classify(exc: Union[Exception, str]) -> str:
     """Map an exception or HTTP status string to a category name."""
     if isinstance(exc, str):
