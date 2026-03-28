@@ -213,6 +213,108 @@ def _classify(exc: Union[Exception, str]) -> str:
     return "unknown"
 
 
+def _build_error_blocks(
+    what_happened: str,
+    what_was_affected: str,
+    what_to_do: str,
+    severity: str,
+    tool_name: str,
+    header_text: str = "Automation Issue",
+) -> list:
+    """Build Block Kit blocks for report_error() messages."""
+    emoji = _SEVERITY_EMOJIS[severity]
+    now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    return [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"{emoji}{header_text}",
+                "emoji": True,
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*What happened:* {what_happened}"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*What was affected:* {what_was_affected}"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*What to do:* {what_to_do}"},
+        },
+        {"type": "divider"},
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"_Tool: {tool_name} | {now_utc}_"},
+            ],
+        },
+    ]
+
+
+def _build_reconciliation_blocks(
+    what_happened: str,
+    what_was_affected: str,
+    what_to_do: str,
+    severity: str,
+    tool_name: str,
+    category: str,
+    details: Optional[str] = None,
+) -> list:
+    """Build Block Kit blocks for report_reconciliation_issue() messages."""
+    now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    blocks: list = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": ":mag: Data Mismatch Detected",
+                "emoji": True,
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*What happened:* {what_happened}"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*What was affected:* {what_was_affected}"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*What to do:* {what_to_do}"},
+        },
+    ]
+
+    if details:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": details},
+        })
+
+    blocks.extend([
+        {"type": "divider"},
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"_Tool: {tool_name} | Category: {category} | {now_utc}_",
+                }
+            ],
+        },
+    ])
+
+    return blocks
+
+
 def setup_channel(dry_run: bool = False) -> Optional[str]:
     """Create #automation-failure if it doesn't exist, set its topic, cache and return channel ID.
 

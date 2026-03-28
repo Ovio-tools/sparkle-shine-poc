@@ -237,5 +237,93 @@ class TestSetupChannel(unittest.TestCase):
         assert call_kwargs.get("limit") == 200
 
 
+class TestBuildErrorBlocks(unittest.TestCase):
+    def test_block_types_in_correct_order(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="The connection to Quickbooks has expired.",
+            what_was_affected="Invoice for Sarah Chen was skipped.",
+            what_to_do="Refresh the token: python -m auth.quickbooks_auth",
+            severity="warning",
+            tool_name="quickbooks",
+        )
+        types = [b["type"] for b in blocks]
+        assert types == ["header", "divider", "section", "section", "section", "divider", "context"]
+
+    def test_warning_header_contains_warning_emoji(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="msg", what_was_affected="ctx", what_to_do="do",
+            severity="warning", tool_name="jobber",
+        )
+        header_text = blocks[0]["text"]["text"]
+        assert ":warning:" in header_text
+
+    def test_critical_header_contains_rotating_light(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="msg", what_was_affected="ctx", what_to_do="do",
+            severity="critical", tool_name="jobber",
+            header_text="Automation Issue — Repeated Failures",
+        )
+        header_text = blocks[0]["text"]["text"]
+        assert ":rotating_light:" in header_text
+
+    def test_info_header_has_no_severity_emoji(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="msg", what_was_affected="ctx", what_to_do="do",
+            severity="info", tool_name="quickbooks",
+        )
+        header_text = blocks[0]["text"]["text"]
+        assert ":warning:" not in header_text
+        assert ":rotating_light:" not in header_text
+
+    def test_what_happened_appears_in_section(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="Connection timed out.",
+            what_was_affected="Job sync",
+            what_to_do="Retry",
+            severity="warning",
+            tool_name="jobber",
+        )
+        section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
+        assert any("Connection timed out." in t for t in section_texts)
+
+    def test_what_was_affected_appears_in_section(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="msg",
+            what_was_affected="Invoice for Sarah Chen was skipped.",
+            what_to_do="Retry",
+            severity="warning",
+            tool_name="quickbooks",
+        )
+        section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
+        assert any("Invoice for Sarah Chen was skipped." in t for t in section_texts)
+
+    def test_context_footer_contains_tool_name(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="msg", what_was_affected="ctx", what_to_do="do",
+            severity="info", tool_name="asana",
+        )
+        context_block = blocks[-1]
+        assert context_block["type"] == "context"
+        context_text = context_block["elements"][0]["text"]
+        assert "asana" in context_text
+
+    def test_header_uses_plain_text_with_emoji_flag(self):
+        from simulation.error_reporter import _build_error_blocks
+        blocks = _build_error_blocks(
+            what_happened="msg", what_was_affected="ctx", what_to_do="do",
+            severity="warning", tool_name="jobber",
+        )
+        header_block = blocks[0]
+        assert header_block["text"]["type"] == "plain_text"
+        assert header_block["text"].get("emoji") is True
+
+
 if __name__ == "__main__":
     unittest.main()
