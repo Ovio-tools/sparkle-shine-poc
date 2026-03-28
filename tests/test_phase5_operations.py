@@ -987,3 +987,89 @@ class TestJobCompletionGeneratorOutcomes(unittest.TestCase):
             "SELECT churn_risk FROM clients WHERE id = ?", ("SS-LEAD-0001",)
         ).fetchone())
         self.assertNotEqual(client["churn_risk"], "high")
+
+
+# ── Integration tests (require RUN_INTEGRATION=1) ────────────────────────────
+
+@unittest.skipUnless(os.getenv("RUN_INTEGRATION"), "Skipping integration tests")
+class TestOperationsIntegration(unittest.TestCase):
+    """Live API tests — require real Jobber credentials and sparkle_shine.db."""
+
+    DB_PATH = "sparkle_shine.db"
+
+    def test_jobber_client_create_and_job_create_roundtrip(self):
+        """NewClientSetupGenerator creates a real Jobber client and job."""
+        from simulation.generators.operations import NewClientSetupGenerator
+        from database.mappings import get_tool_id
+        import sqlite3
+
+        # Find a ready won deal that has no Jobber mapping yet
+        conn = sqlite3.connect(self.DB_PATH)
+        conn.row_factory = sqlite3.Row
+        ready = conn.execute("""
+            SELECT canonical_id FROM won_deals
+            WHERE start_date <= date('now')
+              AND canonical_id NOT IN (
+                  SELECT canonical_id FROM cross_tool_mapping WHERE tool_name = 'jobber'
+              )
+            LIMIT 1
+        """).fetchone()
+        conn.close()
+
+        if not ready:
+            self.skipTest("No ready won deals without Jobber mapping")
+
+        canonical_id = ready["canonical_id"]
+        gen = NewClientSetupGenerator(db_path=self.DB_PATH)
+        result = gen.execute(dry_run=False)
+
+        self.assertTrue(result.success, f"Setup failed: {result.message}")
+        jobber_client_id = get_tool_id(canonical_id, "jobber", db_path=self.DB_PATH)
+        self.assertIsNotNone(jobber_client_id)
+        self.assertTrue(jobber_client_id.startswith("Z2lkOi"),
+            "Jobber IDs are base64-encoded Global IDs starting with Z2lkOi")
+
+    def test_rescheduled_job_picked_up_next_day(self):
+        """Rescheduled job appears in JobSchedulingGenerator pass-2 on its new date."""
+        from simulation.generators.operations import JobCompletionGenerator, JobSchedulingGenerator
+        import sqlite3
+
+        # Find a scheduled job today to reschedule
+        conn = sqlite3.connect(self.DB_PATH)
+        conn.row_factory = sqlite3.Row
+        job = conn.execute("""
+            SELECT j.id FROM jobs j
+            JOIN cross_tool_mapping m ON j.id = m.canonical_id AND m.tool_name = 'jobber'
+            WHERE j.status = 'scheduled'
+              AND j.scheduled_date = date('now')
+            LIMIT 1
+        """).fetchone()
+        conn.close()
+
+        if not job:
+            self.skipTest("No scheduled jobs today with Jobber mappings")
+
+        job_id = job["id"]
+
+        # Force rescheduled outcome
+        with patch("random.random", return_value=0.98):
+            completion_gen = JobCompletionGenerator(db_path=self.DB_PATH)
+            result = completion_gen.execute(dry_run=False, job_id=job_id)
+
+        self.assertTrue(result.success)
+        self.assertIn("rescheduled", result.message)
+
+        # Verify new job exists in SQLite for tomorrow
+        from datetime import date, timedelta
+        tomorrow = (date.today() + timedelta(days=1 if date.today().weekday() < 4 else 3)).isoformat()
+        conn2 = sqlite3.connect(self.DB_PATH)
+        conn2.row_factory = sqlite3.Row
+        new_job = conn2.execute("""
+            SELECT id FROM jobs
+            WHERE client_id = (SELECT client_id FROM jobs WHERE id = ?)
+              AND scheduled_date = ?
+              AND status = 'scheduled'
+              AND id != ?
+        """, (job_id, tomorrow, job_id)).fetchone()
+        conn2.close()
+        self.assertIsNotNone(new_job, "Rescheduled job not found in SQLite for tomorrow")
