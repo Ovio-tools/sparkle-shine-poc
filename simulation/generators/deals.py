@@ -241,7 +241,60 @@ class DealGenerator:
         return GeneratorResult(success=True, message="no change")
 
     def _complete_won_deal(self, deal: dict, contract: dict, dry_run: bool = False) -> None:
-        raise NotImplementedError("Task 5 — implement _complete_won_deal")
+        """Write won-deal contract details to Pipedrive and SQLite."""
+        deal_id = deal["id"]
+
+        if not dry_run:
+            time.sleep(0.15)
+            client = get_client("pipedrive")
+            resp = client.put(
+                f"https://api.pipedrive.com/v1/deals/{deal_id}",
+                json={
+                    "stage_id": self._won_stage_id,
+                    "status": "won",
+                    self._client_type_field:  contract["contract_type"],
+                    self._service_type_field: contract["service_frequency"],
+                    self._emv_field:          contract["contract_value"],
+                },
+            )
+            if resp.status_code not in (200, 201):
+                logger.warning("PUT deals/%s (won) failed: %s", deal_id, resp.status_code)
+                return
+        else:
+            logger.debug("[dry_run] Would mark deal %s as won", deal_id)
+
+        # SQLite: commercial deals (SS-PROP) only
+        canonical_id = get_canonical_id("pipedrive", str(deal_id), self.db_path)
+        if canonical_id is None:
+            logger.warning(
+                "Won deal %s has no canonical ID mapping — skipping SQLite update", deal_id
+            )
+        elif canonical_id.startswith("SS-PROP-"):
+            if not dry_run:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute(
+                        "UPDATE commercial_proposals "
+                        "SET status='won', start_date=?, crew_assignment=? "
+                        "WHERE id=?",
+                        (
+                            contract["start_date"].isoformat(),
+                            contract["crew_assignment"],
+                            canonical_id,
+                        ),
+                    )
+        # SS-LEAD: no SQLite write
+
+        start = contract["start_date"].isoformat()
+        crew  = contract["crew_assignment"]
+        svc   = contract["service_frequency"]
+        val   = contract["contract_value"]
+        note = (
+            f"Deal won. Contract details:\n"
+            f"Start date: {start}\n"
+            f"Crew: {crew}\n"
+            f"Service: {svc}, ${val:.2f}/visit"
+        )
+        self._log_activity(deal_id, note, dry_run=dry_run)
 
     def _log_activity(self, deal_id: int, note: str, dry_run: bool = False) -> None:
         """POST a note activity to Pipedrive for the given deal."""

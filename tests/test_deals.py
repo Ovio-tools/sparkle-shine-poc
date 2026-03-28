@@ -343,5 +343,168 @@ class TestAdvanceDeal(unittest.TestCase):
         mc.post.assert_not_called()
 
 
+class TestCompleteWonDeal(unittest.TestCase):
+    """Mock Pipedrive PUT+POST, real SQLite in a temp file."""
+
+    def setUp(self):
+        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        from database.schema import init_db
+        from database.mappings import register_mapping
+        init_db(self._db_path)
+        from simulation.generators.deals import DealGenerator
+        self.gen = DealGenerator(db_path=self._db_path)
+
+        # Insert SS-PROP-0001 in commercial_proposals (status column allows 'negotiating')
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "INSERT INTO commercial_proposals (id, title, status) "
+            "VALUES ('SS-PROP-0001', 'Test Proposal', 'negotiating')"
+        )
+        conn.commit()
+        conn.close()
+        # Register pipedrive deal 200 → SS-PROP-0001
+        register_mapping("SS-PROP-0001", "pipedrive", "200", db_path=self._db_path)
+
+        # Insert SS-LEAD-0001 in leads and register deal 201
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "INSERT INTO leads (id, first_name, last_name, lead_type, status) "
+            "VALUES ('SS-LEAD-0001', 'Jane', 'Doe', 'residential', 'qualified')"
+        )
+        conn.commit()
+        conn.close()
+        register_mapping("SS-LEAD-0001", "pipedrive", "201", db_path=self._db_path)
+
+        self.contract = {
+            "contract_type":     "commercial",
+            "service_frequency": "nightly_clean",
+            "contract_value":    2500.00,
+            "start_date":        date(2026, 4, 10),
+            "crew_assignment":   "Crew A",
+        }
+
+    def tearDown(self):
+        os.close(self._fd)
+        os.unlink(self._db_path)
+
+    def _mc(self, put_status=200):
+        mc = MagicMock()
+        mc.put.return_value.status_code = put_status
+        mc.post.return_value.status_code = 201
+        return mc
+
+    def _deal(self, deal_id, client_type="commercial"):
+        return {
+            "id": deal_id,
+            "stage_id": 11,
+            self.gen._client_type_field: client_type,
+            self.gen._emv_field: 2500,
+        }
+
+    def test_ss_prop_updates_commercial_proposals(self):
+        with patch("simulation.generators.deals.get_client", return_value=self._mc()):
+            with patch("time.sleep"):
+                self.gen._complete_won_deal(self._deal(200), self.contract, dry_run=False)
+
+        conn = sqlite3.connect(self._db_path)
+        row = conn.execute(
+            "SELECT status, start_date, crew_assignment "
+            "FROM commercial_proposals WHERE id = 'SS-PROP-0001'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row[0], "won")
+        self.assertEqual(row[1], "2026-04-10")
+        self.assertEqual(row[2], "Crew A")
+
+    def test_ss_lead_does_not_write_sqlite(self):
+        """Residential deal (SS-LEAD): activity POST fires but no SQLite update."""
+        residential_contract = dict(self.contract, contract_type="residential")
+        mc = self._mc()
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            with patch("time.sleep"):
+                self.gen._complete_won_deal(
+                    self._deal(201, client_type="residential"),
+                    residential_contract,
+                    dry_run=False,
+                )
+        # Activity note was sent
+        mc.post.assert_called_once()
+        # leads table has no 'status' column change (no update attempted)
+        conn = sqlite3.connect(self._db_path)
+        lead_row = conn.execute(
+            "SELECT status FROM leads WHERE id = 'SS-LEAD-0001'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(lead_row[0], "qualified")  # unchanged
+
+    def test_none_canonical_id_logs_warning_and_skips_sqlite(self):
+        """Deal with no cross_tool_mapping entry: logs warning, skips SQLite."""
+        with patch("simulation.generators.deals.get_client", return_value=self._mc()):
+            with patch("time.sleep"):
+                with self.assertLogs("simulation.deals", level="WARNING") as cm:
+                    self.gen._complete_won_deal(self._deal(999), self.contract, dry_run=False)
+        self.assertTrue(
+            any("no canonical ID mapping" in line for line in cm.output),
+            msg=f"Expected warning not found in: {cm.output}",
+        )
+
+    def test_dry_run_skips_put_post_and_sqlite(self):
+        mc = MagicMock()
+        with patch("simulation.generators.deals.get_client", return_value=mc):
+            self.gen._complete_won_deal(self._deal(200), self.contract, dry_run=True)
+
+        mc.put.assert_not_called()
+        mc.post.assert_not_called()
+
+        conn = sqlite3.connect(self._db_path)
+        row = conn.execute(
+            "SELECT status FROM commercial_proposals WHERE id = 'SS-PROP-0001'"
+        ).fetchone()
+        conn.close()
+        self.assertNotEqual(row[0], "won")
+
+
+class TestServiceFrequencyBranching(unittest.TestCase):
+    """3 cases × 20 iterations — assert no crossover between pools."""
+
+    def setUp(self):
+        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        from database.schema import init_db
+        init_db(self._db_path)
+        from simulation.generators.deals import DealGenerator
+        self.gen = DealGenerator(db_path=self._db_path)
+
+    def tearDown(self):
+        os.close(self._fd)
+        os.unlink(self._db_path)
+
+    def test_residential_recurring_pool_when_emv_positive(self):
+        """Client Type=residential, EMV > 0 → only weekly/biweekly/monthly."""
+        pool = {"weekly_recurring", "biweekly_recurring", "monthly_recurring"}
+        random.seed(0)
+        for i in range(20):
+            result = self.gen._pick_service_frequency("residential", 200.0)
+            self.assertIn(result, pool,
+                f"Iteration {i}: got '{result}' for residential+EMV>0, expected pool={pool}")
+
+    def test_residential_one_time_pool_when_emv_zero(self):
+        """Client Type=residential, EMV = 0 → only one_time_* services."""
+        pool = {"one_time_standard", "one_time_deep_clean", "one_time_move_in_out"}
+        random.seed(0)
+        for i in range(20):
+            result = self.gen._pick_service_frequency("residential", 0.0)
+            self.assertIn(result, pool,
+                f"Iteration {i}: got '{result}' for residential+EMV=0, expected pool={pool}")
+
+    def test_commercial_pool(self):
+        """Client Type=commercial → only nightly_clean/weekend_deep_clean/one_time_project."""
+        pool = {"nightly_clean", "weekend_deep_clean", "one_time_project"}
+        random.seed(0)
+        for i in range(20):
+            result = self.gen._pick_service_frequency("commercial", 0.0)
+            self.assertIn(result, pool,
+                f"Iteration {i}: got '{result}' for commercial, expected pool={pool}")
+
+
 if __name__ == "__main__":
     unittest.main()
