@@ -337,9 +337,9 @@ def _get_recurrence_field(session) -> Optional[str]:
             if candidate in field_names:
                 _recurrence_field_cache = candidate
                 break
+        _recurrence_field_checked = True
     except Exception:
-        pass
-    _recurrence_field_checked = True
+        logger.warning("Failed to introspect Jobber recurrence field; will retry next call")
     return _recurrence_field_cache
 
 
