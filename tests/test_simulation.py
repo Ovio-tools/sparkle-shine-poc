@@ -212,9 +212,9 @@ class TestSimulationEngineInit(unittest.TestCase):
         """Zero registered generators should warn but not raise."""
         from simulation.engine import SimulationEngine
         with patch("signal.signal"):
-            # _register_generators will find nothing (no generator modules exist yet)
-            engine = SimulationEngine()
-        # Engine should be in a valid state
+            with patch.object(SimulationEngine, "_register_generators"):
+                engine = SimulationEngine()
+        # Engine should be in a valid state with no generators registered
         self.assertTrue(engine.running)
         self.assertEqual(engine._generators, {})
 
@@ -530,11 +530,12 @@ class TestRunOnce(unittest.TestCase):
         self.assertEqual(engine.event_count, 0)
 
     def test_run_once_sleeps_between_events(self):
-        engine, mock_gen = self._make_engine_with_mock_gen()
+        with patch.object(SimulationEngine, "_register_generators"):
+            engine, mock_gen = self._make_engine_with_mock_gen()
         with patch("time.sleep") as mock_sleep:
             engine.run_once(date(2026, 3, 27))
-        # sleep should be called once per event dispatched
-        self.assertEqual(mock_sleep.call_count, mock_gen.execute.call_count)
+        # sleep should be called once per event dispatched (all generators)
+        self.assertEqual(mock_sleep.call_count, engine.event_count)
 
 
 class TestShutdown(unittest.TestCase):
