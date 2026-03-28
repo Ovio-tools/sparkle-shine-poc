@@ -220,7 +220,7 @@ def _build_error_blocks(
     severity: str,
     tool_name: str,
     header_text: str = "Automation Issue",
-) -> list:
+) -> list[dict]:
     """Build Block Kit blocks for report_error() messages."""
     emoji = _SEVERITY_EMOJIS[severity]
     now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -265,7 +265,7 @@ def _build_reconciliation_blocks(
     tool_name: str,
     category: str,
     details: Optional[str] = None,
-) -> list:
+) -> list[dict]:
     """Build Block Kit blocks for report_reconciliation_issue() messages."""
     now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
