@@ -848,3 +848,182 @@ class JobSchedulingGenerator:
             raise
         finally:
             conn.close()
+
+
+# ── JobCompletionGenerator ────────────────────────────────────────────────────
+
+class JobCompletionGenerator:
+    """Type 2 generator: fires at realistic times, records job outcomes + reviews.
+
+    Dispatched by timed events queued by JobSchedulingGenerator.
+    Receives job_id in kwargs.
+
+    Outcome probabilities from DAILY_VOLUMES["job_completion"]:
+      92% completed, 3% cancelled, 2% no-show, 3% rescheduled
+    """
+
+    def __init__(self, db_path: str = "sparkle_shine.db"):
+        self.db_path = db_path
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        """Add churn_risk column to clients if not present."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(clients)")}
+        if "churn_risk" not in cols:
+            conn.execute("ALTER TABLE clients ADD COLUMN churn_risk TEXT DEFAULT 'normal'")
+            conn.commit()
+
+    def execute(self, dry_run: bool = False, job_id: Optional[str] = None) -> GeneratorResult:
+        if not job_id:
+            return GeneratorResult(success=False, message="job_id required")
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            self._ensure_schema(conn)
+
+            job = conn.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not job:
+                return GeneratorResult(success=False, message=f"job {job_id}: not found")
+            job = dict(job)
+
+            if dry_run:
+                return GeneratorResult(success=True, message=f"job {job_id}: dry_run skip")
+
+            session = get_client("jobber")
+            jobber_job_id = get_tool_id(job_id, "jobber", db_path=self.db_path)
+            if not jobber_job_id:
+                return GeneratorResult(success=False, message=f"job {job_id}: no jobber mapping")
+
+            # Determine outcome
+            cfg = DAILY_VOLUMES["job_completion"]
+            roll = random.random()
+            if roll < cfg["on_time_rate"]:
+                outcome = "completed"
+            elif roll < cfg["on_time_rate"] + cfg["cancellation_rate"]:
+                outcome = "cancelled"
+            elif roll < cfg["on_time_rate"] + cfg["cancellation_rate"] + cfg["no_show_rate"]:
+                outcome = "no-show"
+            else:
+                outcome = "rescheduled"
+
+            if outcome == "completed":
+                self._handle_completed(job, job_id, jobber_job_id, session, conn)
+            elif outcome in ("cancelled", "no-show"):
+                self._handle_cancelled_or_noshow(job, job_id, jobber_job_id, outcome, session, conn)
+            else:
+                self._handle_rescheduled(job, job_id, jobber_job_id, session, conn)
+
+            conn.commit()
+            return GeneratorResult(success=True, message=f"job {job_id}: {outcome}")
+
+        except Exception as e:
+            conn.rollback()
+            logger.exception("JobCompletionGenerator failed for %s", job_id)
+            return GeneratorResult(success=False, message=f"job {job_id}: {e}")
+        finally:
+            conn.close()
+
+    def _handle_completed(
+        self, job: dict, job_id: str, jobber_job_id: str, session, conn: sqlite3.Connection
+    ) -> None:
+        service_type_id = job.get("service_type_id", "std-residential")
+        expected = _expected_duration(service_type_id, "regular")
+        actual = int(expected * random.uniform(0.85, 1.15))
+        completed_at = datetime.utcnow().isoformat()
+
+        # Jobber: close the job
+        resp = _gql(session, _JOB_CLOSE, {
+            "jobId": jobber_job_id,
+            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
+        })
+        errs = _gql_user_errors(resp, "jobClose")
+        if errs:
+            raise RuntimeError(f"jobClose errors: {errs}")
+
+        conn.execute("""
+            UPDATE jobs
+            SET status = 'completed', duration_minutes_actual = ?, completed_at = ?
+            WHERE id = ?
+        """, (actual, completed_at, job_id))
+
+        # Insert review
+        today = date.today()
+        crew_id = job.get("crew_id") or ""
+        crew_name = crew_id.replace("crew-", "Crew ").title()  # "crew-a" → "Crew A"
+        dist = _adjusted_rating_distribution(crew_name, today.weekday())
+        ratings = [r for r, _ in dist]
+        weights = [w for _, w in dist]
+        rating = random.choices(ratings, weights=weights, k=1)[0]
+
+        review_id = generate_id("REV", db_path=self.db_path)
+        conn.execute("""
+            INSERT INTO reviews (id, client_id, job_id, rating, platform, review_date)
+            VALUES (?, ?, ?, ?, 'internal', ?)
+        """, (review_id, job["client_id"], job_id, rating, today.isoformat()))
+
+    def _handle_cancelled_or_noshow(
+        self, job: dict, job_id: str, jobber_job_id: str,
+        outcome: str, session, conn: sqlite3.Connection
+    ) -> None:
+        conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (outcome, job_id))
+
+        _gql(session, _JOB_CLOSE, {
+            "jobId": jobber_job_id,
+            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
+        })
+
+        # Churn risk: 3+ cancelled/no-show in 60 days → high
+        count_row = conn.execute("""
+            SELECT COUNT(*) FROM jobs
+            WHERE client_id = ?
+              AND status IN ('cancelled', 'no-show')
+              AND scheduled_date >= date('now', '-60 days')
+        """, (job["client_id"],)).fetchone()
+        if count_row and count_row[0] >= 3:
+            conn.execute(
+                "UPDATE clients SET churn_risk = 'high' WHERE id = ?",
+                (job["client_id"],),
+            )
+
+    def _handle_rescheduled(
+        self, job: dict, job_id: str, jobber_job_id: str, session, conn: sqlite3.Connection
+    ) -> None:
+        # Cancel original slot
+        conn.execute("UPDATE jobs SET status = 'cancelled' WHERE id = ?", (job_id,))
+        _gql(session, _JOB_CLOSE, {
+            "jobId": jobber_job_id,
+            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
+        })
+
+        # New job for next business day
+        tomorrow = _add_business_days(date.today(), 1)
+        new_job_id = generate_id("JOB", db_path=self.db_path)
+
+        service_type_id = job.get("service_type_id", "std-residential")
+        crew_id = job.get("crew_id") or "crew-a"
+
+        # jobCreate for the rescheduled slot
+        property_id = _get_or_fetch_property_id(job["client_id"], session, self.db_path)
+        job_input = {
+            "propertyId": property_id or "",
+            "title": service_type_id.replace("-", " ").title(),
+            "invoicing": {
+                "invoicingType": "FIXED_PRICE",
+                "invoicingSchedule": "ON_COMPLETION",
+            },
+            "timeframe": {"startAt": tomorrow.isoformat()},
+        }
+        resp = _gql(session, _JOB_CREATE, {"input": job_input})
+        errs = _gql_user_errors(resp, "jobCreate")
+        if errs:
+            raise RuntimeError(f"jobCreate (rescheduled) errors: {errs}")
+        new_jobber_job_id = resp["data"]["jobCreate"]["job"]["id"]
+
+        conn.execute("""
+            INSERT INTO jobs (id, client_id, crew_id, service_type_id, scheduled_date, status)
+            VALUES (?, ?, ?, ?, ?, 'scheduled')
+        """, (new_job_id, job["client_id"], crew_id, service_type_id, tomorrow.isoformat()))
+
+        register_mapping(new_job_id, "jobber", new_jobber_job_id, db_path=self.db_path)

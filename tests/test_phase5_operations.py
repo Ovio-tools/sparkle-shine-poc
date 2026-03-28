@@ -681,3 +681,115 @@ class TestJobSchedulingGeneratorPass2(unittest.TestCase):
         self.assertEqual(queue_calls[0][1], "job_completion")
         self.assertEqual(queue_calls[0][2]["job_id"], "SS-JOB-EXIST")
         self.assertGreater(queue_calls[0][0], datetime(2026, 3, 30, 7, 0))
+
+
+class TestJobCompletionGeneratorCompleted(unittest.TestCase):
+    """completed outcome: jobs updated, review inserted."""
+
+    def _make_db_with_job(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT, scheduled_time TEXT,
+                duration_minutes_actual INTEGER,
+                status TEXT DEFAULT 'scheduled', address TEXT, notes TEXT,
+                review_requested INTEGER DEFAULT 0, completed_at TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT,
+                first_name TEXT, last_name TEXT, company_name TEXT,
+                email TEXT, phone TEXT, address TEXT,
+                neighborhood TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                acquisition_source TEXT, first_service_date TEXT,
+                last_service_date TEXT, lifetime_value REAL DEFAULT 0,
+                notes TEXT, created_at TEXT,
+                churn_risk TEXT DEFAULT 'normal'
+            );
+            CREATE TABLE reviews (
+                id TEXT PRIMARY KEY, client_id TEXT, job_id TEXT,
+                rating INTEGER, review_text TEXT, platform TEXT,
+                review_date TEXT, response_text TEXT, response_date TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("SS-JOB-0001", "SS-LEAD-0001", "crew-a", "recurring-weekly",
+             "2026-03-30", "07:00", None, "scheduled", None, None, 0, None),
+        )
+        conn.execute(
+            "INSERT INTO clients VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("SS-LEAD-0001", "residential", "Alice", "Smith", None,
+             "a@test.com", None, None, None, None, "active",
+             None, None, None, 0.0, None, "2025-01-01", "normal"),
+        )
+        conn.execute(
+            "INSERT INTO cross_tool_mapping VALUES (?,?,?,?,?)",
+            ("SS-JOB-0001", "jobber", "GQL-JOB-0001", None, "2026-03-30"),
+        )
+        conn.commit()
+        return conn
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_completed_updates_job_and_inserts_review(
+        self, mock_gql, mock_get_tool_id, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        from simulation.generators.operations import JobCompletionGenerator
+
+        conn = self._make_db_with_job()
+        mock_get_tool_id.return_value = "GQL-JOB-0001"
+        mock_gen_id.return_value = "SS-REV-0001"
+        mock_gql.return_value = {
+            "data": {"jobClose": {"job": {"id": "GQL-JOB-0001", "jobStatus": "COMPLETED"}, "userErrors": []}}
+        }
+
+        gen = JobCompletionGenerator(db_path=":memory:")
+
+        class _NoCloseConn:
+            def __init__(self, c): self._c = c
+            def close(self): pass
+            def __getattr__(self, name): return getattr(self._c, name)
+
+        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+            with patch("random.random", return_value=0.01):  # force 'completed' outcome
+                result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
+
+        self.assertTrue(result.success)
+
+        job = dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("SS-JOB-0001",)).fetchone())
+        self.assertEqual(job["status"], "completed")
+        self.assertIsNotNone(job["duration_minutes_actual"])
+        self.assertIsNotNone(job["completed_at"])
+
+        review = conn.execute("SELECT * FROM reviews WHERE job_id = ?", ("SS-JOB-0001",)).fetchone()
+        self.assertIsNotNone(review)
+        self.assertEqual(dict(review)["platform"], "internal")
+        self.assertIn(dict(review)["rating"], (1, 2, 3, 4, 5))
+
+    def test_completed_skips_review_in_dry_run(self):
+        from simulation.generators.operations import JobCompletionGenerator
+        conn = self._make_db_with_job()
+
+        gen = JobCompletionGenerator(db_path=":memory:")
+
+        class _NoCloseConn:
+            def __init__(self, c): self._c = c
+            def close(self): pass
+            def __getattr__(self, name): return getattr(self._c, name)
+
+        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+            result = gen.execute(dry_run=True, job_id="SS-JOB-0001")
+
+        # dry_run: no API calls, no writes, no review
+        review = conn.execute("SELECT * FROM reviews WHERE job_id = ?", ("SS-JOB-0001",)).fetchone()
+        self.assertIsNone(review)
