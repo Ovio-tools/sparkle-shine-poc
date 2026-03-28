@@ -377,3 +377,278 @@ def _get_or_fetch_property_id(canonical_id: str, session, db_path: str) -> Optio
         return prop_id
     except Exception:
         return None
+
+
+# ── NewClientSetupGenerator ───────────────────────────────────────────────────
+
+class NewClientSetupGenerator:
+    """Type 1 generator: creates Jobber client + schedule for won deals.
+
+    Reads won_deals table for deals whose start_date <= today with no Jobber
+    mapping yet. Processes all ready deals in one execute() call. Each client
+    is wrapped in its own try/except so a single failure does not abort the rest.
+    """
+
+    def __init__(self, db_path: str = "sparkle_shine.db"):
+        self.db_path = db_path
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        """Add client_type column to recurring_agreements if not present."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(recurring_agreements)")}
+        if "client_type" not in cols:
+            conn.execute(
+                "ALTER TABLE recurring_agreements ADD COLUMN client_type TEXT DEFAULT 'residential'"
+            )
+            conn.commit()
+
+    def execute(self, dry_run: bool = False) -> GeneratorResult:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            self._ensure_schema(conn)
+            ready_deals = conn.execute("""
+                SELECT * FROM won_deals
+                WHERE start_date <= date('now')
+                  AND canonical_id NOT IN (
+                      SELECT canonical_id FROM cross_tool_mapping
+                      WHERE tool_name = 'jobber'
+                  )
+            """).fetchall()
+            ready_deals = [dict(r) for r in ready_deals]
+
+            if not ready_deals:
+                return GeneratorResult(success=True, message="no new clients ready")
+
+            session = get_client("jobber") if not dry_run else None
+            results = []
+
+            for deal in ready_deals:
+                try:
+                    if dry_run:
+                        results.append(("ok", deal["canonical_id"]))
+                        continue
+                    self._setup_client(deal, session, conn)
+                    results.append(("ok", deal["canonical_id"]))
+                except Exception as e:
+                    logger.exception("Setup failed for %s", deal["canonical_id"])
+                    results.append(("failed", deal["canonical_id"], str(e)))
+
+            conn.commit()
+            succeeded = sum(1 for r in results if r[0] == "ok")
+            failed = len(results) - succeeded
+            if failed:
+                return GeneratorResult(
+                    success=False,
+                    message=f"setup {succeeded} clients, {failed} failed",
+                )
+            return GeneratorResult(success=True, message=f"setup {succeeded} new clients")
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _setup_client(self, deal: dict, session, conn: sqlite3.Connection) -> None:
+        """Create a Jobber client + schedule for one won deal."""
+        canonical_id = deal["canonical_id"]
+        client_type = deal["client_type"]
+        service_frequency = deal["service_frequency"]
+        contract_value = deal["contract_value"] or 0.0
+        start_date = date.fromisoformat(deal["start_date"])
+        crew_assignment = deal["crew_assignment"] or "Crew A"
+        pipedrive_deal_id = deal.get("pipedrive_deal_id")
+
+        # 1. Look up client info from the appropriate table
+        if client_type == "commercial":
+            row = conn.execute(
+                "SELECT * FROM clients WHERE id = ?", (canonical_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"No clients row for {canonical_id}")
+            row = dict(row)
+            name = row.get("company_name") or f"{row.get('first_name','')} {row.get('last_name','')}".strip()
+            email = row.get("email", "")
+            phone = row.get("phone", "")
+            address = row.get("address", "Austin, TX")
+        else:
+            row = conn.execute(
+                "SELECT * FROM leads WHERE id = ?", (canonical_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"No leads row for {canonical_id}")
+            row = dict(row)
+            name = f"{row.get('first_name','')} {row.get('last_name','')}".strip()
+            email = row.get("email", "")
+            phone = row.get("phone", "")
+            address = "Austin, TX"  # leads table has no address column
+
+        # 2. clientCreate → jobber_client_id
+        client_input: dict = {}
+        if client_type == "residential":
+            parts = name.split(" ", 1)
+            client_input["firstName"] = parts[0]
+            client_input["lastName"] = parts[1] if len(parts) > 1 else ""
+        else:
+            client_input["companyName"] = name
+        if email:
+            client_input["emails"] = [{"description": "MAIN", "address": email}]
+        if phone:
+            client_input["phones"] = [{"description": "MAIN", "number": phone}]
+        if address:
+            parts = [p.strip() for p in address.split(",")]
+            client_input["billingAddress"] = {
+                "street1": parts[0],
+                "city": parts[1] if len(parts) > 1 else "Austin",
+                "province": "TX",
+                "country": "US",
+            }
+
+        resp = _gql(session, _CLIENT_CREATE, {"input": client_input})
+        errs = _gql_user_errors(resp, "clientCreate")
+        if errs:
+            raise RuntimeError(f"clientCreate errors: {errs}")
+        jobber_client_id = resp["data"]["clientCreate"]["client"]["id"]
+
+        # 3. Register client mapping
+        register_mapping(canonical_id, "jobber", jobber_client_id, db_path=self.db_path)
+
+        # 4. propertyCreate → jobber_property_id
+        prop_parts = [p.strip() for p in address.split(",")]
+        prop_input = {
+            "properties": [{
+                "address": {
+                    "street1": prop_parts[0],
+                    "city": prop_parts[1] if len(prop_parts) > 1 else "Austin",
+                    "province": "TX",
+                    "country": "US",
+                }
+            }]
+        }
+        resp2 = _gql(session, _PROPERTY_CREATE,
+                     {"clientId": jobber_client_id, "input": prop_input})
+        errs2 = _gql_user_errors(resp2, "propertyCreate")
+        if errs2:
+            raise RuntimeError(f"propertyCreate errors: {errs2}")
+        props = resp2["data"]["propertyCreate"]["properties"]
+        jobber_property_id = props[0]["id"] if props else None
+        if jobber_property_id:
+            register_mapping(canonical_id, "jobber_property", jobber_property_id,
+                             db_path=self.db_path)
+
+        # 5. Branch: recurring vs one-time
+        is_one_time = service_frequency in _ONE_TIME_FREQS
+        service_type_id = _FREQ_TO_SERVICE_ID.get(service_frequency, "std-residential")
+        crew_id = "crew-" + crew_assignment.lower().replace("crew ", "")
+
+        if is_one_time:
+            self._setup_one_time(
+                deal, canonical_id, service_type_id, service_frequency,
+                start_date, crew_id, contract_value, jobber_property_id, session, conn,
+            )
+        else:
+            self._setup_recurring(
+                deal, canonical_id, service_type_id, service_frequency,
+                start_date, crew_id, contract_value, jobber_property_id, session, conn,
+            )
+
+        # 6. Pipedrive activity note
+        if pipedrive_deal_id:
+            try:
+                pd_session = get_client("pipedrive")
+                pd_session.post(
+                    "https://api.pipedrive.com/v1/activities",
+                    json={
+                        "subject": f"SS-ID: {canonical_id} — Jobber client created",
+                        "deal_id": pipedrive_deal_id,
+                        "type": "task",
+                        "done": 1,
+                        "note": (
+                            f"SS-ID: {canonical_id} — Jobber client created, "
+                            f"{service_frequency} schedule initialized"
+                        ),
+                    },
+                    timeout=15,
+                )
+            except Exception:
+                logger.warning("Pipedrive activity failed for %s", canonical_id)
+
+    def _setup_recurring(
+        self, deal, canonical_id, service_type_id, service_frequency,
+        start_date, crew_id, contract_value, jobber_property_id, session, conn,
+    ) -> None:
+        recur_frequency = _FREQ_TO_RECUR_FREQ[service_frequency]
+        recur_field = _get_recurrence_field(session)
+
+        # Determine day_of_week: first available weekday on or after start_date
+        day_of_week_int = start_date.weekday()  # 0=Mon … 4=Fri; clamp to weekday
+        if day_of_week_int >= 5:  # Sat or Sun → move to Monday
+            day_of_week_int = 0
+            start_date = start_date + timedelta(days=(7 - start_date.weekday()))
+        _DOW_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        day_of_week_name = _DOW_NAMES[day_of_week_int]
+
+        # jobCreate with recurrence
+        job_input: dict = {
+            "propertyId": jobber_property_id or "",
+            "title": f"Recurring: {service_type_id.replace('-', ' ').title()}",
+            "invoicing": {
+                "invoicingType": "FIXED_PRICE",
+                "invoicingSchedule": "ON_COMPLETION",
+            },
+            "timeframe": {"startAt": start_date.isoformat()},
+        }
+        freq_config = _JOBBER_FREQ_MAP.get(recur_frequency)
+        if recur_field and freq_config:
+            job_input[recur_field] = freq_config
+
+        resp = _gql(session, _JOB_CREATE, {"input": job_input})
+        errs = _gql_user_errors(resp, "jobCreate")
+        if errs:
+            raise RuntimeError(f"jobCreate (recurring) errors: {errs}")
+        jobber_recurrence_id = resp["data"]["jobCreate"]["job"]["id"]
+
+        # Insert into recurring_agreements
+        recur_id = generate_id("RECUR", db_path=self.db_path)
+        conn.execute("""
+            INSERT OR IGNORE INTO recurring_agreements
+            (id, client_id, service_type_id, crew_id, frequency,
+             price_per_visit, start_date, status, day_of_week, client_type)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            recur_id, canonical_id, service_type_id, crew_id,
+            recur_frequency, contract_value,
+            start_date.isoformat(), "active", day_of_week_name,
+            deal.get("client_type", "residential"),
+        ))
+        register_mapping(recur_id, "jobber", jobber_recurrence_id, db_path=self.db_path)
+
+    def _setup_one_time(
+        self, deal, canonical_id, service_type_id, service_frequency,
+        start_date, crew_id, contract_value, jobber_property_id, session, conn,
+    ) -> None:
+        job_input: dict = {
+            "propertyId": jobber_property_id or "",
+            "title": service_type_id.replace("-", " ").title(),
+            "invoicing": {
+                "invoicingType": "FIXED_PRICE",
+                "invoicingSchedule": "ON_COMPLETION",
+            },
+            "timeframe": {"startAt": start_date.isoformat()},
+        }
+        resp = _gql(session, _JOB_CREATE, {"input": job_input})
+        errs = _gql_user_errors(resp, "jobCreate")
+        if errs:
+            raise RuntimeError(f"jobCreate (one-time) errors: {errs}")
+        jobber_job_id = resp["data"]["jobCreate"]["job"]["id"]
+
+        job_id = generate_id("JOB", db_path=self.db_path)
+        conn.execute("""
+            INSERT OR IGNORE INTO jobs
+            (id, client_id, crew_id, service_type_id, scheduled_date, status)
+            VALUES (?,?,?,?,?,?)
+        """, (
+            job_id, canonical_id, crew_id, service_type_id,
+            start_date.isoformat(), "scheduled",
+        ))
+        register_mapping(job_id, "jobber", jobber_job_id, db_path=self.db_path)

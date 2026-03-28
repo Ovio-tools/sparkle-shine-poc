@@ -291,3 +291,123 @@ class TestAddBusinessDays(unittest.TestCase):
     def test_thursday_plus_1_is_friday(self):
         result = _add_business_days(date(2026, 3, 26), 1)
         self.assertEqual(result, date(2026, 3, 27))
+
+
+# ── NewClientSetupGenerator mock tests ───────────────────────────────────────
+
+class TestNewClientSetupGeneratorRecurring(unittest.TestCase):
+    """Tests for NewClientSetupGenerator recurring client path."""
+
+    def _make_db(self):
+        """Create an in-memory DB with the required tables."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE won_deals (
+                canonical_id TEXT PRIMARY KEY,
+                client_type TEXT NOT NULL,
+                service_frequency TEXT NOT NULL,
+                contract_value REAL,
+                start_date TEXT NOT NULL,
+                crew_assignment TEXT,
+                pipedrive_deal_id INTEGER
+            );
+            CREATE TABLE leads (
+                id TEXT PRIMARY KEY,
+                first_name TEXT, last_name TEXT, company_name TEXT,
+                email TEXT, phone TEXT, lead_type TEXT, source TEXT,
+                status TEXT DEFAULT 'new', estimated_value REAL,
+                created_at TEXT DEFAULT (datetime('now')),
+                last_activity_at TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT,
+                first_name TEXT, last_name TEXT, company_name TEXT,
+                email TEXT, phone TEXT, address TEXT,
+                neighborhood TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                acquisition_source TEXT, first_service_date TEXT,
+                last_service_date TEXT, lifetime_value REAL DEFAULT 0,
+                notes TEXT, created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT
+            );
+        """)
+        return conn
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_recurring_residential_creates_agreement_row(
+        self, mock_gql, mock_get_tool_id, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        from simulation.generators.operations import NewClientSetupGenerator
+
+        # Setup: one ready residential won deal
+        conn = self._make_db()
+        conn.execute(
+            "INSERT INTO won_deals VALUES (?,?,?,?,?,?,?)",
+            ("SS-LEAD-0001", "residential", "biweekly_recurring",
+             150.0, "2026-03-01", "Crew A", 999),
+        )
+        conn.execute(
+            "INSERT INTO leads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("SS-LEAD-0001", "Alice", "Smith", None,
+             "alice@example.com", "5125550001", "residential",
+             "referral", "new", 150.0, "2025-01-01", None),
+        )
+        conn.commit()
+
+        # No existing Jobber mapping → triggers setup
+        mock_get_tool_id.return_value = None
+
+        # _gql returns for: clientCreate, propertyCreate, jobCreate (recurring)
+        mock_gql.side_effect = [
+            {"data": {"clientCreate": {"client": {"id": "GQL-CLIENT-1"}, "userErrors": []}}},
+            {"data": {"propertyCreate": {"properties": [{"id": "GQL-PROP-1"}], "userErrors": []}}},
+            {"data": {"__type": {"inputFields": [{"name": "recurrences"}]}}},  # introspect
+            {"data": {"jobCreate": {"job": {"id": "GQL-JOB-1"}, "userErrors": []}}},
+        ]
+        mock_gen_id.side_effect = ["SS-RECUR-9999"]
+
+        # Reset recurrence field cache so introspect _gql call is made
+        import simulation.generators.operations as ops_mod
+        ops_mod._recurrence_field_checked = False
+        ops_mod._recurrence_field_cache = None
+
+        gen = NewClientSetupGenerator(db_path=":memory:")
+
+        # Wrap conn so that close() is a no-op, letting us inspect the DB after execute().
+        class _NoCloseConn:
+            """Proxy that delegates everything to the real connection except close()."""
+            def __init__(self, real):
+                self._real = real
+            def close(self):
+                pass  # intentional no-op
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        proxy = _NoCloseConn(conn)
+        with patch("sqlite3.connect", return_value=proxy):
+            result = gen.execute(dry_run=False)
+
+        self.assertTrue(result.success)
+        self.assertIn("1", result.message)  # "setup 1 new clients"
+
+        # recurring_agreements row should exist
+        row = conn.execute(
+            "SELECT * FROM recurring_agreements WHERE id = ?", ("SS-RECUR-9999",)
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["frequency"], "biweekly")
+        self.assertEqual(row["price_per_visit"], 150.0)
