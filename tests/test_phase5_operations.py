@@ -473,7 +473,7 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
         conn.commit()
 
         mock_get_tool_id.return_value = None
-        mock_gen_id.return_value = "SS-RECUR-0001"
+        mock_gen_id.side_effect = ["SS-RECUR-0001", "SS-RECUR-0003"]
 
         success_response = [
             {"data": {"clientCreate": {"client": {"id": "GQL-C-OK"}, "userErrors": []}}},
@@ -482,7 +482,12 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
             {"data": {"jobCreate": {"job": {"id": "GQL-J-OK"}, "userErrors": []}}},
         ]
         # Client 1: success (4 calls), Client 2: raises on clientCreate,
-        # Client 3: success (4 calls — but recurrence already cached, so 3 calls)
+        # Client 3: success (3 calls — recurrence field already cached after client 1)
+        client3_responses = [
+            {"data": {"clientCreate": {"client": {"id": "GQL-C-OK"}, "userErrors": []}}},
+            {"data": {"propertyCreate": {"properties": [{"id": "GQL-P-OK"}], "userErrors": []}}},
+            {"data": {"jobCreate": {"job": {"id": "GQL-J-OK3"}, "userErrors": []}}},
+        ]
         call_count = [0]
         def side_effect(*args, **kwargs):
             call_count[0] += 1
@@ -492,8 +497,8 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
             # Call 5: client 2 clientCreate → raises
             if call_count[0] == 5:
                 raise RuntimeError("Simulated Jobber error for client 2")
-            # Calls 6+: client 3 (success, reusing success_response cyclically)
-            return success_response[(call_count[0] - 6) % 4]
+            # Calls 6+: client 3 (success, 3 calls — recurrence cached)
+            return client3_responses[call_count[0] - 6]
 
         mock_gql.side_effect = side_effect
 
@@ -515,3 +520,12 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("2", result.message)
         self.assertIn("1", result.message)
+
+        # Verify DB writes: clients 1 and 3 committed, client 2 rolled back
+        rows = conn.execute(
+            "SELECT client_id FROM recurring_agreements ORDER BY client_id"
+        ).fetchall()
+        committed_ids = [r[0] for r in rows]
+        self.assertIn("SS-LEAD-0001", committed_ids)
+        self.assertIn("SS-LEAD-0003", committed_ids)
+        self.assertNotIn("SS-LEAD-0002", committed_ids)
