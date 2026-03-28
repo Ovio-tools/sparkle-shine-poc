@@ -323,12 +323,12 @@ def setup_channel(dry_run: bool = False) -> Optional[str]:
     """
     global _channel_id
 
-    if _channel_id is not None:
-        return _channel_id
-
     if dry_run:
         logger.info("[DRY RUN] Would create/find #automation-failure and set its topic")
         return "DRY-RUN-CHANNEL-ID"
+
+    if _channel_id is not None:
+        return _channel_id
 
     try:
         client = get_client("slack")
@@ -399,7 +399,7 @@ def report_error(
             final_severity = severity
         else:
             final_severity = base_severity
-            if base_severity == "warning":
+            if base_severity == "warning" and not dry_run:
                 now = time.time()
                 _warning_log.setdefault(tool_name, [])
                 _warning_log[tool_name].append(now)
