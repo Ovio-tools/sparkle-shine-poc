@@ -1243,5 +1243,58 @@ class TestWeeklyReportInsightHistory(unittest.TestCase):
         self.assertIn("graduated", block.lower())
 
 
+class TestWeeklyReportConfidenceFilter(unittest.TestCase):
+    """Tests for System 2 — confidence filtering in weekly_report.py."""
+
+    def test_strip_removes_sentences_with_low_tag(self):
+        """_strip_low_confidence removes sentences containing literal [LOW] tags."""
+        from intelligence.weekly_report import _strip_low_confidence
+        text = (
+            "Revenue grew 8% this week. "
+            "Crew A might be losing clients in Q4. [LOW] "
+            "We had a great month overall."
+        )
+        cleaned, count = _strip_low_confidence(text, citation_index=[])
+        self.assertNotIn("[LOW]", cleaned)
+        self.assertEqual(count, 1)
+        self.assertIn("Revenue grew", cleaned)
+        self.assertIn("great month", cleaned)
+
+    def test_strip_removes_sentences_with_low_ref_id(self):
+        """_strip_low_confidence removes sentences referencing LOW-confidence ref_ids."""
+        from intelligence.weekly_report import _strip_low_confidence
+        citation_index = [
+            {"ref_id": "R03", "confidence": "LOW", "claim": "speculative data"},
+            {"ref_id": "R01", "confidence": "HIGH", "claim": "weekly revenue"},
+        ]
+        text = (
+            "Revenue was $38,450 [R01]. "
+            "Some speculation here [R03]. "
+            "The month was solid."
+        )
+        cleaned, count = _strip_low_confidence(text, citation_index)
+        self.assertNotIn("[R03]", cleaned)
+        self.assertIn("[R01]", cleaned)
+        self.assertEqual(count, 1)
+
+    def test_strip_returns_zero_count_when_no_low_content(self):
+        """_strip_low_confidence returns count=0 when no LOW content found."""
+        from intelligence.weekly_report import _strip_low_confidence
+        text = "Revenue grew. Operations were smooth. Sales pipeline is healthy."
+        citation_index = [{"ref_id": "R01", "confidence": "HIGH", "claim": "revenue"}]
+        cleaned, count = _strip_low_confidence(text, citation_index)
+        self.assertEqual(count, 0)
+        self.assertEqual(cleaned.strip(), text.strip())
+
+    def test_strip_does_not_remove_high_confidence_refs(self):
+        """_strip_low_confidence never removes sentences with HIGH-confidence ref_ids."""
+        from intelligence.weekly_report import _strip_low_confidence
+        citation_index = [{"ref_id": "R01", "confidence": "HIGH", "claim": "revenue"}]
+        text = "Revenue was strong this week [R01]. Cash flow is healthy."
+        cleaned, count = _strip_low_confidence(text, citation_index)
+        self.assertIn("[R01]", cleaned)
+        self.assertEqual(count, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

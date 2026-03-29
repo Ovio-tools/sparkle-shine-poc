@@ -173,3 +173,70 @@ def _extract_and_update_insights(text: str, history: dict) -> tuple[str, dict]:
     history["insights"] = list(existing.values())
     history["last_updated"] = today
     return cleaned, history
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# System 2 — Confidence Filtering
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _strip_low_confidence(text: str, citation_index: list[dict]) -> tuple[str, int]:
+    """Remove LOW-confidence content from the Opus output.
+
+    Two passes (string matching, no LLM):
+      Pass 1: Remove sentences containing literal "[LOW]" tags.
+      Pass 2: Remove sentences containing ref_ids where citation_index
+              entry has confidence == "LOW".
+
+    Returns (cleaned_text, removed_sentence_count).
+
+    This is post-processing step 2 — runs after insight marker stripping
+    and before citation injection.
+    """
+    # Build set of LOW-confidence ref_ids
+    low_refs = {
+        entry["ref_id"]
+        for entry in citation_index
+        if entry.get("confidence") == "LOW"
+    }
+
+    # Preprocess: mark sentences that are followed by [LOW]
+    # Replace ". [LOW] " with a sentinel that we can detect after splitting
+    text = re.sub(r'([.!?])\s*\[LOW\]\s+', r'\1 <<<MARK_PREV_FOR_REMOVAL>>> ', text)
+
+    # Split on sentence boundaries
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    removed = 0
+    kept = []
+
+    for i, sentence in enumerate(sentences):
+        should_remove = False
+        has_marker = "<<<MARK_PREV_FOR_REMOVAL>>>" in sentence
+
+        # If this sentence has the marker, remove the previous one from kept list
+        if has_marker:
+            if kept:
+                kept.pop()
+                removed += 1
+
+        # Check if this sentence contains [LOW] tag
+        if "[LOW]" in sentence:
+            should_remove = True
+
+        # Check if sentence starts with [LOW]
+        elif sentence.strip().startswith("[LOW]"):
+            should_remove = True
+
+        # Check if sentence references a LOW-confidence ref_id
+        elif low_refs and any(f"[{ref}]" in sentence for ref in low_refs):
+            should_remove = True
+
+        if should_remove:
+            removed += 1
+        else:
+            # Clean up any remaining markers and add to kept
+            cleaned = re.sub(r'\s*<<<MARK_PREV_FOR_REMOVAL>>>\s*', ' ', sentence).strip()
+            if cleaned:
+                kept.append(cleaned)
+
+    return " ".join(kept), removed
