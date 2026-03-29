@@ -240,3 +240,118 @@ def _strip_low_confidence(text: str, citation_index: list[dict]) -> tuple[str, i
                 kept.append(cleaned)
 
     return " ".join(kept), removed
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# System 3 — Citation Index and Injection
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_citation_index(context: BriefingContext) -> list[dict]:
+    """Build the citation index from context.metrics.
+
+    Design note: context.metrics contains aggregate values (totals,
+    averages, counts) but not individual record IDs. The citation index
+    therefore contains aggregate-level links (e.g. QBO P&L report) rather
+    than per-transaction links. This is intentional — the spec states
+    "Aggregate metrics cite the report or dashboard, not individual records."
+
+    Covers all 6 weekly report sections:
+      - Revenue (Section 1) → QBO P&L
+      - Operations (Section 2) → Jobber jobs (#, no aggregate URL in spec)
+      - Cash Flow (Section 3) → QBO AR Aging
+      - Sales (Section 4) → Pipedrive pipeline (#, no aggregate URL in spec)
+      - Marketing (Section 5) → HubSpot contacts + Mailchimp campaigns (#)
+      - Tasks (Section 6) → Asana Admin & Operations project board
+
+    "#" URLs degrade gracefully: format_citation() returns plain text.
+
+    Returns a list of citation dicts, each with:
+        ref_id      — e.g. "R01" (used as [R01] in Opus output)
+        claim       — short display label
+        tool        — tool name
+        record_type — record type string
+        record_id   — None for aggregate reports
+        url         — pre-built UI URL (or "#" if unavailable)
+        confidence  — "HIGH" / "MEDIUM" / "LOW"
+    """
+    from simulation.deep_links import get_report_link, get_deep_link
+
+    citations = []
+    _counter = [0]
+
+    def _next_ref() -> str:
+        _counter[0] += 1
+        return f"R{_counter[0]:02d}"
+
+    def _add(claim: str, tool: str, record_type: str, url: str, confidence: str = "HIGH") -> None:
+        citations.append({
+            "ref_id": _next_ref(),
+            "claim": claim,
+            "tool": tool,
+            "record_type": record_type,
+            "record_id": None,
+            "url": url,
+            "confidence": confidence,
+        })
+
+    metrics = context.metrics or {}
+
+    # ── Section 1 (Week in Review) — Revenue ─────────────────────────────────
+    if metrics.get("revenue"):
+        _add("Weekly P&L", "quickbooks", "report_pl", get_report_link("quickbooks"))
+
+    # ── Section 2 (Crew Performance) — Operations ────────────────────────────
+    if metrics.get("operations"):
+        _add("Jobber Jobs", "jobber", "jobs", "#")
+
+    # ── Section 3 (Cash Flow) — AR Aging ─────────────────────────────────────
+    fin = metrics.get("financial_health", {})
+    if fin.get("ar_aging") or fin.get("cash_position"):
+        _add("AR Aging Report", "quickbooks", "report_ar",
+             get_deep_link("quickbooks", "report_ar", ""))
+
+    # ── Section 4 (Sales Pipeline) — Pipedrive ───────────────────────────────
+    if metrics.get("sales"):
+        # No aggregate pipeline URL in deep_links spec — degrade to plain text
+        _add("Pipedrive Pipeline", "pipedrive", "pipeline", "#")
+
+    # ── Section 5 (Marketing & Reputation) — HubSpot + Mailchimp ─────────────
+    if metrics.get("marketing"):
+        _add("HubSpot Contacts", "hubspot", "contacts", "#")
+        _add("Mailchimp Campaigns", "mailchimp", "campaigns", "#")
+
+    # ── Section 6 (Task & Delegation Health) — Asana ─────────────────────────
+    if metrics.get("tasks"):
+        # Admin & Operations project GID from config/tool_ids.json
+        asana_ops_gid = "1213719394454339"
+        _add("Asana Admin & Operations", "asana", "project_board",
+             f"https://app.asana.com/0/{asana_ops_gid}/list")
+
+    return citations
+
+
+def _inject_citations(text: str, citation_index: list[dict]) -> str:
+    """Replace [R01] ref_id markers with Slack mrkdwn citation links.
+
+    For each citation in the index:
+      - If url is a real URL: replace [ref_id] with (<url|claim>)
+      - If url is "#": replace [ref_id] with plain claim text
+
+    Ref_ids not found in the index are left as-is (they may be hallucinated
+    by Opus — leaving them visible makes them easy to spot and fix).
+
+    This is post-processing step 3 — runs after confidence filtering.
+    """
+    for entry in citation_index:
+        ref_id = entry["ref_id"]
+        url = entry.get("url", "#")
+        claim = entry.get("claim", ref_id)
+        marker = f"[{ref_id}]"
+        if marker not in text:
+            continue
+        if url and url != "#":
+            replacement = f"(<{url}|{claim}>)"
+        else:
+            replacement = claim
+        text = text.replace(marker, replacement)
+    return text

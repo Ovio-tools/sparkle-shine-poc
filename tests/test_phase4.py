@@ -1296,5 +1296,91 @@ class TestWeeklyReportConfidenceFilter(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+class TestWeeklyReportCitations(unittest.TestCase):
+    """Tests for System 3 — citation index and injection in weekly_report.py."""
+
+    def test_inject_citations_replaces_ref_ids_with_mrkdwn(self):
+        """_inject_citations replaces [R01] with (<url|claim>) Slack mrkdwn."""
+        from intelligence.weekly_report import _inject_citations
+        citation_index = [{
+            "ref_id": "R01",
+            "claim": "Weekly P&L",
+            "url": "https://app.sandbox.qbo.intuit.com/app/reportv2?token=PROFIT_AND_LOSS",
+            "confidence": "HIGH",
+        }]
+        text = "Revenue grew 8% this week [R01]. Operations were smooth."
+        result = _inject_citations(text, citation_index)
+        self.assertNotIn("[R01]", result)
+        self.assertIn("(<https://", result)
+        self.assertIn("Weekly P&L", result)
+
+    def test_inject_citations_skips_hash_urls(self):
+        """_inject_citations leaves plain claim text when URL is '#'."""
+        from intelligence.weekly_report import _inject_citations
+        citation_index = [{"ref_id": "R02", "claim": "AR Report", "url": "#", "confidence": "HIGH"}]
+        text = "Cash flow was tight [R02]. More details follow."
+        result = _inject_citations(text, citation_index)
+        self.assertNotIn("[R02]", result)
+        self.assertIn("AR Report", result)
+        self.assertNotIn("(<", result)
+
+    def test_inject_citations_leaves_unknown_ref_ids_intact(self):
+        """_inject_citations does not modify ref_ids not in the citation index."""
+        from intelligence.weekly_report import _inject_citations
+        citation_index = [{"ref_id": "R01", "claim": "Revenue", "url": "https://example.com", "confidence": "HIGH"}]
+        text = "Revenue [R01]. Unknown ref [R99]."
+        result = _inject_citations(text, citation_index)
+        self.assertNotIn("[R01]", result)
+        self.assertIn("[R99]", result)
+
+    def test_build_citation_index_covers_all_sections(self):
+        """_build_citation_index produces citations for all 6 report sections."""
+        import unittest.mock as mock
+        from intelligence.weekly_report import _build_citation_index
+        from intelligence.context_builder import BriefingContext
+
+        context = mock.MagicMock(spec=BriefingContext)
+        context.metrics = {
+            "revenue": {"yesterday": {"total": 5000.0}},
+            "operations": {"completion_rate": 0.94},
+            "financial_health": {"ar_aging": {"0_30": 10000}},
+            "sales": {"pipeline_value": 25000},
+            "marketing": {"open_rate": 0.22},
+            "tasks": {"overdue_count": 3},
+        }
+        context.date = "2026-03-23"
+
+        with mock.patch.dict(
+            os.environ,
+            {"QBO_BASE_URL": "https://sandbox-quickbooks.api.intuit.com/v3/company"},
+        ):
+            # Prevent actual API calls from deep_links
+            import simulation.deep_links as dl
+            dl._cache_loaded = True
+            index = _build_citation_index(context)
+
+        tools = [entry["tool"] for entry in index]
+        urls = [entry["url"] for entry in index]
+
+        # At least 7 citations covering all 6 sections (marketing has 2)
+        self.assertGreaterEqual(len(index), 7)
+        # Revenue — QBO P&L with real URL
+        self.assertTrue(any("PROFIT_AND_LOSS" in u for u in urls))
+        # All sections represented
+        self.assertIn("quickbooks", tools)
+        self.assertIn("jobber", tools)
+        self.assertIn("pipedrive", tools)
+        self.assertIn("hubspot", tools)
+        self.assertIn("mailchimp", tools)
+        self.assertIn("asana", tools)
+        # Asana gets a real project board URL (not "#")
+        asana_url = next(e["url"] for e in index if e["tool"] == "asana")
+        self.assertIn("app.asana.com/0/", asana_url)
+        # Ref IDs are sequential R01, R02, ...
+        ref_ids = [entry["ref_id"] for entry in index]
+        self.assertEqual(ref_ids[0], "R01")
+        self.assertEqual(ref_ids[1], "R02")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
