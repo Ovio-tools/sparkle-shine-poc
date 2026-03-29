@@ -388,6 +388,48 @@ def post_alert(message: str, channel: str, urgency: str = "warning") -> bool:
     return False
 
 
+def ensure_channel(channel_name: str) -> str:
+    """Ensure a Slack channel exists and the bot is a member.
+
+    Resolution order:
+      1. resolve_channel_id() — fast path if channel already exists.
+      2. conversations.create — if not found, create it.
+      3. conversations.join — if create fails with name_taken (channel
+         exists but bot not yet a member).
+
+    Returns the channel ID. Raises on unexpected errors.
+    Called once before posting the weekly report to guarantee the
+    channel exists. The daily-briefing channel is not affected.
+    """
+    name = channel_name.lstrip("#").strip()
+
+    try:
+        channel_id = resolve_channel_id(name)
+        logger.debug("Channel #%s already exists (%s)", name, channel_id)
+        return channel_id
+    except ValueError:
+        pass  # channel not found — create it
+
+    slack_client = get_client("slack")
+
+    try:
+        resp = slack_client.conversations_create(name=name, is_private=False)
+        channel_id = resp["channel"]["id"]
+        _channel_id_cache[name] = channel_id
+        logger.info("Created Slack channel #%s (%s)", name, channel_id)
+        return channel_id
+    except Exception as exc:
+        if "name_taken" not in str(exc):
+            raise
+
+    # Channel exists but bot is not a member — join it
+    resp = slack_client.conversations_join(channel=name)
+    channel_id = resp["channel"]["id"]
+    _channel_id_cache[name] = channel_id
+    logger.info("Joined existing Slack channel #%s (%s)", name, channel_id)
+    return channel_id
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

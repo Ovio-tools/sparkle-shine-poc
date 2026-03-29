@@ -1091,5 +1091,68 @@ class TestDeepLinks(unittest.TestCase):
         self.assertIn("task-999", url)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ENSURE CHANNEL TESTS  (mocked Slack client)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestEnsureChannel(unittest.TestCase):
+    """Tests for intelligence/slack_publisher.ensure_channel()."""
+
+    def setUp(self):
+        from intelligence.slack_publisher import _channel_id_cache
+        _channel_id_cache.clear()
+
+    def test_ensure_channel_returns_id_when_channel_exists(self):
+        """ensure_channel returns cached channel ID when channel already resolves."""
+        with unittest.mock.patch(
+            "intelligence.slack_publisher.resolve_channel_id",
+            return_value="C_EXISTING",
+        ):
+            from intelligence.slack_publisher import ensure_channel
+            result = ensure_channel("#weekly-briefing")
+        self.assertEqual(result, "C_EXISTING")
+
+    def test_ensure_channel_creates_when_not_found(self):
+        """ensure_channel calls conversations.create when channel not in workspace."""
+        mock_slack = unittest.mock.MagicMock()
+        mock_slack.conversations_create.return_value = {"channel": {"id": "C_NEW"}}
+
+        with unittest.mock.patch(
+            "intelligence.slack_publisher.resolve_channel_id",
+            side_effect=ValueError("not found"),
+        ):
+            with unittest.mock.patch(
+                "intelligence.slack_publisher.get_client", return_value=mock_slack
+            ):
+                from intelligence.slack_publisher import ensure_channel, _channel_id_cache
+                _channel_id_cache.clear()
+                result = ensure_channel("#weekly-briefing")
+
+        mock_slack.conversations_create.assert_called_once_with(
+            name="weekly-briefing", is_private=False
+        )
+        self.assertEqual(result, "C_NEW")
+
+    def test_ensure_channel_joins_when_name_taken(self):
+        """ensure_channel calls conversations.join when create returns name_taken."""
+        mock_slack = unittest.mock.MagicMock()
+        mock_slack.conversations_create.side_effect = Exception("name_taken")
+        mock_slack.conversations_join.return_value = {"channel": {"id": "C_JOINED"}}
+
+        with unittest.mock.patch(
+            "intelligence.slack_publisher.resolve_channel_id",
+            side_effect=ValueError("not found"),
+        ):
+            with unittest.mock.patch(
+                "intelligence.slack_publisher.get_client", return_value=mock_slack
+            ):
+                from intelligence.slack_publisher import ensure_channel, _channel_id_cache
+                _channel_id_cache.clear()
+                result = ensure_channel("weekly-briefing")
+
+        mock_slack.conversations_join.assert_called_once()
+        self.assertEqual(result, "C_JOINED")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
