@@ -119,11 +119,20 @@ db.execute("""
 ))
 db.commit()
 
-# 3. Create in HubSpot (see tool-api-patterns.md for the API call)
-hubspot_id = create_in_hubspot(profile, lifecycle_stage)
+# 3. Create in HubSpot using the unified auth interface
+from auth import get_client
+session = get_client("hubspot")
+# (see tool-api-patterns.md for the POST body format)
+hubspot_id = create_in_hubspot(session, profile, lifecycle_stage)
 
-# 4. Register the mapping
+# 4. Register the HubSpot mapping
 link(canonical_id, "hubspot", hubspot_id)
+
+# *** CRITICAL: Do NOT register a Pipedrive mapping here. ***
+# The automation runner detects new SQLs by finding HubSpot contacts
+# with NO Pipedrive entry in cross_tool_mapping.
+# If you call link(canonical_id, "pipedrive", ...) here, the runner
+# will never pick up this SQL and no deal will be created.
 
 # 5. Embed canonical ID in HubSpot record (for traceability)
 # This is done by including a note or custom property:
@@ -176,13 +185,16 @@ After onboarding tasks are mostly done:
 
 ```python
 # 1. Look up canonical_id for the client
-# 2. Create Jobber client (see tool-api-patterns.md)
-jobber_id = create_jobber_client(client_data)
+# 2. Create Jobber client via the unified auth interface
+from auth import get_client
+session = get_client("jobber")
+# (see tool-api-patterns.md for the GraphQL mutation)
+jobber_id = create_jobber_client(session, client_data)
 link(canonical_id, "jobber", jobber_id)
 
 # 3. Create the first job or recurring schedule
 job_canonical = generate_id("JOB")
-jobber_job_id = create_jobber_job(jobber_id, job_data)
+jobber_job_id = create_jobber_job(session, jobber_id, job_data)
 link(job_canonical, "jobber", jobber_job_id)
 
 # 4. Insert job into SQLite jobs table
@@ -195,28 +207,39 @@ db.execute("""
 """, (job_canonical, canonical_id, crew_id, ...))
 ```
 
-### Phase 6: Invoice After Job Completion
+### Phase 5b: Operations Generator Marks Job Complete
+
+After the scheduled duration elapses (with +/- 15% variance):
 
 ```python
-# 1. Create QBO invoice (see tool-api-patterns.md)
-invoice_canonical = generate_id("INVOICE")
-qbo_invoice_id = create_qbo_invoice(job, client)
-link(invoice_canonical, "quickbooks", qbo_invoice_id)
+# Mark the job complete in Jobber's API
+# This triggers the automation runner to create a QBO invoice
+session = get_client("jobber")
+complete_jobber_job(session, jobber_job_id, actual_duration)
 
-# 2. Insert into SQLite invoices table
+# Update SQLite
 db.execute("""
-    INSERT INTO invoices (
-        canonical_id, client_id, job_id, amount,
-        due_date, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-""", (invoice_canonical, canonical_id, job_canonical, amount, ...))
+    UPDATE jobs SET status = 'completed', actual_duration_min = ?,
+    completed_at = ?, rating = ? WHERE canonical_id = ?
+""", (actual_duration, completion_time, rating, job_canonical))
+
+# *** Do NOT create a QBO invoice here. ***
+# The automation runner detects completed Jobber jobs via poll_state
+# and creates the invoice automatically within 5 minutes.
 ```
+
+### Phase 6: Automation Creates Invoice (Automatic)
+
+The automation runner handles this. The simulation does NOT write invoice code.
+The reconciliation engine (Step 7) checks for completed jobs older than 24
+hours with no matching invoice, and flags missing invoices in #automation-failure.
 
 ### Phase 7: Payment Recorded
 
 ```python
 payment_canonical = generate_id("PAYMENT")
-qbo_payment_id = create_qbo_payment(invoice)
+session = get_client("quickbooks")
+qbo_payment_id = create_qbo_payment(session, invoice)
 link(payment_canonical, "quickbooks", qbo_payment_id)
 
 db.execute("""

@@ -1050,12 +1050,19 @@ class TestDeepLinks(unittest.TestCase):
         self.assertEqual(result, "View Contact")
 
     def test_get_deep_link_returns_hash_when_cache_load_fails(self):
-        """get_deep_link returns '#' when account info loading fails, not an exception."""
+        """get_deep_link returns '#' when account info loading fails, not an exception.
+
+        Pipedrive uses get_client(); HubSpot uses requests.get() directly.
+        Both are mocked to raise so _hubspot_portal_id stays None.
+        """
         import simulation.deep_links as dl
         dl._cache_loaded = False
+        dl._hubspot_portal_id = None
 
-        with unittest.mock.patch("simulation.deep_links.get_client") as mock_get:
+        with unittest.mock.patch("simulation.deep_links.get_client") as mock_get, \
+             unittest.mock.patch("simulation.deep_links.requests.get") as mock_req:
             mock_get.side_effect = Exception("Network error")
+            mock_req.side_effect = Exception("Network error")
             url = dl.get_deep_link("hubspot", "contact", "12345")
 
         self.assertEqual(url, "#")

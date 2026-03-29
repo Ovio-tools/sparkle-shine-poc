@@ -292,7 +292,27 @@ class DealGenerator:
                             canonical_id,
                         ),
                     )
-        # SS-LEAD: no SQLite write
+
+        # won_deals: written for ALL won deals (SS-PROP and SS-LEAD).
+        # This is the operations generator's trigger table — it needs start_date
+        # queryable for both commercial and residential won deals.
+        if not dry_run:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO won_deals "
+                    "(canonical_id, client_type, service_frequency, contract_value, "
+                    " start_date, crew_assignment, pipedrive_deal_id) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        canonical_id,
+                        contract["contract_type"],
+                        contract["service_frequency"],
+                        contract["contract_value"],
+                        contract["start_date"].isoformat(),
+                        contract["crew_assignment"],
+                        deal["id"],
+                    ),
+                )
 
         start = contract["start_date"].isoformat()
         crew  = contract["crew_assignment"]
@@ -338,6 +358,20 @@ class DealGenerator:
                 conn.execute(
                     f"ALTER TABLE commercial_proposals ADD COLUMN {col_name} {col_type}"
                 )
+
+        # Primary owner of won_deals table — operations generator reads from it but
+        # deals generator writes first, so the table must exist before any won deal fires.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS won_deals (
+                canonical_id      TEXT PRIMARY KEY,
+                client_type       TEXT NOT NULL,
+                service_frequency TEXT NOT NULL,
+                contract_value    REAL,
+                start_date        TEXT NOT NULL,
+                crew_assignment   TEXT,
+                pipedrive_deal_id INTEGER
+            )
+        """)
 
     # ── Internal helpers ────────────────────────────────────────────────────
 

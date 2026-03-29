@@ -8,28 +8,25 @@ This doc covers auth setup, base URLs, request format, rate limiting, and error 
 
 ## Auth Overview
 
-Two auth approaches exist in this codebase. Check `SIMULATION_AUDIT.md` (generated in Step 0 of the simulation plan) to confirm which one the rest of the codebase uses. Then match it.
+**Confirmed (Step 0 audit):** The simulation engine uses `auth.get_client()` exclusively. Never import `credentials.py` directly in simulation code.
 
-**Approach A: `credentials.py` (root level)**
 ```python
-from credentials import get_credential
+from auth import get_client
 
-token = get_credential("HUBSPOT_ACCESS_TOKEN")
-session = requests.Session()
-session.headers.update({
-    "Authorization": f"Bearer {token}",
-    "Content-Type": "application/json",
-})
+# Returns a configured requests.Session with auth headers set
+session = get_client("hubspot")    # Bearer token
+session = get_client("pipedrive")  # x-api-token header
+session = get_client("jobber")     # OAuth Bearer (auto-refreshes)
+session = get_client("quickbooks") # OAuth Bearer (auto-refreshes)
+session = get_client("asana")      # Bearer PAT
+session = get_client("mailchimp")  # Basic auth
+session = get_client("slack")      # Bearer bot token
+session = get_client("google")     # Google API credentials object
 ```
 
-**Approach B: `auth/` module**
-```python
-from auth.simple_clients import get_client
+The `credentials.py` module at the project root is the low-level env-var reader used internally by the `auth/` layer. Simulation code should never touch it directly.
 
-session = get_client("hubspot")  # returns a configured requests.Session
-```
-
-Use whichever the existing automations and intelligence layer use. Do not mix both in new code.
+**Historical note:** Some older scripts in the repo root (like `create_hubspot_contact.py`) use `credentials.get_credential()` directly. These are legacy one-off scripts. Do not copy their pattern.
 
 ---
 

@@ -18,6 +18,26 @@ If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong
 
 ---
 
+## Automation Boundary Rules (L21)
+
+The simulation engine and the automation runner (`automations/runner.py`) share the same SaaS tools and SQLite database. These rules prevent them from creating duplicate records or desynchronizing state.
+
+**Rule 1: Never write to the `poll_state` table.**
+The automation runner uses `poll_state` timestamps to track what it has already processed. If the simulation writes to `poll_state`, the runner's watermarks desync -- it will either skip events or reprocess old ones. The simulation injects events at the source tool's API and lets the runner discover them through normal polling.
+
+**Rule 2: Never create records the automation also creates.**
+The automation runner handles these creations:
+- Pipedrive deals (from HubSpot SQLs -- detected via `cross_tool_mapping` absence)
+- Asana onboarding tasks (from Pipedrive won deals -- detected via `poll_state`)
+- QuickBooks invoices (from Jobber completed jobs -- detected via `poll_state`)
+
+The simulation must NOT create any of the above. It creates the upstream trigger (HubSpot contact, Pipedrive won status, Jobber completed status) and lets the runner handle the downstream creation.
+
+**Rule 3: Register mappings only for the tool you wrote to.**
+When the simulation creates a HubSpot SQL contact, it registers `link(canonical_id, "hubspot", hubspot_id)` only. It does NOT register a Pipedrive mapping. The absence of the Pipedrive mapping is how the runner detects new SQLs. If a Pipedrive mapping is registered prematurely, the runner skips the contact forever.
+
+---
+
 ## Import Paths
 
 **CRITICAL:** Confirm these against `SIMULATION_AUDIT.md` before writing any imports. The paths below reflect what CLAUDE.md documents, but the actual repo may differ.
@@ -27,10 +47,11 @@ If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong
 from database.schema import ...          # NOT from db.schema
 from database.mappings import generate_id, link, lookup, reverse_lookup, find_unmapped
 
-# Auth (confirm which pattern the codebase uses)
-from credentials import get_credential   # root-level credential loader
-# OR
-from auth.simple_clients import get_client  # returns configured session
+# Auth (CONFIRMED: use get_client exclusively)
+from auth import get_client
+# get_client("hubspot") returns a configured requests.Session
+# get_client("jobber") returns a session with OAuth auto-refresh
+# NEVER do: from credentials import get_credential  (internal to auth layer)
 
 # Config
 from config.business import COMPANY, EMPLOYEES, CREWS, SERVICES, NEIGHBORHOODS

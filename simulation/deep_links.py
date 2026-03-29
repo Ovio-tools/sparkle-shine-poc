@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import requests
 from pathlib import Path
 
 from auth import get_client
@@ -63,8 +64,14 @@ def _load_account_info() -> None:
         logger.warning("Could not load Pipedrive subdomain for deep links: %s", exc)
 
     try:
-        session = get_client("hubspot")
-        resp = session.get("https://api.hubapi.com/integrations/v1/me")
+        token = os.getenv("HUBSPOT_ACCESS_TOKEN", "")
+        if not token:
+            raise ValueError("HUBSPOT_ACCESS_TOKEN not set")
+        resp = requests.get(
+            "https://api.hubapi.com/integrations/v1/me",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
         resp.raise_for_status()
         portal_id = resp.json().get("portalId")
         _hubspot_portal_id = str(portal_id) if portal_id else None

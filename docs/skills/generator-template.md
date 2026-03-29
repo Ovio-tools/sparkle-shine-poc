@@ -24,9 +24,9 @@ from database.mappings import generate_id, link, lookup, reverse_lookup
 from simulation.config import DAILY_VOLUMES
 from simulation.variation import should_event_happen, get_adjusted_volume
 
-# Auth -- use whichever pattern the codebase uses
-from credentials import get_credential
-# OR: from auth.simple_clients import get_client
+# Auth -- CONFIRMED: use auth.get_client() exclusively
+# Never import credentials.py directly in simulation code.
+from auth import get_client
 
 # Throttler -- use the pre-configured instance for this tool
 from seeding.utils.throttler import HUBSPOT as throttler
@@ -168,14 +168,12 @@ class {ClassName}Generator:
         """Make the API call to the SaaS tool.
 
         See docs/skills/tool-api-patterns.md for the correct
-        auth, endpoint, and payload format.
+        endpoint and payload format per tool.
 
         Returns the tool-specific ID of the created/updated record.
         """
-        # Build session
-        token = get_credential("{TOOL_TOKEN_KEY}")
-        session = requests.Session()
-        session.headers.update({...})
+        # Get an authenticated session via the unified auth interface
+        session = get_client("{tool_name}")
 
         # Throttle
         throttler.wait()
