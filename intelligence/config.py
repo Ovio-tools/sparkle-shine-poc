@@ -59,11 +59,14 @@ CREW_CAPACITY: dict = {
 }
 
 MODEL_CONFIG: dict = {
-    "briefing_model": "claude-sonnet-4-6",
-    "analysis_model": "claude-opus-4-6",    # reserved for complex pattern analysis
-    "max_tokens_briefing": 2800,
-    "max_tokens_analysis": 1500,
-    "temperature_briefing": 0.3,            # low temperature for consistent tone
+    "briefing_model":       "claude-sonnet-4-6",
+    "weekly_model":         "claude-opus-4-6",      # weekly report (Opus for pattern analysis)
+    "analysis_model":       "claude-opus-4-6",      # reserved for complex pattern analysis
+    "max_tokens_briefing":  2800,
+    "max_tokens_weekly":    3000,
+    "max_tokens_analysis":  1500,
+    "temperature_briefing": 0.3,                    # low temperature for consistent tone
+    "temperature_weekly":   0.4,
     "temperature_analysis": 0.5,
 }
 
