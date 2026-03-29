@@ -609,10 +609,20 @@ def generate_weekly_report(context: BriefingContext, dry_run: bool = False) -> B
     if 0 < score < 60:
         logger.warning("Weekly report quality score %d is below threshold (60)", score)
 
+    score_line = f"quality_score: {score}" if score > 0 else "quality_score: unavailable"
+    archive_header = (
+        f"---\n"
+        f"report_type: weekly\n"
+        f"date: {context.date}\n"
+        f"model: {MODEL_CONFIG['weekly_model']}\n"
+        f"{score_line}\n"
+        f"---\n\n"
+    )
+
     return Briefing(
         date=context.date,
-        content_slack=final_text,
-        content_plain=final_text,
+        content_slack=final_text,           # Slack post — no header
+        content_plain=archive_header + final_text,  # Archive — includes score header
         model_used=MODEL_CONFIG["weekly_model"],
         input_tokens=input_tokens,
         output_tokens=output_tokens,

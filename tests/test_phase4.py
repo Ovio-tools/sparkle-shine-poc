@@ -123,11 +123,11 @@ class TestConfig(unittest.TestCase):
     """test_config_loads — verifies intelligence/config.py structure."""
 
     def test_config_loads(self):
-        # 12 monthly entries: Apr 2025 – Mar 2026
+        # 21 monthly entries: Apr 2025 – Mar 2026 (historical) + Apr 2026 – Dec 2026 (forward)
         self.assertEqual(
             len(REVENUE_TARGETS),
-            12,
-            "REVENUE_TARGETS must have exactly 12 entries",
+            21,
+            "REVENUE_TARGETS must have exactly 21 entries",
         )
 
         expected_keys = {
