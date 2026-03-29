@@ -1154,5 +1154,94 @@ class TestEnsureChannel(unittest.TestCase):
         self.assertEqual(result, "C_JOINED")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# WEEKLY REPORT TESTS  (no API calls)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWeeklyReportInsightHistory(unittest.TestCase):
+    """Tests for System 1 — insight history in intelligence/weekly_report.py."""
+
+    def test_extract_and_update_strips_markers_from_text(self):
+        """_extract_and_update_insights strips all [insight_id: ...] markers."""
+        from intelligence.weekly_report import _extract_and_update_insights
+        history = {"last_updated": None, "insights": []}
+        text = "Crew A takes longer but earns higher ratings. [insight_id: crew_a_quality]"
+        cleaned, _ = _extract_and_update_insights(text, history)
+        self.assertNotIn("[insight_id:", cleaned)
+        self.assertIn("Crew A takes longer", cleaned)
+
+    def test_extract_and_update_increments_existing_insight(self):
+        """_extract_and_update_insights increments times_reported for known insights."""
+        from intelligence.weekly_report import _extract_and_update_insights
+        history = {
+            "last_updated": "2026-03-14",
+            "insights": [{
+                "insight_id": "crew_a_quality",
+                "category": "operations",
+                "summary": "Crew A speed/quality tradeoff",
+                "first_reported": "2026-03-07",
+                "last_reported": "2026-03-14",
+                "times_reported": 2,
+                "status": "active",
+                "last_values": {},
+            }],
+        }
+        text = "Crew A is still slower but rated higher. [insight_id: crew_a_quality]"
+        _, updated = _extract_and_update_insights(text, history)
+        insight = next(i for i in updated["insights"] if i["insight_id"] == "crew_a_quality")
+        self.assertEqual(insight["times_reported"], 3)
+
+    def test_extract_and_update_graduates_at_three_reports(self):
+        """_extract_and_update_insights sets status='graduated' when times_reported reaches 3."""
+        from intelligence.weekly_report import _extract_and_update_insights
+        history = {
+            "last_updated": "2026-03-14",
+            "insights": [{
+                "insight_id": "crew_a_quality",
+                "category": "operations",
+                "summary": "Crew A speed/quality tradeoff",
+                "first_reported": "2026-03-07",
+                "last_reported": "2026-03-14",
+                "times_reported": 2,
+                "status": "active",
+                "last_values": {},
+            }],
+        }
+        text = "Crew A quality noted again. [insight_id: crew_a_quality]"
+        _, updated = _extract_and_update_insights(text, history)
+        insight = next(i for i in updated["insights"] if i["insight_id"] == "crew_a_quality")
+        self.assertEqual(insight["status"], "graduated")
+
+    def test_extract_and_update_adds_new_insight(self):
+        """_extract_and_update_insights adds unseen insight_ids to history."""
+        from intelligence.weekly_report import _extract_and_update_insights
+        history = {"last_updated": None, "insights": []}
+        text = "Westlake cancellations are clustering. [insight_id: westlake_cancellations]"
+        _, updated = _extract_and_update_insights(text, history)
+        ids = [i["insight_id"] for i in updated["insights"]]
+        self.assertIn("westlake_cancellations", ids)
+        insight = next(i for i in updated["insights"] if i["insight_id"] == "westlake_cancellations")
+        self.assertEqual(insight["times_reported"], 1)
+        self.assertEqual(insight["status"], "active")
+
+    def test_build_insight_history_block_formats_graduated(self):
+        """_build_insight_history_block marks graduated insights correctly."""
+        from intelligence.weekly_report import _build_insight_history_block
+        history = {
+            "last_updated": "2026-03-21",
+            "insights": [{
+                "insight_id": "crew_a_quality",
+                "summary": "Crew A speed/quality tradeoff",
+                "last_reported": "2026-03-14",
+                "times_reported": 3,
+                "status": "graduated",
+                "last_values": {},
+            }],
+        }
+        block = _build_insight_history_block(history)
+        self.assertIn("crew_a_quality", block)
+        self.assertIn("graduated", block.lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
