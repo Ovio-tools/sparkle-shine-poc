@@ -1382,5 +1382,63 @@ class TestWeeklyReportCitations(unittest.TestCase):
         self.assertEqual(ref_ids[1], "R02")
 
 
+class TestWeeklyReportQualityScoring(unittest.TestCase):
+    """Tests for System 4 — quality scoring in weekly_report.py."""
+
+    def test_rubric_loads_and_contains_all_dimensions(self):
+        """_load_rubric() returns text containing all four scoring dimensions."""
+        from intelligence.weekly_report import _load_rubric
+        rubric = _load_rubric()
+        for dimension in ["Specificity", "Insight Quality", "Structure", "Trust Signals"]:
+            self.assertIn(dimension, rubric, f"Rubric missing dimension: {dimension}")
+
+    def test_rubric_is_non_empty(self):
+        """_load_rubric() returns non-empty string from docs/skills/weekly-report.md."""
+        from intelligence.weekly_report import _load_rubric
+        rubric = _load_rubric()
+        self.assertGreater(len(rubric), 100)
+
+    def test_score_report_returns_int_in_range(self):
+        """_score_report() returns an integer between 0 and 100."""
+        import unittest.mock as mock
+        mock_response = mock.MagicMock()
+        mock_response.content = [mock.MagicMock(text="Score: 82")]
+
+        with mock.patch("anthropic.Anthropic") as mock_cls:
+            mock_client = mock.MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.messages.create.return_value = mock_response
+
+            from intelligence import weekly_report
+            # Reload to reset module-level Anthropic client if cached
+            import importlib
+            importlib.reload(weekly_report)
+
+            score = weekly_report._score_report("This is a well-written weekly report with specific numbers and citations.")
+
+        self.assertIsInstance(score, int)
+        self.assertGreaterEqual(score, 0)
+        self.assertLessEqual(score, 100)
+
+    def test_score_report_handles_missing_score_in_response(self):
+        """_score_report() returns 0 gracefully if Sonnet response has no parseable score."""
+        import unittest.mock as mock
+        mock_response = mock.MagicMock()
+        mock_response.content = [mock.MagicMock(text="I cannot evaluate this report.")]
+
+        with mock.patch("anthropic.Anthropic") as mock_cls:
+            mock_client = mock.MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.messages.create.return_value = mock_response
+
+            from intelligence import weekly_report
+            import importlib
+            importlib.reload(weekly_report)
+            score = weekly_report._score_report("Some report text.")
+
+        self.assertIsInstance(score, int)
+        self.assertEqual(score, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

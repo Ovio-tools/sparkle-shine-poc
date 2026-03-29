@@ -355,3 +355,93 @@ def _inject_citations(text: str, citation_index: list[dict]) -> str:
             replacement = claim
         text = text.replace(marker, replacement)
     return text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# System 4 — Quality Scoring
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _extract_section(doc: str, heading: str) -> str:
+    """Extract the content between a markdown heading and the next '---' divider."""
+    lines = doc.splitlines()
+    start: Optional[int] = None
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            start = i + 1
+            break
+    if start is None:
+        return ""
+    result = []
+    for line in lines[start:]:
+        if line.strip() == "---":
+            break
+        result.append(line)
+    return "\n".join(result).strip()
+
+
+def _load_rubric() -> str:
+    """Lazy-load the quality scoring rubric verbatim from docs/skills/weekly-report.md.
+
+    The rubric is cached in _rubric_text after the first call. If the file
+    is missing, logs an error and returns an empty string — quality scoring
+    is skipped for that run but the report still posts.
+    """
+    global _rubric_text
+    if _rubric_text is not None:
+        return _rubric_text
+    try:
+        doc = _SKILL_DOC_PATH.read_text()
+        _rubric_text = _extract_section(doc, "## Quality Scoring Rubric")
+        if not _rubric_text:
+            logger.error(
+                "Could not extract '## Quality Scoring Rubric' section from %s",
+                _SKILL_DOC_PATH,
+            )
+            _rubric_text = ""
+    except Exception as exc:
+        logger.error("Could not load quality rubric from %s: %s", _SKILL_DOC_PATH, exc)
+        _rubric_text = ""
+    return _rubric_text
+
+
+def _score_report(report_text: str) -> int:
+    """Score the report against the rubric from docs/skills/weekly-report.md.
+
+    Uses claude-sonnet-4-6 (cheap call, 200 tokens max, temperature 0.0).
+    Parses 'Score: <N>' from the response. Returns 0 on failure so the
+    caller can distinguish a real 0 from a scoring error.
+
+    This is post-processing step 4 — runs last, on the fully-processed text.
+    """
+    rubric = _load_rubric()
+    if not rubric:
+        logger.warning("Quality rubric unavailable — skipping score for this run")
+        return 0
+
+    import anthropic
+    client = anthropic.Anthropic()
+
+    system = f"""You are evaluating a weekly business intelligence report.
+Score it using this rubric (each dimension is 0-25, total 100):
+
+{rubric}
+
+Reply with ONLY: "Score: <total>" on the first line, then one line per
+dimension: "Specificity: <N>", "Insight Quality: <N>", etc.
+"""
+    try:
+        response = client.messages.create(
+            model=MODEL_CONFIG["briefing_model"],  # Sonnet — cheap scoring call
+            max_tokens=200,
+            temperature=0.0,
+            system=system,
+            messages=[{"role": "user", "content": report_text[:4000]}],
+        )
+        text = response.content[0].text
+        match = re.search(r"Score:\s*(\d+)", text)
+        if match:
+            return int(match.group(1))
+        logger.warning("Could not parse score from Sonnet response: %s", text[:200])
+    except Exception as exc:
+        logger.warning("Quality scoring failed: %s", exc)
+    return 0
