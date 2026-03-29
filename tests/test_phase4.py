@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 # ── Path wiring: make project root importable regardless of cwd ────────────────
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -988,6 +989,106 @@ class TestDiscoveryPatterns(unittest.TestCase):
             f"Expected >= 2 late payers on 2026-01-15 (narrative: "
             f"2 commercial clients paid 50-60 days late); got {len(late_payers)}",
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEEP LINKS TESTS  (no API calls — all external I/O is mocked)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestDeepLinks(unittest.TestCase):
+    """Tests for simulation/deep_links.py — URL building and citation formatting."""
+
+    def setUp(self):
+        """Reset the module-level cache before each test."""
+        import simulation.deep_links as dl
+        dl._pipedrive_subdomain = None
+        dl._hubspot_portal_id = None
+        dl._cache_loaded = False
+
+    def test_qbo_sandbox_url_when_sandbox_env(self):
+        """_qbo_ui_base() returns sandbox URL when QBO_BASE_URL contains 'sandbox'."""
+        import simulation.deep_links as dl
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"QBO_BASE_URL": "https://sandbox-quickbooks.api.intuit.com/v3/company"},
+        ):
+            url = dl._qbo_ui_base()
+        self.assertEqual(url, "https://app.sandbox.qbo.intuit.com/app")
+
+    def test_qbo_production_url_when_no_sandbox(self):
+        """_qbo_ui_base() returns production URL when QBO_BASE_URL has no 'sandbox'."""
+        import simulation.deep_links as dl
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"QBO_BASE_URL": "https://quickbooks.api.intuit.com/v3/company"},
+        ):
+            url = dl._qbo_ui_base()
+        self.assertEqual(url, "https://app.qbo.intuit.com/app")
+
+    def test_format_citation_returns_mrkdwn_when_url_available(self):
+        """format_citation returns (<url|text>) Slack mrkdwn when URL resolves."""
+        import simulation.deep_links as dl
+        dl._cache_loaded = True  # skip API calls
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"QBO_BASE_URL": "https://sandbox-quickbooks.api.intuit.com/v3/company"},
+        ):
+            result = dl.format_citation("View Invoice", "quickbooks", "invoice", "1234")
+        self.assertTrue(result.startswith("(<"))
+        self.assertIn("View Invoice", result)
+        self.assertIn("|", result)
+        self.assertTrue(result.endswith(">)"))
+
+    def test_format_citation_returns_plain_text_on_fallback(self):
+        """format_citation returns plain text when get_deep_link returns '#'."""
+        import simulation.deep_links as dl
+        dl._cache_loaded = True
+        dl._hubspot_portal_id = None  # forces '#' for hubspot
+
+        result = dl.format_citation("View Contact", "hubspot", "contact", "999")
+        self.assertEqual(result, "View Contact")
+
+    def test_get_deep_link_returns_hash_when_cache_load_fails(self):
+        """get_deep_link returns '#' when account info loading fails, not an exception."""
+        import simulation.deep_links as dl
+        dl._cache_loaded = False
+
+        with unittest.mock.patch("simulation.deep_links.get_client") as mock_get:
+            mock_get.side_effect = Exception("Network error")
+            url = dl.get_deep_link("hubspot", "contact", "12345")
+
+        self.assertEqual(url, "#")
+        self.assertTrue(dl._cache_loaded)  # still marked loaded to avoid retry loops
+
+    def test_get_deep_link_jobber_client(self):
+        """get_deep_link builds correct Jobber client URL without any API calls."""
+        import simulation.deep_links as dl
+        dl._cache_loaded = True
+
+        url = dl.get_deep_link("jobber", "client", "abc123")
+        self.assertEqual(url, "https://app.getjobber.com/client/abc123")
+
+    def test_get_deep_link_asana_known_project(self):
+        """get_deep_link builds Asana URL using project GID from tool_ids.json."""
+        import simulation.deep_links as dl
+        dl._cache_loaded = True
+        dl._asana_project_gids = None  # force reload
+
+        url = dl.get_deep_link("asana", "Client Success", "task-gid-001")
+        self.assertIn("app.asana.com/0/", url)
+        self.assertIn("task-gid-001", url)
+        self.assertNotIn("search", url)
+
+    def test_get_deep_link_asana_unknown_project_fallback(self):
+        """get_deep_link falls back to Asana search URL for unknown project names."""
+        import simulation.deep_links as dl
+        dl._cache_loaded = True
+        dl._asana_project_gids = {"Client Success": "1213719346640011"}
+
+        url = dl.get_deep_link("asana", "Unknown Project", "task-999")
+        self.assertIn("search", url)
+        self.assertIn("task-999", url)
 
 
 if __name__ == "__main__":
