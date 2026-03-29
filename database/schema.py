@@ -44,7 +44,8 @@ CREATE_TABLES = [
                                 CHECK(status IN ('new','contacted','qualified','lost')),
         estimated_value     REAL DEFAULT 0.0,
         created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-        last_activity_at    TEXT
+        last_activity_at    TEXT,
+        notes               TEXT
     )
     """,
 

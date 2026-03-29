@@ -249,30 +249,17 @@ def _strip_low_confidence(text: str, citation_index: list[dict]) -> tuple[str, i
 def _build_citation_index(context: BriefingContext) -> list[dict]:
     """Build the citation index from context.metrics.
 
-    Design note: context.metrics contains aggregate values (totals,
-    averages, counts) but not individual record IDs. The citation index
-    therefore contains aggregate-level links (e.g. QBO P&L report) rather
-    than per-transaction links. This is intentional — the spec states
-    "Aggregate metrics cite the report or dashboard, not individual records."
+    Each entry has a pre-built UI URL (or "#" which degrades to plain text),
+    a record_count pulled from metrics so Opus knows how much data backs each
+    claim, and a confidence level.
 
     Covers all 6 weekly report sections:
-      - Revenue (Section 1) → QBO P&L
-      - Operations (Section 2) → Jobber jobs (#, no aggregate URL in spec)
-      - Cash Flow (Section 3) → QBO AR Aging
-      - Sales (Section 4) → Pipedrive pipeline (#, no aggregate URL in spec)
-      - Marketing (Section 5) → HubSpot contacts + Mailchimp campaigns (#)
-      - Tasks (Section 6) → Asana Admin & Operations project board
-
-    "#" URLs degrade gracefully: format_citation() returns plain text.
-
-    Returns a list of citation dicts, each with:
-        ref_id      — e.g. "R01" (used as [R01] in Opus output)
-        claim       — short display label
-        tool        — tool name
-        record_type — record type string
-        record_id   — None for aggregate reports
-        url         — pre-built UI URL (or "#" if unavailable)
-        confidence  — "HIGH" / "MEDIUM" / "LOW"
+      Section 1 (Week in Review)       → QBO P&L
+      Section 2 (Crew Performance)     → Jobber client list
+      Section 3 (Cash Flow)            → QBO AR Aging
+      Section 4 (Sales Pipeline)       → Pipedrive deals
+      Section 5 (Marketing/Reputation) → HubSpot contacts + Mailchimp campaigns
+      Section 6 (Task Health)          → Asana Admin & Operations + Client Success
     """
     from simulation.deep_links import get_report_link, get_deep_link
 
@@ -283,8 +270,15 @@ def _build_citation_index(context: BriefingContext) -> list[dict]:
         _counter[0] += 1
         return f"R{_counter[0]:02d}"
 
-    def _add(claim: str, tool: str, record_type: str, url: str, confidence: str = "HIGH") -> None:
-        citations.append({
+    def _add(
+        claim: str,
+        tool: str,
+        record_type: str,
+        url: str,
+        confidence: str = "HIGH",
+        record_count=None,
+    ) -> None:
+        entry: dict = {
             "ref_id": _next_ref(),
             "claim": claim,
             "tool": tool,
@@ -292,40 +286,71 @@ def _build_citation_index(context: BriefingContext) -> list[dict]:
             "record_id": None,
             "url": url,
             "confidence": confidence,
-        })
+        }
+        if record_count is not None:
+            entry["record_count"] = record_count
+        citations.append(entry)
 
     metrics = context.metrics or {}
+    ops  = metrics.get("operations", {})
+    fin  = metrics.get("financial_health", {})
+    sales = metrics.get("sales", {})
+    mktg  = metrics.get("marketing", {})
+    tasks = metrics.get("tasks", {})
+
+    # Shared: weekly job count from crew_performance_7day (sum across all crews)
+    week_jobs: int | None = (
+        sum(v.get("jobs", 0) for v in ops.get("crew_performance_7day", {}).values())
+        or None
+    )
 
     # ── Section 1 (Week in Review) — Revenue ─────────────────────────────────
     if metrics.get("revenue"):
-        _add("Weekly P&L", "quickbooks", "report_pl", get_report_link("quickbooks"))
+        _add("Weekly P&L", "quickbooks", "report_pl",
+             get_report_link("quickbooks"),
+             record_count=week_jobs)
 
     # ── Section 2 (Crew Performance) — Operations ────────────────────────────
-    if metrics.get("operations"):
-        _add("Jobber Jobs", "jobber", "jobs", "#")
+    if ops:
+        _add("Jobber Jobs", "jobber", "client",
+             get_deep_link("jobber", "client", ""),
+             record_count=week_jobs)
 
     # ── Section 3 (Cash Flow) — AR Aging ─────────────────────────────────────
-    fin = metrics.get("financial_health", {})
     if fin.get("ar_aging") or fin.get("cash_position"):
+        ar_count: int | None = sum(
+            fin.get("ar_aging", {}).get(k, {}).get("count", 0)
+            for k in ("current_0_30", "past_due_31_60", "past_due_61_90", "past_due_90_plus")
+        ) or None
         _add("AR Aging Report", "quickbooks", "report_ar",
-             get_deep_link("quickbooks", "report_ar", ""))
+             get_deep_link("quickbooks", "report_ar", ""),
+             record_count=ar_count)
 
     # ── Section 4 (Sales Pipeline) — Pipedrive ───────────────────────────────
-    if metrics.get("sales"):
-        # No aggregate pipeline URL in deep_links spec — degrade to plain text
-        _add("Pipedrive Pipeline", "pipedrive", "pipeline", "#")
+    if sales:
+        deal_count = sales.get("pipeline_summary", {}).get("total_open_deals") or None
+        _add("Pipedrive Pipeline", "pipedrive", "deal",
+             get_deep_link("pipedrive", "deal", ""),
+             record_count=deal_count)
 
     # ── Section 5 (Marketing & Reputation) — HubSpot + Mailchimp ─────────────
-    if metrics.get("marketing"):
-        _add("HubSpot Contacts", "hubspot", "contacts", "#")
-        _add("Mailchimp Campaigns", "mailchimp", "campaigns", "#")
+    if mktg:
+        hs_count = mktg.get("audience_health", {}).get("total_subscribers") or None
+        _add("HubSpot Contacts", "hubspot", "contact",
+             get_deep_link("hubspot", "contact", ""),
+             record_count=hs_count)
+        mc_count = 1 if mktg.get("recent_campaign") else None
+        _add("Mailchimp Campaigns", "mailchimp", "campaign",
+             get_deep_link("mailchimp", "campaign", ""),
+             confidence="MEDIUM", record_count=mc_count)
 
     # ── Section 6 (Task & Delegation Health) — Asana ─────────────────────────
-    if metrics.get("tasks"):
-        # Admin & Operations project GID from config/tool_ids.json
-        asana_ops_gid = "1213719394454339"
-        _add("Asana Admin & Operations", "asana", "project_board",
-             f"https://app.asana.com/0/{asana_ops_gid}/list")
+    if tasks:
+        task_count = tasks.get("overview", {}).get("total_open") or None
+        for project_name in ("Admin & Operations", "Client Success"):
+            _add(f"Asana {project_name}", "asana", project_name,
+                 get_deep_link("asana", project_name, "list"),
+                 record_count=task_count)
 
     return citations
 
@@ -419,7 +444,7 @@ def _score_report(report_text: str) -> int:
         return 0
 
     import anthropic
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=60.0)  # scoring call — short timeout
 
     system = f"""You are evaluating a weekly business intelligence report.
 Score it using this rubric (each dimension is 0-25, total 100):
@@ -531,9 +556,11 @@ def generate_weekly_report(context: BriefingContext, dry_run: bool = False) -> B
     # ── Build citation index block for user message ───────────────────────
     citation_block = "CITATION INDEX (use ref_ids inline when citing):\n"
     for entry in citation_index:
+        count = entry.get("record_count")
+        count_str = f"{count} records this week, " if count is not None else ""
         citation_block += (
             f"  [{entry['ref_id']}] {entry['claim']} "
-            f"(confidence: {entry.get('confidence', 'MEDIUM')})\n"
+            f"({count_str}confidence: {entry.get('confidence', 'MEDIUM')})\n"
         )
 
     user_message = (
@@ -558,7 +585,7 @@ def generate_weekly_report(context: BriefingContext, dry_run: bool = False) -> B
 
     # ── Step 4: Opus API call ─────────────────────────────────────────────
     import anthropic
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=120.0)  # 2-min per-attempt ceiling
 
     retry_count = 0
     raw_text = ""
