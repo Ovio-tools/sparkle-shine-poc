@@ -609,7 +609,11 @@ def main() -> None:
     logger.info("--- Stage 4: GENERATE REPORT (%s) ---", report_type)
     from intelligence.briefing_generator import generate_briefing
 
-    briefing = generate_briefing(context)
+    if args.report_type == "weekly":
+        from intelligence.weekly_report import generate_weekly_report
+        briefing = generate_weekly_report(context, dry_run=args.dry_run)
+    else:
+        briefing = generate_briefing(context, dry_run=args.dry_run)
 
     word_count = len(briefing.content_plain.split())
     result.briefing_words  = word_count
@@ -638,6 +642,10 @@ def main() -> None:
         publish_channel = SLACK_CONFIG["weekly_channel"]
     else:
         publish_channel = SLACK_CONFIG["briefing_channel"]
+
+    if args.report_type == "weekly" and not args.dry_run:
+        from intelligence.slack_publisher import ensure_channel
+        ensure_channel(SLACK_CONFIG["weekly_channel"])
 
     ok = post_briefing(briefing, channel=publish_channel)
     if ok:
