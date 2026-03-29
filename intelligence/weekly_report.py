@@ -445,3 +445,178 @@ dimension: "Specificity: <N>", "Insight Quality: <N>", etc.
     except Exception as exc:
         logger.warning("Quality scoring failed: %s", exc)
     return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# System prompt
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _extract_code_block(text: str) -> str:
+    """Extract content from the first ``` code block."""
+    match = re.search(r"```\n(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text
+
+
+def _build_system_prompt(insight_history_block: str, briefing_date: str) -> str:
+    """Build the Opus system prompt from the template in docs/skills/weekly-report.md.
+
+    Injects:
+      {insight_history_block} — last 4 weeks of insight history
+      {month_name}            — e.g. "March"
+      {seasonal_weight}       — from simulation/config.py SEASONAL_WEIGHTS
+      {seasonal_note}         — plain-English seasonal interpretation
+    """
+    try:
+        doc = _SKILL_DOC_PATH.read_text()
+        template_section = _extract_section(doc, "## System Prompt Template")
+        template = _extract_code_block(template_section)
+    except Exception as exc:
+        logger.error("Could not load system prompt template from %s: %s", _SKILL_DOC_PATH, exc)
+        template = (
+            "You are a business analyst for Sparkle & Shine Cleaning Co. "
+            "Write a weekly business intelligence report.\n\n"
+            "PREVIOUSLY REPORTED INSIGHTS:\n{insight_history_block}\n\n"
+            "SEASONAL CONTEXT:\nCurrent month: {month_name} (weight: {seasonal_weight})\n{seasonal_note}"
+        )
+
+    d = date.fromisoformat(briefing_date)
+    month_num = d.month
+    month_nm = d.strftime("%B")
+    weight = SEASONAL_WEIGHTS.get(month_num, 1.0)
+    note = _SEASONAL_NOTES.get(month_num, "")
+
+    return template.format(
+        insight_history_block=insight_history_block,
+        month_name=month_nm,
+        seasonal_weight=weight,
+        seasonal_note=note,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_weekly_report(context: BriefingContext, dry_run: bool = False) -> Briefing:
+    """Generate the weekly business intelligence report using Claude Opus 4.6.
+
+    Pipeline:
+      1. Load insight history → build PREVIOUSLY REPORTED block
+      2. Build citation index from context.metrics
+      3. Build system prompt (template from docs/skills/weekly-report.md)
+      4. Call Opus 4.6 (skipped in dry_run)
+      5. Post-process:
+           a. _extract_and_update_insights() — strip [insight_id:] markers, update history
+           b. _strip_low_confidence()        — remove LOW-confidence sentences
+           c. _inject_citations()            — replace [R01] with Slack mrkdwn links
+           d. _score_report()               — Sonnet quality score on final text
+
+    Returns a Briefing with report_type="weekly" and model_used="claude-opus-4-6".
+    Compatible with the existing runner's post_briefing() call.
+    """
+    start_time = time.time()
+
+    # ── Step 1: Insight history ───────────────────────────────────────────
+    history = _load_insight_history()
+    insight_block = _build_insight_history_block(history)
+
+    # ── Step 2: Citation index ────────────────────────────────────────────
+    citation_index = _build_citation_index(context)
+
+    # ── Step 3: System prompt ─────────────────────────────────────────────
+    system_prompt = _build_system_prompt(insight_block, context.date)
+
+    # ── Build citation index block for user message ───────────────────────
+    citation_block = "CITATION INDEX (use ref_ids inline when citing):\n"
+    for entry in citation_index:
+        citation_block += (
+            f"  [{entry['ref_id']}] {entry['claim']} "
+            f"(confidence: {entry.get('confidence', 'MEDIUM')})\n"
+        )
+
+    user_message = (
+        f"{citation_block}\n\n"
+        f"DATA AND CONTEXT:\n{context.context_document}"
+    )
+
+    # ── Dry run: skip API call ────────────────────────────────────────────
+    if dry_run:
+        logger.info("[DRY RUN] Would call Opus 4.6 with %d-char context", len(user_message))
+        return Briefing(
+            date=context.date,
+            content_slack="[DRY RUN] Weekly report not generated.",
+            content_plain="[DRY RUN] Weekly report not generated.",
+            model_used="dry_run",
+            input_tokens=0,
+            output_tokens=0,
+            generation_time_seconds=0.0,
+            retry_count=0,
+            report_type="weekly",
+        )
+
+    # ── Step 4: Opus API call ─────────────────────────────────────────────
+    import anthropic
+    client = anthropic.Anthropic()
+
+    retry_count = 0
+    raw_text = ""
+    input_tokens = 0
+    output_tokens = 0
+
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model=MODEL_CONFIG["weekly_model"],
+                max_tokens=MODEL_CONFIG["max_tokens_weekly"],
+                temperature=MODEL_CONFIG["temperature_weekly"],
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            raw_text = response.content[0].text
+            input_tokens = response.usage.input_tokens
+            output_tokens = response.usage.output_tokens
+            break
+        except Exception as exc:
+            retry_count += 1
+            if attempt < 2:
+                wait = 2 ** attempt
+                logger.warning("Opus call failed (attempt %d): %s — retrying in %ds", attempt + 1, exc, wait)
+                time.sleep(wait)
+            else:
+                logger.error("Opus call failed after 3 attempts: %s", exc)
+                raise
+
+    # ── Step 5a: Extract insight markers and update history ───────────────
+    cleaned, updated_history = _extract_and_update_insights(raw_text, history)
+    _save_insight_history(updated_history)
+
+    # ── Step 5b: Strip LOW-confidence content ─────────────────────────────
+    cleaned, removed = _strip_low_confidence(cleaned, citation_index)
+    if removed > 0:
+        logger.warning("Removed %d LOW-confidence claims from weekly report", removed)
+
+    # ── Step 5c: Inject citation links ────────────────────────────────────
+    final_text = _inject_citations(cleaned, citation_index)
+
+    # ── Step 5d: Quality score on final text ──────────────────────────────
+    score = _score_report(final_text)
+    generation_time = round(time.time() - start_time, 2)
+
+    if score > 0:
+        logger.info("Weekly report quality score: %d/100", score)
+    if 0 < score < 60:
+        logger.warning("Weekly report quality score %d is below threshold (60)", score)
+
+    return Briefing(
+        date=context.date,
+        content_slack=final_text,
+        content_plain=final_text,
+        model_used=MODEL_CONFIG["weekly_model"],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        generation_time_seconds=generation_time,
+        retry_count=retry_count,
+        report_type="weekly",
+    )

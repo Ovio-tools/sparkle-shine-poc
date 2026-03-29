@@ -1440,5 +1440,114 @@ class TestWeeklyReportQualityScoring(unittest.TestCase):
         self.assertEqual(score, 0)
 
 
+class TestWeeklyReportGenerate(unittest.TestCase):
+    """Tests for generate_weekly_report() in weekly_report.py."""
+
+    def _make_context(self):
+        import unittest.mock as mock
+        from intelligence.context_builder import BriefingContext
+        ctx = mock.MagicMock(spec=BriefingContext)
+        ctx.date = "2026-03-23"
+        ctx.date_formatted = "Sunday, March 23, 2026"
+        ctx.metrics = {
+            "revenue": {"yesterday": {"total": 5000.0}},
+            "financial_health": {},
+            "sales": {},
+        }
+        ctx.context_document = "## WEEK SUMMARY\nRevenue: $36,250\n## CASH POSITION\nAR: $120,000"
+        ctx.report_type = "weekly"
+        return ctx
+
+    def test_dry_run_returns_briefing_without_api_call(self):
+        """generate_weekly_report(dry_run=True) returns Briefing without calling Anthropic."""
+        import unittest.mock as mock
+        from intelligence.weekly_report import generate_weekly_report
+
+        ctx = self._make_context()
+        import simulation.deep_links as dl
+        dl._cache_loaded = True
+
+        with mock.patch("anthropic.Anthropic") as mock_cls:
+            briefing = generate_weekly_report(ctx, dry_run=True)
+            mock_cls.assert_not_called()
+
+        from intelligence.briefing_generator import Briefing
+        self.assertIsInstance(briefing, Briefing)
+        self.assertEqual(briefing.report_type, "weekly")
+        self.assertIn("dry", briefing.model_used.lower())
+
+    def test_generate_weekly_report_returns_briefing_with_correct_type(self):
+        """generate_weekly_report() returns a Briefing with report_type='weekly'."""
+        import unittest.mock as mock
+        from intelligence.weekly_report import generate_weekly_report
+
+        ctx = self._make_context()
+        import simulation.deep_links as dl
+        dl._cache_loaded = True
+
+        mock_message = mock.MagicMock()
+        mock_message.content = [mock.MagicMock(text="## Executive Summary\nGood week.\n## Key Wins\n3 wins.\n## Concerns\n2 concerns.\n## Trends\nFlat.\n## Recommendations\n1. Do X.\n## Looking Ahead\nWatch Y.")]
+        mock_message.usage.input_tokens = 1000
+        mock_message.usage.output_tokens = 500
+
+        # Score call returns "Score: 80"
+        score_response = mock.MagicMock()
+        score_response.content = [mock.MagicMock(text="Score: 80")]
+
+        call_count = [0]
+        def side_effect(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return mock_message   # Opus generation call
+            return score_response     # Sonnet scoring call
+
+        with mock.patch("anthropic.Anthropic") as mock_cls:
+            mock_client = mock.MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.messages.create.side_effect = side_effect
+
+            briefing = generate_weekly_report(ctx, dry_run=False)
+
+        from intelligence.briefing_generator import Briefing
+        self.assertIsInstance(briefing, Briefing)
+        self.assertEqual(briefing.report_type, "weekly")
+        self.assertEqual(briefing.model_used, "claude-opus-4-6")
+
+    def test_generate_weekly_report_no_low_confidence_in_output(self):
+        """generate_weekly_report() strips [LOW] tagged content from final output."""
+        import unittest.mock as mock
+        from intelligence.weekly_report import generate_weekly_report
+
+        ctx = self._make_context()
+        import simulation.deep_links as dl
+        dl._cache_loaded = True
+
+        # Opus returns a report with a [LOW] tagged sentence
+        mock_message = mock.MagicMock()
+        mock_message.content = [mock.MagicMock(
+            text="Revenue was strong. This is speculative noise. [LOW] The team performed well."
+        )]
+        mock_message.usage.input_tokens = 800
+        mock_message.usage.output_tokens = 400
+
+        score_response = mock.MagicMock()
+        score_response.content = [mock.MagicMock(text="Score: 75")]
+
+        call_count = [0]
+        def side_effect(**kwargs):
+            call_count[0] += 1
+            return mock_message if call_count[0] == 1 else score_response
+
+        with mock.patch("anthropic.Anthropic") as mock_cls:
+            mock_client = mock.MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.messages.create.side_effect = side_effect
+
+            briefing = generate_weekly_report(ctx, dry_run=False)
+
+        self.assertNotIn("[LOW]", briefing.content_slack)
+        self.assertNotIn("[LOW]", briefing.content_plain)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
