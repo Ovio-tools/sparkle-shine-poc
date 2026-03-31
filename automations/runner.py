@@ -283,7 +283,7 @@ def run_pending(clients, db, dry_run: bool) -> dict:
         """
         SELECT id, automation_name, action_name, trigger_context
         FROM pending_actions
-        WHERE status = 'pending' AND execute_after <= ?
+        WHERE status = 'pending' AND execute_after <= %s
         ORDER BY execute_after ASC
         """,
         (now_str,),
@@ -305,7 +305,7 @@ def run_pending(clients, db, dry_run: bool) -> dict:
             )
             with db:
                 db.execute(
-                    "UPDATE pending_actions SET status='executed', executed_at=? WHERE id=?",
+                    "UPDATE pending_actions SET status='executed', executed_at=%s WHERE id=%s",
                     (executed_at, action_id),
                 )
             results["succeeded"] += 1
@@ -470,7 +470,6 @@ def main() -> None:
     from auth import get_client
 
     db = get_connection()
-    db.row_factory = __import__("sqlite3").Row
 
     totals = {"processed": 0, "succeeded": 0, "failed": 0}
 
