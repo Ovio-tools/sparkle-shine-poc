@@ -62,7 +62,7 @@ class BaseAutomation:
                 INSERT INTO automation_log
                     (run_id, automation_name, trigger_source, trigger_detail,
                      action_name, action_target, status, error_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     run_id,
@@ -139,7 +139,7 @@ class BaseAutomation:
                 """
                 INSERT INTO pending_actions
                     (automation_name, action_name, trigger_context, execute_after)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
                 """,
                 (automation_name, action_name, context_str, execute_after),
             )
