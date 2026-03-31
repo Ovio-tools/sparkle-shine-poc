@@ -10,7 +10,6 @@ Each function:
 """
 import json
 import os
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -53,7 +52,7 @@ def _default_since() -> str:
 # 1. Pipedrive: won deals
 # ─────────────────────────────────────────────────────────────────────────────
 
-def poll_pipedrive_won_deals(clients: Any, db: sqlite3.Connection) -> list:
+def poll_pipedrive_won_deals(clients: Any, db) -> list:
     """
     Poll Pipedrive for deals that moved to 'won' since the last poll.
 
@@ -182,7 +181,7 @@ query CompletedJobs($after: String, $filter: JobFilterAttributes) {
 """
 
 
-def poll_jobber_completed_jobs(clients: Any, db: sqlite3.Connection) -> list:
+def poll_jobber_completed_jobs(clients: Any, db) -> list:
     """
     Poll Jobber (GraphQL) for jobs completed since the last poll.
 
@@ -271,7 +270,7 @@ def poll_jobber_completed_jobs(clients: Any, db: sqlite3.Connection) -> list:
 # 3. QuickBooks: payments
 # ─────────────────────────────────────────────────────────────────────────────
 
-def poll_quickbooks_payments(clients: Any, db: sqlite3.Connection) -> list:
+def poll_quickbooks_payments(clients: Any, db) -> list:
     """
     Poll QuickBooks for new payments since the last poll.
 
@@ -376,7 +375,7 @@ def _reviews_sheet_id() -> str:
     return sheet_id
 
 
-def poll_sheets_negative_reviews(clients: Any, db: sqlite3.Connection) -> list:
+def poll_sheets_negative_reviews(clients: Any, db) -> list:
     """
     Read the reviews Google Sheet and return rows with rating <= 2
     that haven't been processed yet.
