@@ -1,4 +1,4 @@
-import sqlite3
+from database.connection import get_connection as _get_connection
 
 CREATE_TABLES = [
     # ------------------------------------------------------------------ #
@@ -23,7 +23,7 @@ CREATE_TABLES = [
         last_service_date   TEXT,
         lifetime_value      REAL DEFAULT 0.0,
         notes               TEXT,
-        created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
 
@@ -43,7 +43,7 @@ CREATE_TABLES = [
         status              TEXT NOT NULL DEFAULT 'new'
                                 CHECK(status IN ('new','contacted','qualified','lost')),
         estimated_value     REAL DEFAULT 0.0,
-        created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+        created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_activity_at    TEXT,
         notes               TEXT
     )
@@ -198,7 +198,7 @@ CREATE_TABLES = [
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS marketing_interactions (
-        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        id                  SERIAL PRIMARY KEY,
         client_id           TEXT REFERENCES clients(id),
         lead_id             TEXT REFERENCES leads(id),
         campaign_id         TEXT NOT NULL REFERENCES marketing_campaigns(id),
@@ -241,7 +241,7 @@ CREATE_TABLES = [
                                     CHECK(status IN ('not_started','in_progress','completed','overdue')),
         priority                TEXT NOT NULL DEFAULT 'medium'
                                     CHECK(priority IN ('low','medium','high')),
-        created_at              TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
 
@@ -282,13 +282,13 @@ CREATE_TABLES = [
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS cross_tool_mapping (
-        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        id                  SERIAL PRIMARY KEY,
         canonical_id        TEXT NOT NULL,             -- SS-TYPE-NNNN
         entity_type         TEXT NOT NULL,
         tool_name           TEXT NOT NULL,
         tool_specific_id    TEXT NOT NULL,
         tool_specific_url   TEXT,
-        synced_at           TEXT NOT NULL DEFAULT (datetime('now')),
+        synced_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(canonical_id, tool_name)
     )
     """,
@@ -317,12 +317,12 @@ CREATE_TABLES = [
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS document_index (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        id          SERIAL PRIMARY KEY,
         doc_id      TEXT NOT NULL REFERENCES documents(id),
         chunk_text  TEXT NOT NULL,
         keywords    TEXT,
         source_title TEXT,
-        indexed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        indexed_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
 
@@ -368,7 +368,7 @@ CREATE_TABLES = [
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS automation_log (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        id              SERIAL PRIMARY KEY,
         run_id          TEXT NOT NULL,
         automation_name TEXT NOT NULL,
         trigger_source  TEXT,
@@ -377,7 +377,7 @@ CREATE_TABLES = [
         action_target   TEXT,
         status          TEXT NOT NULL CHECK(status IN ('success','failed','skipped')),
         error_message   TEXT,
-        created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
 
@@ -386,14 +386,14 @@ CREATE_TABLES = [
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS pending_actions (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        id              SERIAL PRIMARY KEY,
         automation_name TEXT NOT NULL,
         action_name     TEXT NOT NULL,
         trigger_context TEXT NOT NULL,
         execute_after   TEXT NOT NULL,
         status          TEXT NOT NULL DEFAULT 'pending'
                             CHECK(status IN ('pending','executed','failed')),
-        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         executed_at     TEXT
     )
     """,
@@ -402,6 +402,46 @@ CREATE_TABLES = [
     "CREATE INDEX IF NOT EXISTS idx_automation_log_status   ON automation_log(status)",
     "CREATE INDEX IF NOT EXISTS idx_pending_actions_status  ON pending_actions(status)",
     "CREATE INDEX IF NOT EXISTS idx_pending_actions_execute ON pending_actions(execute_after)",
+
+    # ------------------------------------------------------------------ #
+    # 22. won_deals
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS won_deals (
+        canonical_id      TEXT PRIMARY KEY,
+        client_type       TEXT NOT NULL,
+        service_frequency TEXT NOT NULL,
+        contract_value    REAL,
+        start_date        TEXT NOT NULL,
+        crew_assignment   TEXT,
+        pipedrive_deal_id INTEGER
+    )
+    """,
+
+    # ------------------------------------------------------------------ #
+    # 23. oauth_tokens
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+        tool_name    TEXT PRIMARY KEY,
+        token_data   TEXT NOT NULL,
+        updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+
+    # ------------------------------------------------------------------ #
+    # 24. gmail_metadata
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS gmail_metadata (
+        message_id   TEXT PRIMARY KEY,
+        from_address TEXT,
+        to_address   TEXT,
+        subject      TEXT,
+        message_date TEXT,
+        synced_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
 ]
 
 # Table name → human label (for __main__ summary only)
@@ -412,14 +452,12 @@ _TABLE_NAMES = [
     "calendar_events", "documents", "cross_tool_mapping",
     "daily_metrics_snapshot", "document_index",
     "poll_state", "automation_log", "pending_actions",
+    "won_deals", "oauth_tokens", "gmail_metadata",
 ]
 
 
-def get_connection(db_path: str = "sparkle_shine.db") -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def get_connection(db_path: str = "sparkle_shine.db"):
+    return _get_connection(db_path)
 
 
 def init_db(db_path: str = "sparkle_shine.db") -> None:
@@ -431,25 +469,23 @@ def init_db(db_path: str = "sparkle_shine.db") -> None:
 
 
 if __name__ == "__main__":
-    import os
+    init_db()
 
-    db_path = "sparkle_shine.db"
-    init_db(db_path)
-
-    conn = get_connection(db_path)
-    print(f"\nDatabase initialised: {os.path.abspath(db_path)}\n")
+    conn = get_connection()
+    print(f"\nDatabase initialised\n")
     print(f"{'Table':<30} {'Columns':>7}")
     print("-" * 40)
 
+    from database.connection import get_column_names
     for table in _TABLE_NAMES:
-        cursor = conn.execute(f"PRAGMA table_info({table})")
-        cols = cursor.fetchall()
+        cols = get_column_names(conn, table)
         print(f"  {table:<28} {len(cols):>7}")
 
     cursor = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+        "SELECT COUNT(*) AS cnt FROM pg_indexes "
+        "WHERE schemaname = 'public'"
     )
-    index_count = cursor.fetchone()[0]
+    index_count = cursor.fetchone()["cnt"]
     print("-" * 40)
     print(f"  {'TOTAL TABLES':<28} {len(_TABLE_NAMES):>7}")
     print(f"  {'TOTAL INDEXES':<28} {index_count:>7}")
