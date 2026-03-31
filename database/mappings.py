@@ -1,4 +1,3 @@
-import sqlite3
 from typing import Optional
 from database.schema import get_connection
 
@@ -70,11 +69,11 @@ def register_mapping(
     # Collision guard: same external ID must not point to two canonical entities.
     existing = conn.execute(
         "SELECT canonical_id FROM cross_tool_mapping "
-        "WHERE tool_name = ? AND tool_specific_id = ?",
+        "WHERE tool_name = %s AND tool_specific_id = %s",
         (tool_name, tool_specific_id),
     ).fetchone()
     if existing is not None:
-        existing_cid = existing["canonical_id"] if hasattr(existing, "keys") else existing[0]
+        existing_cid = existing["canonical_id"]
         if existing_cid != canonical_id:
             conn.close()
             raise ValueError(
@@ -86,11 +85,11 @@ def register_mapping(
             """
             INSERT INTO cross_tool_mapping
                 (canonical_id, entity_type, tool_name, tool_specific_id, tool_specific_url, synced_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
                 tool_specific_id  = excluded.tool_specific_id,
                 tool_specific_url = excluded.tool_specific_url,
-                synced_at         = datetime('now')
+                synced_at         = CURRENT_TIMESTAMP
             """,
             (canonical_id, entity_type, tool_name, tool_specific_id, tool_specific_url),
         )
@@ -107,7 +106,7 @@ def get_tool_id(
     try:
         cursor = conn.execute(
             "SELECT tool_specific_id FROM cross_tool_mapping "
-            "WHERE canonical_id = ? AND tool_name = ?",
+            "WHERE canonical_id = %s AND tool_name = %s",
             (canonical_id, tool_name),
         )
         row = cursor.fetchone()
@@ -126,7 +125,7 @@ def get_tool_url(
     try:
         cursor = conn.execute(
             "SELECT tool_specific_url FROM cross_tool_mapping "
-            "WHERE canonical_id = ? AND tool_name = ?",
+            "WHERE canonical_id = %s AND tool_name = %s",
             (canonical_id, tool_name),
         )
         row = cursor.fetchone()
@@ -145,7 +144,7 @@ def get_canonical_id(
     try:
         cursor = conn.execute(
             "SELECT canonical_id FROM cross_tool_mapping "
-            "WHERE tool_name = ? AND tool_specific_id = ?",
+            "WHERE tool_name = %s AND tool_specific_id = %s",
             (tool_name, tool_specific_id),
         )
         row = cursor.fetchone()
@@ -163,7 +162,7 @@ def get_all_mappings(
     try:
         cursor = conn.execute(
             "SELECT tool_name, tool_specific_id FROM cross_tool_mapping "
-            "WHERE canonical_id = ?",
+            "WHERE canonical_id = %s",
             (canonical_id,),
         )
         return {row["tool_name"]: row["tool_specific_id"] for row in cursor.fetchall()}
@@ -189,7 +188,7 @@ def find_unmapped(
             SELECT e.id FROM {table} e
             WHERE e.id NOT IN (
                 SELECT canonical_id FROM cross_tool_mapping
-                WHERE tool_name = ?
+                WHERE tool_name = %s
             )
             """,
             (tool_name,),
@@ -207,7 +206,7 @@ def list_mapped_tools(
     conn = get_connection(db_path)
     try:
         cursor = conn.execute(
-            "SELECT tool_name FROM cross_tool_mapping WHERE canonical_id = ?",
+            "SELECT tool_name FROM cross_tool_mapping WHERE canonical_id = %s",
             (canonical_id,),
         )
         return [row["tool_name"] for row in cursor.fetchall()]
@@ -238,10 +237,10 @@ def bulk_register(
             """
             INSERT INTO cross_tool_mapping
                 (canonical_id, entity_type, tool_name, tool_specific_id, tool_specific_url, synced_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
                 tool_specific_id = excluded.tool_specific_id,
-                synced_at        = datetime('now')
+                synced_at        = CURRENT_TIMESTAMP
             """,
             rows,
         )
