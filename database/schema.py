@@ -419,18 +419,7 @@ CREATE_TABLES = [
     """,
 
     # ------------------------------------------------------------------ #
-    # 23. oauth_tokens
-    # ------------------------------------------------------------------ #
-    """
-    CREATE TABLE IF NOT EXISTS oauth_tokens (
-        tool_name    TEXT PRIMARY KEY,
-        token_data   TEXT NOT NULL,
-        updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-    """,
-
-    # ------------------------------------------------------------------ #
-    # 24. gmail_metadata
+    # 23. gmail_metadata
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS gmail_metadata (
@@ -452,7 +441,7 @@ _TABLE_NAMES = [
     "calendar_events", "documents", "cross_tool_mapping",
     "daily_metrics_snapshot", "document_index",
     "poll_state", "automation_log", "pending_actions",
-    "won_deals", "oauth_tokens", "gmail_metadata",
+    "won_deals", "gmail_metadata",
 ]
 
 
