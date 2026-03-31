@@ -314,7 +314,7 @@ def run_pending(clients, db, dry_run: bool) -> dict:
         except Exception as e:
             with db:
                 db.execute(
-                    "UPDATE pending_actions SET status='failed' WHERE id=?",
+                    "UPDATE pending_actions SET status='failed' WHERE id=%s",
                     (action_id,),
                 )
             results["failed"] += 1
