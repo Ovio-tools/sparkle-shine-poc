@@ -147,9 +147,10 @@ class PipedriveSyncer(BaseSyncer):
             with self.db:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO commercial_proposals
+                    INSERT INTO commercial_proposals
                         (id, title, monthly_value, status, decision_date, notes)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
                     """,
                     (canonical_id, title, value, status, decision_date, lost_reason),
                 )
@@ -159,11 +160,11 @@ class PipedriveSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE commercial_proposals
-                    SET status        = ?,
-                        monthly_value = COALESCE(NULLIF(?, 0), monthly_value),
-                        decision_date = COALESCE(?, decision_date),
-                        notes         = COALESCE(?, notes)
-                    WHERE id = ?
+                    SET status        = %s,
+                        monthly_value = COALESCE(NULLIF(%s, 0), monthly_value),
+                        decision_date = COALESCE(%s, decision_date),
+                        notes         = COALESCE(%s, notes)
+                    WHERE id = %s
                     """,
                     (status, value, decision_date, lost_reason, canonical_id),
                 )
@@ -204,7 +205,7 @@ class PipedriveSyncer(BaseSyncer):
                                 """
                                 UPDATE commercial_proposals
                                 SET notes = COALESCE(notes, '')
-                                WHERE id = ? AND notes NOT LIKE '%last_activity%'
+                                WHERE id = %s AND notes NOT LIKE '%%last_activity%%'
                                 """,
                                 (canonical_id,),
                             )

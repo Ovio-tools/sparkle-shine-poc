@@ -135,7 +135,7 @@ class TestInit(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         init_db(self._db_path)
 
     def tearDown(self):
@@ -168,7 +168,7 @@ class TestPickDeal(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         init_db(self._db_path)
         from simulation.generators.deals import DealGenerator
         self.gen = DealGenerator(db_path=self._db_path)
@@ -209,7 +209,7 @@ class TestLogActivity(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         init_db(self._db_path)
         from simulation.generators.deals import DealGenerator
         self.gen = DealGenerator(db_path=self._db_path)
@@ -247,7 +247,7 @@ class TestAdvanceDeal(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         init_db(self._db_path)
         from simulation.generators.deals import DealGenerator
         self.gen = DealGenerator(db_path=self._db_path)
@@ -366,7 +366,7 @@ class TestCompleteWonDeal(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         from database.mappings import register_mapping
         init_db(self._db_path)
         from simulation.generators.deals import DealGenerator
@@ -380,10 +380,10 @@ class TestCompleteWonDeal(unittest.TestCase):
         )
         conn.commit()
         conn.close()
-        # Register pipedrive deal 200 → SS-PROP-0001
-        register_mapping("SS-PROP-0001", "pipedrive", "200", db_path=self._db_path)
+        # Register pipedrive deal 90200 → SS-PROP-0001 (high IDs to avoid conftest collisions)
+        register_mapping("SS-PROP-0001", "pipedrive", "90200", db_path=self._db_path)
 
-        # Insert SS-LEAD-0001 in leads and register deal 201
+        # Insert SS-LEAD-0001 in leads and register deal 90201
         conn = sqlite3.connect(self._db_path)
         conn.execute(
             "INSERT INTO leads (id, first_name, last_name, lead_type, status) "
@@ -391,7 +391,7 @@ class TestCompleteWonDeal(unittest.TestCase):
         )
         conn.commit()
         conn.close()
-        register_mapping("SS-LEAD-0001", "pipedrive", "201", db_path=self._db_path)
+        register_mapping("SS-LEAD-0001", "pipedrive", "90201", db_path=self._db_path)
 
         self.contract = {
             "contract_type":     "commercial",
@@ -404,6 +404,18 @@ class TestCompleteWonDeal(unittest.TestCase):
     def tearDown(self):
         os.close(self._fd)
         os.unlink(self._db_path)
+        # Clean up PostgreSQL cross_tool_mapping entries registered by setUp
+        try:
+            from database.connection import get_connection as _pg
+            conn = _pg()
+            with conn:
+                conn.execute(
+                    "DELETE FROM cross_tool_mapping WHERE canonical_id IN (%s, %s)",
+                    ("SS-PROP-0001", "SS-LEAD-0001"),
+                )
+            conn.close()
+        except Exception:
+            pass  # best-effort cleanup
 
     def _mc(self, put_status=200):
         mc = MagicMock()
@@ -422,7 +434,7 @@ class TestCompleteWonDeal(unittest.TestCase):
     def test_ss_prop_updates_commercial_proposals(self):
         with patch("simulation.generators.deals.get_client", return_value=self._mc()):
             with patch("time.sleep"):
-                self.gen._complete_won_deal(self._deal(200), self.contract, dry_run=False)
+                self.gen._complete_won_deal(self._deal(90200), self.contract, dry_run=False)
 
         conn = sqlite3.connect(self._db_path)
         row = conn.execute(
@@ -441,7 +453,7 @@ class TestCompleteWonDeal(unittest.TestCase):
         with patch("simulation.generators.deals.get_client", return_value=mc):
             with patch("time.sleep"):
                 self.gen._complete_won_deal(
-                    self._deal(201, client_type="residential"),
+                    self._deal(90201, client_type="residential"),
                     residential_contract,
                     dry_run=False,
                 )
@@ -460,7 +472,7 @@ class TestCompleteWonDeal(unittest.TestCase):
         with patch("simulation.generators.deals.get_client", return_value=self._mc()):
             with patch("time.sleep"):
                 with self.assertLogs("simulation.deals", level="WARNING") as cm:
-                    self.gen._complete_won_deal(self._deal(999), self.contract, dry_run=False)
+                    self.gen._complete_won_deal(self._deal(90999), self.contract, dry_run=False)
         self.assertTrue(
             any("no canonical ID mapping" in line for line in cm.output),
             msg=f"Expected warning not found in: {cm.output}",
@@ -470,7 +482,7 @@ class TestCompleteWonDeal(unittest.TestCase):
         mc = MagicMock()
         with patch("simulation.generators.deals.get_client", return_value=mc):
             with patch.object(self.gen, "_log_activity") as mock_log:
-                self.gen._complete_won_deal(self._deal(200), self.contract, dry_run=True)
+                self.gen._complete_won_deal(self._deal(90200), self.contract, dry_run=True)
 
         mc.put.assert_not_called()
         mc.post.assert_not_called()
@@ -489,7 +501,7 @@ class TestServiceFrequencyBranching(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         init_db(self._db_path)
         from simulation.generators.deals import DealGenerator
         self.gen = DealGenerator(db_path=self._db_path)
@@ -530,7 +542,7 @@ class TestExecute(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         init_db(self._db_path)
         from simulation.generators.deals import DealGenerator, GeneratorResult
         self.gen = DealGenerator(db_path=self._db_path)

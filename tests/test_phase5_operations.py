@@ -1139,8 +1139,14 @@ class TestJobSchedulingSkipsWhenPropertyIdIsNone(unittest.TestCase):
 
 
 class TestRegisterMappingUsesConnectionTimeout(unittest.TestCase):
-    """register_mapping must open SQLite with a timeout so concurrent writes retry."""
+    """register_mapping must open SQLite with a timeout so concurrent writes retry.
 
+    NOTE: This test was written before the PostgreSQL migration. The production
+    get_connection() now uses psycopg2 (not sqlite3.connect), so the original
+    SQLite timeout assertion is no longer applicable. Skipped post-migration.
+    """
+
+    @unittest.skip("Pre-PostgreSQL migration test; get_connection() now uses psycopg2")
     def test_get_connection_uses_nonzero_timeout(self):
         import sqlite3 as real_sqlite3
         from unittest.mock import patch, MagicMock

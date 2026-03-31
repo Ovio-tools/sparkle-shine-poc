@@ -6,9 +6,10 @@ Usage:
 """
 
 import re
-import sqlite3
 import sys
 from typing import Optional
+
+from database.schema import get_connection
 
 STOP_WORDS = {"the", "a", "an", "is", "are", "in", "on", "at", "for", "to", "of", "and", "or"}
 
@@ -76,13 +77,12 @@ def search_documents(db_path: str, query: str, max_results: int = 3) -> list[dic
     if not keywords:
         return []
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_connection(db_path)
     try:
         # Build a query that returns rows matching ANY keyword, then score
         # in Python so we can count how many distinct keywords matched.
         # Actual column names in document_index: chunk_text, source_title, indexed_at
-        like_clauses = " OR ".join("chunk_text LIKE ?" for _ in keywords)
+        like_clauses = " OR ".join("chunk_text LIKE %s" for _ in keywords)
         params = [f"%{kw}%" for kw in keywords]
         sql = f"""
             SELECT doc_id, source_title, chunk_text
@@ -114,11 +114,10 @@ def search_documents(db_path: str, query: str, max_results: int = 3) -> list[dic
 
 def get_document_by_id(db_path: str, doc_id: str) -> Optional[dict]:
     """Retrieve a single document's full content by ID."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT * FROM document_index WHERE doc_id = ?", (doc_id,)
+            "SELECT * FROM document_index WHERE doc_id = %s", (doc_id,)
         ).fetchone()
     finally:
         conn.close()

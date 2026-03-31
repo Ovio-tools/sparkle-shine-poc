@@ -4,13 +4,13 @@ Abstract base class for all Sparkle & Shine tool syncers.
 Every syncer subclass sets class-level tool_name and implements sync().
 The base class owns sync_state table creation, last-sync reads, and state writes.
 """
-import sqlite3
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from database.schema import get_connection
 from intelligence.logging_config import setup_logging
 
 
@@ -50,9 +50,7 @@ class BaseSyncer(ABC):
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.db = sqlite3.connect(db_path)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys = ON")
+        self.db = get_connection(db_path)
         self.logger = setup_logging(f"syncer.{self.tool_name}")
         self._ensure_sync_state_table()
 
@@ -72,7 +70,7 @@ class BaseSyncer(ABC):
     def get_last_sync_time(self) -> Optional[datetime]:
         """Return the last successful sync timestamp, or None if never synced."""
         cursor = self.db.execute(
-            "SELECT last_sync_at FROM sync_state WHERE tool_name = ?",
+            "SELECT last_sync_at FROM sync_state WHERE tool_name = %s",
             (self.tool_name,),
         )
         row = cursor.fetchone()
@@ -89,11 +87,11 @@ class BaseSyncer(ABC):
             self.db.execute(
                 """
                 INSERT INTO sync_state (tool_name, last_sync_at, records_synced, last_error)
-                VALUES (?, datetime('now'), ?, ?)
+                VALUES (%s, CURRENT_TIMESTAMP, %s, %s)
                 ON CONFLICT(tool_name) DO UPDATE SET
-                    last_sync_at   = datetime('now'),
-                    records_synced = excluded.records_synced,
-                    last_error     = excluded.last_error
+                    last_sync_at   = CURRENT_TIMESTAMP,
+                    records_synced = EXCLUDED.records_synced,
+                    last_error     = EXCLUDED.last_error
                 """,
                 (self.tool_name, record_count, error),
             )

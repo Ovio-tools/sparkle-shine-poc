@@ -26,12 +26,12 @@ def compute(db, briefing_date: str) -> dict:
     # ------------------------------------------------------------------ #
     revenue_90 = db.execute(
         """
-        SELECT COALESCE(SUM(amount), 0.0)
+        SELECT COALESCE(SUM(amount), 0.0) AS total
         FROM payments
-        WHERE payment_date BETWEEN ? AND ?
+        WHERE payment_date BETWEEN %s AND %s
         """,
         (str(ninety_days_ago), str(today)),
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     # ------------------------------------------------------------------ #
     # Cash position — pull latest snapshot for AR; derive bank balance
@@ -52,12 +52,12 @@ def compute(db, briefing_date: str) -> dict:
     # Expected AR collectible in 30 days = current (0-30 day) invoices
     ar_30_row = db.execute(
         """
-        SELECT COALESCE(SUM(amount), 0.0)
+        SELECT COALESCE(SUM(amount), 0.0) AS total
         FROM invoices
         WHERE status IN ('sent', 'overdue')
           AND (days_outstanding IS NULL OR days_outstanding <= 30)
         """,
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     # Bank balance proxy: 90-day revenue minus estimated operating expenses.
     # Cleaning industry typical expense ratio ≈ 65% (labor, supplies, overhead).
@@ -133,14 +133,14 @@ def compute(db, briefing_date: str) -> dict:
         week_end = today - timedelta(weeks=weeks_back)
         week_start_90 = week_end - timedelta(days=90)
         rev_w = db.execute(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date BETWEEN ? AND ?",
+            "SELECT COALESCE(SUM(amount), 0.0) AS total FROM payments WHERE payment_date BETWEEN %s AND %s",
             (str(week_start_90), str(week_end)),
-        ).fetchone()[0]
+        ).fetchone()["total"]
         # Pull closest AR snapshot on or before week_end
         snap_w = db.execute(
             """
             SELECT open_invoices_value FROM daily_metrics_snapshot
-            WHERE snapshot_date <= ?
+            WHERE snapshot_date <= %s
             ORDER BY snapshot_date DESC LIMIT 1
             """,
             (str(week_end),),
@@ -168,7 +168,7 @@ def compute(db, briefing_date: str) -> dict:
               OR COALESCE(i.days_outstanding, 0) BETWEEN 58 AND 62
           )
           AND c.status != 'churned'
-        GROUP BY i.client_id
+        GROUP BY i.client_id, c.first_name, c.last_name, c.company_name
         ORDER BY total_outstanding DESC
         """,
     ).fetchall()
@@ -200,9 +200,9 @@ def compute(db, briefing_date: str) -> dict:
         FROM invoices i
         JOIN clients c ON i.client_id = c.id
         WHERE i.status IN ('sent', 'overdue')
-          AND COALESCE(i.days_outstanding, 0) > ?
+          AND COALESCE(i.days_outstanding, 0) > %s
           AND c.status != 'churned'
-        GROUP BY i.client_id
+        GROUP BY i.client_id, c.first_name, c.last_name, c.company_name
         ORDER BY total_outstanding DESC
         """,
         (payment_delay_warning,),

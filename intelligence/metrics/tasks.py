@@ -37,8 +37,8 @@ def compute(db, briefing_date: str) -> dict:
         SELECT
             SUM(CASE WHEN t.status != 'completed' THEN 1 ELSE 0 END) AS total_open,
             SUM(CASE WHEN {overdue_expr} THEN 1 ELSE 0 END)           AS total_overdue,
-            SUM(CASE WHEN date(t.completed_date) = ?  THEN 1 ELSE 0 END) AS completed_yesterday,
-            SUM(CASE WHEN date(t.created_at) = ?      THEN 1 ELSE 0 END) AS created_yesterday
+            SUM(CASE WHEN t.completed_date::date = %s  THEN 1 ELSE 0 END) AS completed_yesterday,
+            SUM(CASE WHEN t.created_at::date = %s      THEN 1 ELSE 0 END) AS created_yesterday
         FROM tasks t
         """,
         (str(yesterday), str(yesterday)),
@@ -83,7 +83,7 @@ def compute(db, briefing_date: str) -> dict:
         FROM tasks t
         LEFT JOIN employees e ON t.assignee_employee_id = e.id
         WHERE t.assignee_employee_id IS NOT NULL
-        GROUP BY t.assignee_employee_id
+        GROUP BY t.assignee_employee_id, e.first_name, e.last_name, e.role
         """,
     ).fetchall()
 
@@ -108,12 +108,12 @@ def compute(db, briefing_date: str) -> dict:
                e.first_name || ' ' || COALESCE(e.last_name, '') AS full_name,
                e.role,
                t.project_name,
-               CAST(julianday('{briefing_date}') - julianday(t.due_date) AS INTEGER) AS days_overdue
+               ('{briefing_date}'::date - t.due_date::date) AS days_overdue
         FROM tasks t
         LEFT JOIN employees e ON t.assignee_employee_id = e.id
         WHERE {overdue_expr}
           AND t.due_date IS NOT NULL
-          AND julianday('{briefing_date}') - julianday(t.due_date) >= ?
+          AND ('{briefing_date}'::date - t.due_date::date) >= %s
         ORDER BY days_overdue DESC
         """,
         (critical_overdue_days,),

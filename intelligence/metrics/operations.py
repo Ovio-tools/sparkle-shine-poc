@@ -35,12 +35,12 @@ def compute(db, briefing_date: str) -> dict:
         """
         SELECT status, COUNT(*) AS cnt
         FROM jobs
-        WHERE scheduled_date = ?
+        WHERE scheduled_date = %s
         GROUP BY status
         """,
         (str(yesterday),),
     ).fetchall()
-    status_counts = {r[0]: r[1] for r in rows}
+    status_counts = {r["status"]: r["cnt"] for r in rows}
 
     completed = status_counts.get("completed", 0)
     cancelled = status_counts.get("cancelled", 0)
@@ -57,7 +57,7 @@ def compute(db, briefing_date: str) -> dict:
                j.duration_minutes_actual
         FROM jobs j
         LEFT JOIN crews cr ON j.crew_id = cr.id
-        WHERE j.scheduled_date = ?
+        WHERE j.scheduled_date = %s
           AND j.status IN ('scheduled', 'in_progress')
         """,
         (str(today),),
@@ -120,8 +120,8 @@ def compute(db, briefing_date: str) -> dict:
         LEFT JOIN crews cr ON j.crew_id = cr.id
         LEFT JOIN reviews r ON r.job_id = j.id
         WHERE j.status = 'completed'
-          AND date(j.completed_at) BETWEEN ? AND ?
-        GROUP BY j.crew_id
+          AND j.completed_at::date BETWEEN %s AND %s
+        GROUP BY j.crew_id, cr.name
         """,
         (str(seven_days_ago), str(yesterday)),
     ).fetchall()
@@ -134,7 +134,7 @@ def compute(db, briefing_date: str) -> dict:
         FROM jobs j
         LEFT JOIN crews cr ON j.crew_id = cr.id
         WHERE j.status = 'completed'
-          AND date(j.completed_at) BETWEEN ? AND ?
+          AND j.completed_at::date BETWEEN %s AND %s
           AND j.duration_minutes_actual IS NOT NULL
         """,
         (str(seven_days_ago), str(yesterday)),
@@ -199,10 +199,10 @@ def compute(db, briefing_date: str) -> dict:
         FROM jobs j
         JOIN clients c ON j.client_id = c.id
         WHERE j.status = 'cancelled'
-          AND j.scheduled_date BETWEEN ? AND ?
+          AND j.scheduled_date BETWEEN %s AND %s
           AND c.neighborhood IS NOT NULL
         GROUP BY c.neighborhood
-        HAVING COUNT(*) >= ?
+        HAVING COUNT(*) >= %s
         """,
         (str(fourteen_days_ago), str(yesterday), cluster_threshold),
     ).fetchall()
@@ -222,7 +222,7 @@ def compute(db, briefing_date: str) -> dict:
         FROM jobs j
         JOIN clients c ON j.client_id = c.id
         WHERE j.status = 'cancelled'
-          AND j.scheduled_date BETWEEN ? AND ?
+          AND j.scheduled_date BETWEEN %s AND %s
           AND c.neighborhood IS NOT NULL
         GROUP BY c.neighborhood
         ORDER BY cancel_count DESC

@@ -171,7 +171,7 @@ class HubSpotSyncer(BaseSyncer):
             if canonical_id is None:
                 # Try to match by email
                 row = self.db.execute(
-                    "SELECT id FROM clients WHERE email = ?", (email,)
+                    "SELECT id FROM clients WHERE email = %s", (email,)
                 ).fetchone() if email else None
 
                 if row:
@@ -181,10 +181,11 @@ class HubSpotSyncer(BaseSyncer):
                     with self.db:
                         self.db.execute(
                             """
-                            INSERT OR IGNORE INTO clients
+                            INSERT INTO clients
                                 (id, client_type, first_name, last_name, email,
                                  neighborhood, acquisition_source, lifetime_value)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT DO NOTHING
                             """,
                             (
                                 canonical_id,
@@ -199,11 +200,11 @@ class HubSpotSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE clients
-                    SET lifetime_value    = MAX(lifetime_value, ?),
-                        last_service_date = COALESCE(?, last_service_date),
-                        neighborhood      = COALESCE(NULLIF(?, ''), neighborhood),
-                        acquisition_source = COALESCE(NULLIF(?, ''), acquisition_source)
-                    WHERE id = ?
+                    SET lifetime_value    = GREATEST(lifetime_value, %s),
+                        last_service_date = COALESCE(%s, last_service_date),
+                        neighborhood      = COALESCE(NULLIF(%s, ''), neighborhood),
+                        acquisition_source = COALESCE(NULLIF(%s, ''), acquisition_source)
+                    WHERE id = %s
                     """,
                     (lifetime_value, last_service, neighborhood, source, canonical_id),
                 )
@@ -211,7 +212,7 @@ class HubSpotSyncer(BaseSyncer):
             # Treat as a lead
             if canonical_id is None:
                 row = self.db.execute(
-                    "SELECT id FROM leads WHERE email = ?", (email,)
+                    "SELECT id FROM leads WHERE email = %s", (email,)
                 ).fetchone() if email else None
 
                 if row:
@@ -222,9 +223,10 @@ class HubSpotSyncer(BaseSyncer):
                     with self.db:
                         self.db.execute(
                             """
-                            INSERT OR IGNORE INTO leads
+                            INSERT INTO leads
                                 (id, first_name, last_name, email, lead_type, source, status)
-                            VALUES (?, ?, ?, ?, ?, ?, 'new')
+                            VALUES (%s, %s, %s, %s, %s, %s, 'new')
+                            ON CONFLICT DO NOTHING
                             """,
                             (canonical_id, first_name, last_name, email, lead_type, source),
                         )
@@ -298,9 +300,10 @@ class HubSpotSyncer(BaseSyncer):
             with self.db:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO commercial_proposals
+                    INSERT INTO commercial_proposals
                         (id, title, monthly_value, status, decision_date)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
                     """,
                     (canonical_id, title, monthly_value, status, close_date),
                 )
@@ -310,10 +313,10 @@ class HubSpotSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE commercial_proposals
-                    SET status        = ?,
-                        monthly_value = COALESCE(NULLIF(?, 0), monthly_value),
-                        decision_date = COALESCE(?, decision_date)
-                    WHERE id = ?
+                    SET status        = %s,
+                        monthly_value = COALESCE(NULLIF(%s, 0), monthly_value),
+                        decision_date = COALESCE(%s, decision_date)
+                    WHERE id = %s
                     """,
                     (status, monthly_value, close_date, canonical_id),
                 )

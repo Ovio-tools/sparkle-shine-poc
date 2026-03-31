@@ -110,7 +110,7 @@ class SlackSyncer(BaseSyncer):
 
     def _merge_snapshot(self, snapshot_date: str, new_data: dict) -> None:
         row = self.db.execute(
-            "SELECT raw_json FROM daily_metrics_snapshot WHERE snapshot_date = ?",
+            "SELECT raw_json FROM daily_metrics_snapshot WHERE snapshot_date = %s",
             (snapshot_date,),
         ).fetchone()
         existing = json.loads(row["raw_json"]) if (row and row["raw_json"]) else {}
@@ -119,8 +119,8 @@ class SlackSyncer(BaseSyncer):
             self.db.execute(
                 """
                 INSERT INTO daily_metrics_snapshot (snapshot_date, raw_json)
-                VALUES (?, ?)
-                ON CONFLICT(snapshot_date) DO UPDATE SET raw_json = excluded.raw_json
+                VALUES (%s, %s)
+                ON CONFLICT(snapshot_date) DO UPDATE SET raw_json = EXCLUDED.raw_json
                 """,
                 (snapshot_date, json.dumps(existing)),
             )

@@ -10,7 +10,6 @@ Dry-run convention: reads always allowed; QBO API + SQLite writes skipped.
 from __future__ import annotations
 
 import random
-import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
 from time import sleep
@@ -20,6 +19,7 @@ import requests
 
 from auth import get_client
 from auth.quickbooks_auth import get_base_url
+from database.connection import get_connection
 from database.mappings import generate_id, get_tool_id, register_mapping
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import QUICKBOOKS as throttler
@@ -128,9 +128,7 @@ class PaymentGenerator:
         return asyncio.run(self.execute_one(dry_run=dry_run))
 
     async def execute_one(self, dry_run: bool = False) -> GeneratorResult:
-        db = sqlite3.connect(self.db_path)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
+        db = get_connection()
         today = date.today()
 
         try:
@@ -159,8 +157,8 @@ class PaymentGenerator:
 
     def _try_process(
         self,
-        invoice: sqlite3.Row,
-        db: sqlite3.Connection,
+        invoice,
+        db,
         today: date,
     ) -> Optional[GeneratorResult]:
         """Attempt to process one invoice. Returns a GeneratorResult if action
@@ -174,7 +172,7 @@ class PaymentGenerator:
 
         # Resolve client type for profile weighting
         client_row = db.execute(
-            "SELECT client_type FROM clients WHERE id = ?", (client_id,)
+            "SELECT client_type FROM clients WHERE id = %s", (client_id,)
         ).fetchone()
         client_type = client_row["client_type"] if client_row else "residential"
         profile = _assign_profile(client_id, client_type)
@@ -183,7 +181,7 @@ class PaymentGenerator:
         if profile == "non_payer":
             if days_outstanding >= _WRITE_OFF_DAYS:
                 db.execute(
-                    "UPDATE invoices SET status = 'overdue', days_outstanding = ? WHERE id = ?",
+                    "UPDATE invoices SET status = 'overdue', days_outstanding = %s WHERE id = %s",
                     (days_outstanding, invoice_id),
                 )
                 db.commit()
@@ -197,7 +195,7 @@ class PaymentGenerator:
                 )
             # Non-payer not yet at write-off threshold — update days and skip
             db.execute(
-                "UPDATE invoices SET days_outstanding = ? WHERE id = ?",
+                "UPDATE invoices SET days_outstanding = %s WHERE id = %s",
                 (days_outstanding, invoice_id),
             )
             db.commit()
@@ -208,7 +206,7 @@ class PaymentGenerator:
         if target_date is None or today < target_date:
             # Update days_outstanding but don't pay yet; try the next invoice
             db.execute(
-                "UPDATE invoices SET days_outstanding = ? WHERE id = ?",
+                "UPDATE invoices SET days_outstanding = %s WHERE id = %s",
                 (days_outstanding, invoice_id),
             )
             db.commit()
@@ -237,15 +235,15 @@ class PaymentGenerator:
         db.execute(
             """
             INSERT INTO payments (id, invoice_id, client_id, amount, payment_method, payment_date)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (payment_canonical, invoice_id, client_id, amount, "online", paid_date_str),
         )
         db.execute(
             """
             UPDATE invoices
-            SET status = 'paid', paid_date = ?, days_outstanding = ?
-            WHERE id = ?
+            SET status = 'paid', paid_date = %s, days_outstanding = %s
+            WHERE id = %s
             """,
             (paid_date_str, days_outstanding, invoice_id),
         )
@@ -268,7 +266,7 @@ class PaymentGenerator:
     # SQLite helpers
     # -------------------------------------------------------------------------
 
-    def _get_unpaid_invoices(self, db: sqlite3.Connection) -> list[sqlite3.Row]:
+    def _get_unpaid_invoices(self, db) -> list:
         """Return the 20 oldest unpaid sent/overdue invoices."""
         cursor = db.execute(
             """

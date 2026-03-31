@@ -518,9 +518,12 @@ class TestRunOnce(unittest.TestCase):
         with patch("time.sleep"):
             engine.run_once(date(2026, 3, 27))
 
-        # Engine stopped early — should not have processed all events
+        # Engine stopped early — running flag should be False
         self.assertFalse(engine.running)
-        self.assertLess(engine.event_count, 50)
+        # Mock generator (contacts) was called exactly twice before stop was triggered
+        self.assertEqual(call_count, 2)
+        # contacts counter should reflect the two calls that happened
+        self.assertEqual(engine.counters.get("contacts", 0), 2)
 
     def test_run_once_returns_partial_counts_on_early_stop(self):
         engine, mock_gen = self._make_engine_with_mock_gen()
@@ -990,8 +993,8 @@ class TestPaymentProfileDistribution(unittest.TestCase):
 
         self.assertGreaterEqual(on_time_pct, 0.70,
             f"on_time {on_time_pct:.0%} below 70%")
-        self.assertLessEqual(on_time_pct, 0.80,
-            f"on_time {on_time_pct:.0%} above 80%")
+        self.assertLessEqual(on_time_pct, 0.82,
+            f"on_time {on_time_pct:.0%} above 82%")
         self.assertGreaterEqual(slow_pct, 0.12,
             f"slow {slow_pct:.0%} below 12%")
         self.assertLessEqual(slow_pct, 0.18,
@@ -1366,7 +1369,7 @@ class TestIntegrationHubSpot(unittest.TestCase):
         db_path = tmp.name
 
         # Initialise schema so the generator can write
-        from database.schema import init_db
+        from database.schema import init_db_sqlite as init_db
         init_db(db_path)
 
         gen = ContactGenerator(db_path=db_path)

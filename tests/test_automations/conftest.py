@@ -6,7 +6,6 @@ All API calls are mocked — no real HTTP requests are made.
 """
 import os
 import sys
-import sqlite3
 import types
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
@@ -19,6 +18,15 @@ _PROJECT_ROOT = os.path.dirname(
 )
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
+
+# Load .env so TEST_DATABASE_URL is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+except ImportError:
+    pass
+
+_TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql://localhost/sparkle_shine_test")
 
 # ── Minimal tool_ids used across all tests ────────────────────────────────────
 TEST_TOOL_IDS = {
@@ -61,7 +69,7 @@ TEST_TOOL_IDS = {
 
 # ── Session-scoped auth module stub ───────────────────────────────────────────
 
-@pytest.fixture(autouse=True, scope="session")
+@pytest.fixture(autouse=True)
 def _patch_auth_modules():
     """
     Replace auth.quickbooks_auth in sys.modules with a lightweight stub so
@@ -84,57 +92,76 @@ def _patch_auth_modules():
         sys.modules.pop("auth.quickbooks_auth", None)
 
 
-# ── In-memory SQLite database ─────────────────────────────────────────────────
+# ── PostgreSQL test database ───────────────────────────────────────────────────
 
-def _build_in_memory_db() -> sqlite3.Connection:
-    """
-    Create an in-memory SQLite database with:
-      - Full application schema (database/schema.py)
-      - Automation-support tables (automations/migrate.py)
-      - Seeded cross_tool_mapping rows for SS-CLIENT-0001
-    """
-    from database.schema import CREATE_TABLES
+def _build_test_db():
+    """Create tables, truncate for isolation, and seed test data. Returns Connection."""
+    os.environ["DATABASE_URL"] = _TEST_DB_URL
+    from database.schema import init_db
+    from database.connection import get_connection
     from automations.migrate import _MIGRATIONS
 
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = OFF")   # relax FK constraints for seeding
-    with conn:
-        for stmt in CREATE_TABLES:
-            conn.execute(stmt)
-        for stmt in _MIGRATIONS:
-            conn.execute(stmt)
+    init_db()
+    conn = get_connection()
 
-    # ── Seed a real client row ─────────────────────────────────────────────────
+    # Truncate all tables for test isolation (CASCADE handles FK dependencies)
+    try:
+        with conn:
+            conn.execute("""
+                TRUNCATE clients, leads, cross_tool_mapping, invoices, jobs,
+                automation_log, pending_actions, poll_state, payments,
+                recurring_agreements, reviews, tasks, employees, crews,
+                marketing_campaigns, marketing_interactions, commercial_proposals,
+                calendar_events, documents, document_index, daily_metrics_snapshot,
+                won_deals, gmail_metadata CASCADE
+            """)
+    except Exception:
+        # Fallback: truncate table by table, ignoring errors
+        tables = [
+            "automation_log", "pending_actions", "poll_state",
+            "document_index", "documents", "reviews", "tasks",
+            "marketing_interactions", "marketing_campaigns",
+            "cross_tool_mapping", "payments", "invoices", "jobs",
+            "recurring_agreements", "commercial_proposals",
+            "calendar_events", "won_deals", "gmail_metadata",
+            "daily_metrics_snapshot", "leads", "employees", "crews", "clients",
+        ]
+        for t in tables:
+            try:
+                with conn:
+                    conn.execute(f"TRUNCATE {t} CASCADE")
+            except Exception:
+                pass
+
+    # Run migration statements (CREATE TABLE IF NOT EXISTS — safe to re-run)
+    for stmt in _MIGRATIONS:
+        try:
+            with conn:
+                conn.execute(stmt)
+        except Exception:
+            pass  # Already exists
+
+    # Seed test client
     with conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO clients
+            INSERT INTO clients
                 (id, client_type, first_name, last_name, email, status)
-            VALUES ('SS-CLIENT-0001', 'commercial', 'Jane', 'Smith',
-                    'jane@example.com', 'active')
-            """
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            ('SS-CLIENT-0001', 'commercial', 'Jane', 'Smith', 'jane@example.com', 'active')
         )
 
-    # ── Seed cross_tool_mapping ────────────────────────────────────────────────
-    #
-    # SS-CLIENT-0001 mapped to all tools
-    # SS-JOB-0001   mapped to Jobber job 601
-    # SS-INV-0001   mapped to QBO invoice 701
-    #
-    # Extra Hubspot contacts with Pipedrive mappings (for lead-leak tests)
+    # Seed cross_tool_mapping
     mappings = [
-        # SS-CLIENT-0001
         ("SS-CLIENT-0001", "CLIENT", "pipedrive",  "201"),
         ("SS-CLIENT-0001", "CLIENT", "jobber",     "301"),
         ("SS-CLIENT-0001", "CLIENT", "quickbooks", "401"),
         ("SS-CLIENT-0001", "CLIENT", "hubspot",    "501"),
         ("SS-CLIENT-0001", "CLIENT", "mailchimp",  "test@example.com"),
-        # SS-JOB-0001
         ("SS-JOB-0001",    "JOB",    "jobber",     "601"),
-        # SS-INV-0001
         ("SS-INV-0001",    "INV",    "quickbooks", "701"),
-        # Extra contacts for lead-leak deduplication (have Pipedrive deals)
         ("SS-CLIENT-0002", "CLIENT", "hubspot",    "502"),
         ("SS-CLIENT-0002", "CLIENT", "pipedrive",  "202"),
         ("SS-CLIENT-0003", "CLIENT", "hubspot",    "503"),
@@ -144,20 +171,20 @@ def _build_in_memory_db() -> sqlite3.Connection:
         for cid, etype, tool, tid in mappings:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO cross_tool_mapping
+                INSERT INTO cross_tool_mapping
                     (canonical_id, entity_type, tool_name, tool_specific_id)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
                 """,
                 (cid, etype, tool, tid),
             )
 
-    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
 @pytest.fixture
 def mock_db():
-    conn = _build_in_memory_db()
+    conn = _build_test_db()
     yield conn
     conn.close()
 

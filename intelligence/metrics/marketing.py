@@ -71,27 +71,27 @@ def compute(db, briefing_date: str) -> dict:
     # Total unique contacts who have received at least one campaign
     total_subscribers = db.execute(
         """
-        SELECT COUNT(DISTINCT COALESCE(client_id, lead_id))
+        SELECT COUNT(DISTINCT COALESCE(client_id, lead_id)) AS cnt
         FROM marketing_interactions
         WHERE interaction_type = 'open'
         """,
-    ).fetchone()[0]
+    ).fetchone()["cnt"]
 
     # New subscribers in last 30 days: contacts whose first interaction is in window
     new_subscribers_30day = db.execute(
         """
-        SELECT COUNT(DISTINCT COALESCE(mi.client_id, mi.lead_id))
+        SELECT COUNT(DISTINCT COALESCE(mi.client_id, mi.lead_id)) AS cnt
         FROM marketing_interactions mi
-        WHERE mi.interaction_date >= ?
+        WHERE mi.interaction_date >= %s
           AND interaction_type = 'open'
           AND NOT EXISTS (
               SELECT 1 FROM marketing_interactions mi2
               WHERE COALESCE(mi2.client_id, mi2.lead_id) = COALESCE(mi.client_id, mi.lead_id)
-                AND mi2.interaction_date < ?
+                AND mi2.interaction_date < %s
           )
         """,
         (str(thirty_days_ago), str(thirty_days_ago)),
-    ).fetchone()[0]
+    ).fetchone()["cnt"]
 
     # Unsubscribe rate is not tracked in the current schema; default to 0.0
     unsubscribe_rate_30day = 0.0
@@ -115,7 +115,7 @@ def compute(db, briefing_date: str) -> dict:
                COUNT(id) AS leads_30day,
                SUM(CASE WHEN status = 'qualified' THEN 1 ELSE 0 END) AS converted
         FROM leads
-        WHERE created_at >= ?
+        WHERE created_at >= %s
         GROUP BY source
         """,
         (str(thirty_days_ago),),
@@ -162,7 +162,7 @@ def compute(db, briefing_date: str) -> dict:
                c.first_name || ' ' || COALESCE(c.last_name, '') AS client_name
         FROM reviews r
         JOIN clients c ON r.client_id = c.id
-        WHERE r.review_date BETWEEN ? AND ?
+        WHERE r.review_date BETWEEN %s AND %s
         """,
         (str(seven_days_ago), str(today)),
     ).fetchall()

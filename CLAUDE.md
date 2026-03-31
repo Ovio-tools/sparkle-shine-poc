@@ -325,6 +325,38 @@ OAuth tokens for Jobber, QuickBooks, and Google are stored in their respective J
 
 **Resume an interrupted push:** Just re-run the pusher. The checkpoint system picks up where it left off.
 
+## Database Patterns (PostgreSQL)
+
+All production code uses PostgreSQL via psycopg2. SQLite is only used
+by seeding/, demo/, setup/, and tests/.
+
+### Connection
+- Always: from database.connection import get_connection
+- Or: from database.schema import get_connection (delegates to connection.py)
+- Never: import sqlite3 or sqlite3.connect() in production code
+- The db_path parameter is accepted but ignored (reads DATABASE_URL)
+
+### SQL Patterns
+- Parameter placeholders: %s (not ?)
+- Current timestamp: CURRENT_TIMESTAMP (not datetime('now'))
+- Current date: CURRENT_DATE (not date('now'))
+- Date arithmetic: CURRENT_DATE - INTERVAL '60 days'
+  or use date_subtract_sql(60) from database.connection
+- Upsert: INSERT INTO ... ON CONFLICT ... DO NOTHING or DO UPDATE SET
+  (not INSERT OR IGNORE or INSERT OR REPLACE)
+
+### Schema Checks
+- Column existence: column_exists(conn, table, column) from database.connection
+- Table existence: table_exists(conn, table) from database.connection
+- Column listing: get_column_names(conn, table) from database.connection
+- Never use PRAGMA or sqlite_master
+
+### Row Access
+- Rows are RealDictRow objects (dict-like)
+- Always use: row["column_name"]
+- Never use: row[0], fetchone()[0] -- integer indexing not supported
+- For scalar queries: SELECT COUNT(*) AS cnt ... then row["cnt"]
+
 ## Skills Reference
 
 When building new modules, read the relevant skill doc first:

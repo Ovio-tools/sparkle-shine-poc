@@ -67,26 +67,26 @@ def compute(db, briefing_date: str) -> dict:
     # Movement yesterday
     # ------------------------------------------------------------------ #
     new_leads = db.execute(
-        "SELECT COUNT(*) FROM leads WHERE date(created_at) = ?",
+        "SELECT COUNT(*) AS cnt FROM leads WHERE created_at::date = %s",
         (str(yesterday),),
-    ).fetchone()[0]
+    ).fetchone()["cnt"]
 
     stage_advances = db.execute(
         """
-        SELECT COUNT(*) FROM leads
+        SELECT COUNT(*) AS cnt FROM leads
         WHERE last_activity_at IS NOT NULL
-          AND date(last_activity_at) = ?
+          AND last_activity_at::date = %s
           AND status NOT IN ('new', 'lost')
         """,
         (str(yesterday),),
-    ).fetchone()[0]
+    ).fetchone()["cnt"]
 
     won_row = db.execute(
         """
         SELECT COUNT(*) AS cnt,
                COALESCE(SUM(COALESCE(monthly_value, 0.0) * 12), 0.0) AS val
         FROM commercial_proposals
-        WHERE status = 'won' AND date(decision_date) = ?
+        WHERE status = 'won' AND decision_date::date = %s
         """,
         (str(yesterday),),
     ).fetchone()
@@ -96,7 +96,7 @@ def compute(db, briefing_date: str) -> dict:
         SELECT COUNT(*) AS cnt,
                COALESCE(SUM(COALESCE(monthly_value, 0.0) * 12), 0.0) AS val
         FROM commercial_proposals
-        WHERE status = 'lost' AND date(decision_date) = ?
+        WHERE status = 'lost' AND decision_date::date = %s
         """,
         (str(yesterday),),
     ).fetchone()
@@ -108,10 +108,12 @@ def compute(db, briefing_date: str) -> dict:
         """
         SELECT cp.title, cp.status,
                COALESCE(cp.monthly_value * 12, 0.0) AS annual_value,
-               CAST(julianday('now') - julianday(COALESCE(cp.sent_date, cp.id)) AS INTEGER) AS days_stale
+               CASE WHEN cp.sent_date IS NOT NULL
+                    THEN (CURRENT_DATE - cp.sent_date::date)
+                    ELSE NULL END AS days_stale
         FROM commercial_proposals cp
         WHERE cp.status IN ('sent', 'negotiating')
-          AND (cp.sent_date IS NULL OR cp.sent_date < ?)
+          AND (cp.sent_date IS NULL OR cp.sent_date < %s)
           AND cp.decision_date IS NULL
         ORDER BY days_stale DESC
         """,
@@ -141,12 +143,12 @@ def compute(db, briefing_date: str) -> dict:
         """
         SELECT cp.title,
                COALESCE(cp.monthly_value * 12, 0.0) AS annual_value,
-               CAST(julianday('now') - julianday(cp.sent_date) AS INTEGER) AS days_stale
+               (CURRENT_DATE - cp.sent_date::date) AS days_stale
         FROM commercial_proposals cp
         WHERE cp.status = 'sent'
           AND cp.decision_date IS NULL
           AND cp.sent_date IS NOT NULL
-          AND cp.sent_date BETWEEN ? AND ?
+          AND cp.sent_date BETWEEN %s AND %s
         ORDER BY annual_value DESC
         """,
         (str(nudge_cutoff_near), str(nudge_cutoff_far)),
@@ -211,13 +213,13 @@ def compute(db, briefing_date: str) -> dict:
     # ------------------------------------------------------------------ #
     cycle_row = db.execute(
         """
-        SELECT AVG(julianday(decision_date) - julianday(sent_date))
+        SELECT AVG((decision_date::date - sent_date::date)) AS avg_days
         FROM commercial_proposals
         WHERE status = 'won'
           AND sent_date IS NOT NULL
           AND decision_date IS NOT NULL
         """,
-    ).fetchone()[0]
+    ).fetchone()["avg_days"]
     avg_cycle_length_days = round(cycle_row, 1) if cycle_row is not None else 0.0
 
     # ------------------------------------------------------------------ #

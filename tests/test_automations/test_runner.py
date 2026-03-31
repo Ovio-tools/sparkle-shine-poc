@@ -67,8 +67,9 @@ def test_poll_mode_fires_all_4_event_automations(
 @patch("automations.runner.time.sleep")
 @patch("automations.overdue_invoice.OverdueInvoiceEscalation")
 @patch("automations.lead_leak_detection.LeadLeakDetection")
+@patch("automations.runner._should_run_lead_leak", return_value=True)
 def test_scheduled_mode_runs_lead_leak(
-    mock_lld_cls, mock_oie_cls, mock_sleep, mock_db, mock_clients
+    mock_should_run, mock_lld_cls, mock_oie_cls, mock_sleep, mock_db, mock_clients
 ):
     """
     In scheduled mode, LeadLeakDetection.run() is always called regardless
@@ -126,7 +127,7 @@ def test_pending_mode_processes_due_actions(
             """
             INSERT INTO pending_actions
                 (automation_name, action_name, trigger_context, execute_after)
-            VALUES ('JobCompletionFlow', 'send_review_request', ?, ?)
+            VALUES ('JobCompletionFlow', 'send_review_request', %s, %s)
             """,
             (context, past_time),
         )
@@ -141,7 +142,7 @@ def test_pending_mode_processes_due_actions(
 
     # Row was updated to 'executed'
     updated = mock_db.execute(
-        "SELECT status FROM pending_actions WHERE id = ?", (row_id,)
+        "SELECT status FROM pending_actions WHERE id = %s", (row_id,)
     ).fetchone()
     assert updated["status"] == "executed"
 
@@ -168,7 +169,7 @@ def test_pending_mode_skips_future_actions(
             """
             INSERT INTO pending_actions
                 (automation_name, action_name, trigger_context, execute_after)
-            VALUES ('JobCompletionFlow', 'send_review_request', ?, ?)
+            VALUES ('JobCompletionFlow', 'send_review_request', %s, %s)
             """,
             (context, future_time),
         )

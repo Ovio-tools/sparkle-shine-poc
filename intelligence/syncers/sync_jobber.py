@@ -192,7 +192,7 @@ class JobberSyncer(BaseSyncer):
             # Check if a client with this email already exists in SQLite
             if primary_email:
                 row = self.db.execute(
-                    "SELECT id FROM clients WHERE email = ?", (primary_email,)
+                    "SELECT id FROM clients WHERE email = %s", (primary_email,)
                 ).fetchone()
                 if row:
                     canonical_id = row["id"]
@@ -202,9 +202,10 @@ class JobberSyncer(BaseSyncer):
                 with self.db:
                     self.db.execute(
                         """
-                        INSERT OR IGNORE INTO clients
+                        INSERT INTO clients
                             (id, client_type, first_name, last_name, email, phone, created_at)
-                        VALUES (?, 'residential', ?, ?, ?, ?, ?)
+                        VALUES (%s, 'residential', %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
                         """,
                         (
                             canonical_id,
@@ -223,11 +224,11 @@ class JobberSyncer(BaseSyncer):
             self.db.execute(
                 """
                 UPDATE clients
-                SET first_name = ?,
-                    last_name  = ?,
-                    phone      = COALESCE(?, phone),
-                    notes      = COALESCE(?, notes)
-                WHERE id = ?
+                SET first_name = %s,
+                    last_name  = %s,
+                    phone      = COALESCE(%s, phone),
+                    notes      = COALESCE(%s, notes)
+                WHERE id = %s
                 """,
                 (first_name, last_name, primary_phone, node.get("notes"), canonical_id),
             )
@@ -288,10 +289,11 @@ class JobberSyncer(BaseSyncer):
             with self.db:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO jobs
+                    INSERT INTO jobs
                         (id, client_id, service_type_id, scheduled_date,
                          scheduled_time, status, notes, completed_at)
-                    VALUES (?, ?, 'residential-clean', ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, 'residential-clean', %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
                     """,
                     (
                         canonical_id,
@@ -309,12 +311,12 @@ class JobberSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE jobs
-                    SET status       = ?,
-                        notes        = COALESCE(?, notes),
-                        completed_at = CASE WHEN ? = 'completed'
-                                           THEN COALESCE(?, completed_at)
+                    SET status       = %s,
+                        notes        = COALESCE(%s, notes),
+                        completed_at = CASE WHEN %s = 'completed'
+                                           THEN COALESCE(%s, completed_at)
                                            ELSE completed_at END
-                    WHERE id = ?
+                    WHERE id = %s
                     """,
                     (status, notes or None, status, end_at, canonical_id),
                 )
@@ -369,10 +371,11 @@ class JobberSyncer(BaseSyncer):
             with self.db:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO recurring_agreements
+                    INSERT INTO recurring_agreements
                         (id, client_id, service_type_id, frequency,
                          price_per_visit, start_date, status)
-                    VALUES (?, ?, 'residential-clean', 'biweekly', ?, date('now'), 'active')
+                    VALUES (%s, %s, 'residential-clean', 'biweekly', %s, CURRENT_DATE, 'active')
+                    ON CONFLICT DO NOTHING
                     """,
                     (canonical_id, client_canonical, price),
                 )
@@ -380,7 +383,7 @@ class JobberSyncer(BaseSyncer):
         else:
             with self.db:
                 self.db.execute(
-                    "UPDATE recurring_agreements SET price_per_visit = ? WHERE id = ?",
+                    "UPDATE recurring_agreements SET price_per_visit = %s WHERE id = %s",
                     (price, canonical_id),
                 )
 

@@ -171,10 +171,11 @@ class AsanaSyncer(BaseSyncer):
             with self.db:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO tasks
+                    INSERT INTO tasks
                         (id, title, description, project_name,
                          assignee_employee_id, due_date, completed_date, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
                     """,
                     (
                         canonical_id, title, description, project_name,
@@ -187,11 +188,11 @@ class AsanaSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE tasks
-                    SET status              = ?,
-                        completed_date      = COALESCE(?, completed_date),
-                        due_date            = COALESCE(?, due_date),
-                        assignee_employee_id = COALESCE(?, assignee_employee_id)
-                    WHERE id = ?
+                    SET status              = %s,
+                        completed_date      = COALESCE(%s, completed_date),
+                        due_date            = COALESCE(%s, due_date),
+                        assignee_employee_id = COALESCE(%s, assignee_employee_id)
+                    WHERE id = %s
                     """,
                     (status, completed_at, due_on, assignee_id, canonical_id),
                 )

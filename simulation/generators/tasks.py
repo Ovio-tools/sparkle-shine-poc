@@ -11,7 +11,6 @@ Dry-run convention: reads always allowed; Asana API + SQLite writes skipped.
 from __future__ import annotations
 
 import random
-import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from time import sleep
@@ -21,6 +20,7 @@ import asana
 from asana.rest import ApiException as AsanaApiException
 
 from auth import get_client
+from database.connection import get_connection
 from database.mappings import get_tool_id
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import ASANA as throttler
@@ -98,9 +98,7 @@ class TaskCompletionGenerator:
         return asyncio.run(self.execute_one(dry_run=dry_run))
 
     async def execute_one(self, dry_run: bool = False) -> GeneratorResult:
-        db = sqlite3.connect(self.db_path)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
+        db = get_connection()
         today = date.today()
 
         try:
@@ -125,7 +123,7 @@ class TaskCompletionGenerator:
                 blocker_done = db.execute(
                     """
                     SELECT 1 FROM tasks
-                    WHERE client_id = ? AND title = ? AND status = 'completed'
+                    WHERE client_id = %s AND title = %s AND status = 'completed'
                     LIMIT 1
                     """,
                     (client_id, blocker_title),
@@ -158,8 +156,8 @@ class TaskCompletionGenerator:
             db.execute(
                 """
                 UPDATE tasks
-                SET status = 'completed', completed_date = ?
-                WHERE id = ?
+                SET status = 'completed', completed_date = %s
+                WHERE id = %s
                 """,
                 (completed_date_str, task_id),
             )
@@ -188,7 +186,7 @@ class TaskCompletionGenerator:
     # Selection helpers
     # -------------------------------------------------------------------------
 
-    def _get_maria_id(self, db: sqlite3.Connection) -> Optional[str]:
+    def _get_maria_id(self, db) -> Optional[str]:
         if self._maria_id is not None:
             return self._maria_id
         row = db.execute(
@@ -202,7 +200,7 @@ class TaskCompletionGenerator:
             self._maria_id = row["id"]
         return self._maria_id
 
-    def _get_incomplete_tasks(self, db: sqlite3.Connection) -> list[dict]:
+    def _get_incomplete_tasks(self, db) -> list[dict]:
         """Return all incomplete tasks ordered oldest-first."""
         cursor = db.execute(
             """
@@ -280,16 +278,16 @@ class TaskCompletionGenerator:
     # Onboarding completion check
     # -------------------------------------------------------------------------
 
-    def _check_onboarding_complete(self, db: sqlite3.Connection, client_id: str) -> None:
+    def _check_onboarding_complete(self, db, client_id: str) -> None:
         """If all onboarding tasks for this client are complete, activate the
         client and log the handoff signal for the operations generator (Step 4).
         """
         total_row = db.execute(
             """
             SELECT COUNT(*) AS n FROM tasks
-            WHERE client_id = ?
+            WHERE client_id = %s
               AND project_name = 'Client Success'
-              AND title IN (?, ?, ?)
+              AND title IN (%s, %s, %s)
             """,
             (client_id, *_ONBOARDING_TITLES),
         ).fetchone()
@@ -301,9 +299,9 @@ class TaskCompletionGenerator:
         completed_row = db.execute(
             """
             SELECT COUNT(*) AS n FROM tasks
-            WHERE client_id = ?
+            WHERE client_id = %s
               AND project_name = 'Client Success'
-              AND title IN (?, ?, ?)
+              AND title IN (%s, %s, %s)
               AND status = 'completed'
             """,
             (client_id, *_ONBOARDING_TITLES),
@@ -315,7 +313,7 @@ class TaskCompletionGenerator:
 
         # All onboarding tasks done — activate client
         client_row = db.execute(
-            "SELECT first_name, last_name, company_name, status FROM clients WHERE id = ?",
+            "SELECT first_name, last_name, company_name, status FROM clients WHERE id = %s",
             (client_id,),
         ).fetchone()
 
@@ -325,7 +323,7 @@ class TaskCompletionGenerator:
                 or f"{client_row['first_name']} {client_row['last_name']}"
             )
             db.execute(
-                "UPDATE clients SET status = 'active' WHERE id = ?",
+                "UPDATE clients SET status = 'active' WHERE id = %s",
                 (client_id,),
             )
             db.commit()

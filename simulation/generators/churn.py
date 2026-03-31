@@ -32,12 +32,12 @@ from __future__ import annotations
 import hashlib
 import os
 import random
-import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
 from auth import get_client
+from database.connection import get_connection, get_column_names
 from database.mappings import get_tool_id
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import (
@@ -166,16 +166,12 @@ class ChurnGenerator:
     def __init__(self, db_path: str = "sparkle_shine.db"):
         self.db_path = db_path
         self.logger = logger
-        with sqlite3.connect(self.db_path) as conn:
+        with get_connection() as conn:
             self._ensure_schema(conn)
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        """Add churn_date and churn_reason columns to clients if absent.
-
-        Uses ALTER TABLE so the column additions are backwards-compatible with
-        databases created before this generator existed (SQLite < 3.35).
-        """
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(clients)")}
+    def _ensure_schema(self, conn) -> None:
+        """Add churn_date and churn_reason columns to clients if absent."""
+        existing = set(get_column_names(conn, "clients"))
         for col_name, col_type in [
             ("churn_date",   "TEXT"),
             ("churn_reason", "TEXT"),
@@ -195,8 +191,7 @@ class ChurnGenerator:
                          eligible clients of that type are considered.
                          The engine passes this to match plan_day() buckets.
         """
-        db = sqlite3.connect(self.db_path)
-        db.row_factory = sqlite3.Row
+        db = get_connection()
         today = date.today()
 
         try:
@@ -329,7 +324,7 @@ class ChurnGenerator:
 
     def _get_eligible_clients(
         self,
-        db: sqlite3.Connection,
+        db,
         client_type: Optional[str] = None,
     ) -> list[dict]:
         if client_type:
@@ -338,7 +333,7 @@ class ChurnGenerator:
                 SELECT id, client_type, first_name, last_name, company_name,
                        email, acquisition_source, lifetime_value, notes
                 FROM clients
-                WHERE status = 'active' AND client_type = ?
+                WHERE status = 'active' AND client_type = %s
                 """,
                 (client_type,),
             )
@@ -351,15 +346,15 @@ class ChurnGenerator:
             """)
         return [dict(row) for row in cursor.fetchall()]
 
-    def _has_recent_complaint(self, db: sqlite3.Connection, client_id: str) -> bool:
+    def _has_recent_complaint(self, db, client_id: str) -> bool:
         """True if the client had a review rating ≤ 2 in the last 30 days."""
         cutoff = (date.today() - timedelta(days=_COMPLAINT_LOOKBACK_DAYS)).isoformat()
         cursor = db.execute(
             """
             SELECT 1 FROM reviews
-            WHERE client_id = ?
-              AND rating <= ?
-              AND review_date >= ?
+            WHERE client_id = %s
+              AND rating <= %s
+              AND review_date >= %s
             LIMIT 1
             """,
             (client_id, _COMPLAINT_MAX_RATING, cutoff),
@@ -642,7 +637,7 @@ class ChurnGenerator:
 
     def _update_sqlite(
         self,
-        db: sqlite3.Connection,
+        db,
         client: dict,
         reason: str,
         today: date,
@@ -661,10 +656,10 @@ class ChurnGenerator:
             """
             UPDATE clients
             SET status      = 'churned',
-                churn_date  = ?,
-                churn_reason = ?,
-                notes        = ?
-            WHERE id = ?
+                churn_date  = %s,
+                churn_reason = %s,
+                notes        = %s
+            WHERE id = %s
             """,
             (today.isoformat(), reason, updated_notes, client["id"]),
         )
@@ -674,8 +669,8 @@ class ChurnGenerator:
             """
             UPDATE recurring_agreements
             SET status   = 'cancelled',
-                end_date = ?
-            WHERE client_id = ?
+                end_date = %s
+            WHERE client_id = %s
               AND status     = 'active'
             """,
             (today.isoformat(), client["id"]),

@@ -13,13 +13,13 @@ import json
 import os
 import random
 import re
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from auth import get_client
+from database.connection import get_connection
 from database.mappings import generate_id, get_tool_id, register_mapping
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import HUBSPOT as throttler
@@ -141,15 +141,15 @@ class ContactGenerator:
         profile = self.generate_contact_profile()
         lifecycle_stage = self.assign_lifecycle_stage(profile)
 
-        db = sqlite3.connect(self.db_path)
+        db = get_connection()
         try:
             # ── Duplicate check (L14) ────────────────────────────────────────
             # Check if a lead with this email already has a HubSpot mapping.
             row = db.execute(
-                "SELECT id FROM leads WHERE email = ?", (profile["email"],)
+                "SELECT id FROM leads WHERE email = %s", (profile["email"],)
             ).fetchone()
             if row is not None:
-                existing_lead_id = row[0]
+                existing_lead_id = row["id"]
                 if get_tool_id(existing_lead_id, "hubspot", self.db_path):
                     self.logger.info(
                         "Skipping %s — already mapped to HubSpot", profile["email"]
@@ -338,7 +338,7 @@ class ContactGenerator:
 
     def _insert_lead(
         self,
-        db: sqlite3.Connection,
+        db,
         canonical_id: str,
         profile: dict,
         lifecycle_stage: str,
@@ -355,7 +355,7 @@ class ContactGenerator:
             INSERT INTO leads (
                 id, first_name, last_name, company_name, email, phone,
                 lead_type, source, status, estimated_value, created_at, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 canonical_id,

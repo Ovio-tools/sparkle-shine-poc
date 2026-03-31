@@ -23,7 +23,6 @@ import argparse
 import hashlib
 import json
 import random
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -128,7 +127,7 @@ class Reconciler:
         conn = get_connection(self.db_path)
         try:
             client = conn.execute(
-                "SELECT * FROM clients WHERE id = ?", (canonical_id,)
+                "SELECT * FROM clients WHERE id = %s", (canonical_id,)
             ).fetchone()
         finally:
             conn.close()
@@ -181,7 +180,9 @@ class Reconciler:
         Find completed jobs older than 24 hours with no matching invoice.
         Post to #automation-failure if any found.  Never creates invoices.
         """
-        conn = get_connection(self.db_path)
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(self.db_path)
+        conn.row_factory = _sqlite3.Row
         try:
             rows = conn.execute(
                 """
@@ -389,9 +390,9 @@ class Reconciler:
             conn = get_connection(self.db_path)
             try:
                 job_count = conn.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE client_id = ? AND status = 'completed'",
+                    "SELECT COUNT(*) AS cnt FROM jobs WHERE client_id = %s AND status = 'completed'",
                     (canonical_id,),
-                ).fetchone()[0]
+                ).fetchone()["cnt"]
             finally:
                 conn.close()
 
@@ -541,7 +542,7 @@ class Reconciler:
         conn = get_connection(self.db_path)
         try:
             tasks = conn.execute(
-                "SELECT id FROM tasks WHERE client_id = ?", (canonical_id,)
+                "SELECT id FROM tasks WHERE client_id = %s", (canonical_id,)
             ).fetchall()
         finally:
             conn.close()
@@ -733,7 +734,7 @@ class Reconciler:
                 row["id"] for row in conn.execute(
                     """
                     SELECT id FROM clients
-                    WHERE created_at >= datetime('now', '-14 days')
+                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '14 days'
                     ORDER BY created_at DESC
                     """
                 ).fetchall()
@@ -755,7 +756,7 @@ class Reconciler:
                     """
                     SELECT id FROM clients
                     WHERE status = 'churned'
-                      AND last_service_date >= datetime('now', '-30 days')
+                      AND last_service_date >= CURRENT_TIMESTAMP - INTERVAL '30 days'
                     ORDER BY last_service_date DESC
                     """
                 ).fetchall()

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import random
-import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -21,6 +20,7 @@ from typing import Optional
 
 from auth import get_client
 from config.business import SERVICE_TYPES
+from database.connection import get_connection, get_column_names
 from database.mappings import get_canonical_id
 from intelligence.logging_config import setup_logging
 from simulation.config import (
@@ -139,7 +139,8 @@ class DealGenerator:
         self._service_type_field = fields["Service Type"]
         self._emv_field          = fields["Estimated Monthly Value"]
 
-        with sqlite3.connect(self.db_path) as conn:
+        import sqlite3 as _sqlite3
+        with _sqlite3.connect(db_path) as conn:
             self._ensure_schema(conn)
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
@@ -216,7 +217,8 @@ class DealGenerator:
                 # Write stage_change_time to SQLite for SS-PROP deals only
                 canonical_id = get_canonical_id("pipedrive", str(deal_id), self.db_path)
                 if canonical_id and canonical_id.startswith("SS-PROP-"):
-                    with sqlite3.connect(self.db_path) as conn:
+                    import sqlite3 as _sqlite3
+                    with _sqlite3.connect(self.db_path) as conn:
                         conn.execute(
                             "UPDATE commercial_proposals SET stage_change_time = ? WHERE id = ?",
                             (datetime.utcnow().isoformat(), canonical_id),
@@ -281,7 +283,8 @@ class DealGenerator:
             )
         elif canonical_id.startswith("SS-PROP-"):
             if not dry_run:
-                with sqlite3.connect(self.db_path) as conn:
+                import sqlite3 as _sqlite3
+                with _sqlite3.connect(self.db_path) as conn:
                     conn.execute(
                         "UPDATE commercial_proposals "
                         "SET status='won', start_date=?, crew_assignment=? "
@@ -297,7 +300,8 @@ class DealGenerator:
         # This is the operations generator's trigger table — it needs start_date
         # queryable for both commercial and residential won deals.
         if not dry_run:
-            with sqlite3.connect(self.db_path) as conn:
+            import sqlite3 as _sqlite3
+            with _sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     "INSERT OR IGNORE INTO won_deals "
                     "(canonical_id, client_type, service_frequency, contract_value, "
@@ -346,8 +350,8 @@ class DealGenerator:
         if resp.status_code not in (200, 201):
             logger.warning("POST activities for deal %s failed: %s", deal_id, resp.status_code)
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        """Add missing columns to commercial_proposals (SQLite < 3.35 compatible)."""
+    def _ensure_schema(self, conn) -> None:
+        """Add missing columns to commercial_proposals if absent."""
         existing = {row[1] for row in conn.execute("PRAGMA table_info(commercial_proposals)")}
         for col_name, col_type in [
             ("start_date",        "TEXT"),
@@ -388,7 +392,8 @@ class DealGenerator:
         try:
             canonical_id = get_canonical_id("pipedrive", str(deal["id"]), self.db_path)
             if canonical_id and canonical_id.startswith("SS-PROP-"):
-                with sqlite3.connect(self.db_path) as conn:
+                import sqlite3 as _sqlite3
+                with _sqlite3.connect(self.db_path) as conn:
                     row = conn.execute(
                         "SELECT stage_change_time FROM commercial_proposals WHERE id = ?",
                         (canonical_id,),

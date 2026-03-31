@@ -144,10 +144,11 @@ class QuickBooksSyncer(BaseSyncer):
                     with self.db:
                         self.db.execute(
                             """
-                            INSERT OR IGNORE INTO invoices
+                            INSERT INTO invoices
                                 (id, client_id, amount, status, issue_date,
                                  due_date, paid_date, days_outstanding)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT DO NOTHING
                             """,
                             (
                                 canonical_id, client_canonical, amount, status,
@@ -160,10 +161,10 @@ class QuickBooksSyncer(BaseSyncer):
                         self.db.execute(
                             """
                             UPDATE invoices
-                            SET status           = ?,
-                                paid_date        = COALESCE(?, paid_date),
-                                days_outstanding = ?
-                            WHERE id = ?
+                            SET status           = %s,
+                                paid_date        = COALESCE(%s, paid_date),
+                                days_outstanding = %s
+                            WHERE id = %s
                             """,
                             (status, paid_date, days_outstanding, canonical_id),
                         )
@@ -220,7 +221,7 @@ class QuickBooksSyncer(BaseSyncer):
                     continue
 
                 row = self.db.execute(
-                    "SELECT client_id FROM invoices WHERE id = ?", (inv_canonical,)
+                    "SELECT client_id FROM invoices WHERE id = %s", (inv_canonical,)
                 ).fetchone()
                 if row is None:
                     continue
@@ -229,9 +230,10 @@ class QuickBooksSyncer(BaseSyncer):
                 with self.db:
                     self.db.execute(
                         """
-                        INSERT OR IGNORE INTO payments
+                        INSERT INTO payments
                             (id, invoice_id, client_id, amount, payment_method, payment_date)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
                         """,
                         (
                             canonical_id, inv_canonical, row["client_id"],
@@ -306,7 +308,7 @@ class QuickBooksSyncer(BaseSyncer):
     def _merge_snapshot(self, snapshot_date: str, new_data: dict) -> None:
         """Merge new_data into daily_metrics_snapshot.raw_json for snapshot_date."""
         row = self.db.execute(
-            "SELECT raw_json FROM daily_metrics_snapshot WHERE snapshot_date = ?",
+            "SELECT raw_json FROM daily_metrics_snapshot WHERE snapshot_date = %s",
             (snapshot_date,),
         ).fetchone()
         existing = json.loads(row["raw_json"]) if (row and row["raw_json"]) else {}
@@ -315,8 +317,8 @@ class QuickBooksSyncer(BaseSyncer):
             self.db.execute(
                 """
                 INSERT INTO daily_metrics_snapshot (snapshot_date, raw_json)
-                VALUES (?, ?)
-                ON CONFLICT(snapshot_date) DO UPDATE SET raw_json = excluded.raw_json
+                VALUES (%s, %s)
+                ON CONFLICT(snapshot_date) DO UPDATE SET raw_json = EXCLUDED.raw_json
                 """,
                 (snapshot_date, json.dumps(existing)),
             )

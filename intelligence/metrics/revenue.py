@@ -30,27 +30,27 @@ def compute(db, briefing_date: str) -> dict:
     # Yesterday
     # ------------------------------------------------------------------ #
     yesterday_total = db.execute(
-        "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date = ?",
+        "SELECT COALESCE(SUM(amount), 0.0) AS total FROM payments WHERE payment_date = %s",
         (str(yesterday),),
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     job_count = db.execute(
-        "SELECT COUNT(*) FROM jobs WHERE date(completed_at) = ? AND status = 'completed'",
+        "SELECT COUNT(*) AS cnt FROM jobs WHERE completed_at::date = %s AND status = 'completed'",
         (str(yesterday),),
-    ).fetchone()[0]
+    ).fetchone()["cnt"]
 
     # Revenue by client_type: payments -> clients (direct FK on payments.client_id)
     rows = db.execute(
         """
-        SELECT c.client_type, COALESCE(SUM(p.amount), 0.0)
+        SELECT c.client_type, COALESCE(SUM(p.amount), 0.0) AS total
         FROM payments p
         JOIN clients c ON p.client_id = c.id
-        WHERE p.payment_date = ?
+        WHERE p.payment_date = %s
         GROUP BY c.client_type
         """,
         (str(yesterday),),
     ).fetchall()
-    type_rev = {r[0]: r[1] for r in rows}
+    type_rev = {r["client_type"]: r["total"] for r in rows}
     residential = type_rev.get("residential", 0.0)
     commercial = type_rev.get("commercial", 0.0)
     avg_job_value = (yesterday_total / job_count) if job_count > 0 else 0.0
@@ -59,16 +59,16 @@ def compute(db, briefing_date: str) -> dict:
     # Week-to-date vs. same days last week
     # ------------------------------------------------------------------ #
     wtd_total = db.execute(
-        "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date BETWEEN ? AND ?",
+        "SELECT COALESCE(SUM(amount), 0.0) AS total FROM payments WHERE payment_date BETWEEN %s AND %s",
         (str(monday_this_week), str(yesterday)),
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     last_monday = monday_this_week - timedelta(days=7)
     last_week_end = yesterday - timedelta(days=7)
     wtd_last = db.execute(
-        "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date BETWEEN ? AND ?",
+        "SELECT COALESCE(SUM(amount), 0.0) AS total FROM payments WHERE payment_date BETWEEN %s AND %s",
         (str(last_monday), str(last_week_end)),
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     if wtd_last > 0:
         vs_last_week = ((wtd_total - wtd_last) / wtd_last) * 100.0
@@ -86,9 +86,9 @@ def compute(db, briefing_date: str) -> dict:
     # Month-to-date
     # ------------------------------------------------------------------ #
     mtd_total = db.execute(
-        "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date BETWEEN ? AND ?",
+        "SELECT COALESCE(SUM(amount), 0.0) AS total FROM payments WHERE payment_date BETWEEN %s AND %s",
         (str(first_of_month), str(yesterday)),
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     target_low, target_high = REVENUE_TARGETS.get(
         (today.year, today.month), (135_000, 150_000)
@@ -116,14 +116,14 @@ def compute(db, briefing_date: str) -> dict:
     prior_start = prior_end - timedelta(days=29)
 
     t30_total = db.execute(
-        "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date BETWEEN ? AND ?",
+        "SELECT COALESCE(SUM(amount), 0.0) AS total FROM payments WHERE payment_date BETWEEN %s AND %s",
         (str(t30_start), str(yesterday)),
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     prior_30_total = db.execute(
-        "SELECT COALESCE(SUM(amount), 0.0) FROM payments WHERE payment_date BETWEEN ? AND ?",
+        "SELECT COALESCE(SUM(amount), 0.0) AS total FROM payments WHERE payment_date BETWEEN %s AND %s",
         (str(prior_start), str(prior_end)),
-    ).fetchone()[0]
+    ).fetchone()["total"]
 
     if prior_30_total > 0:
         vs_prior_30 = ((t30_total - prior_30_total) / prior_30_total) * 100.0

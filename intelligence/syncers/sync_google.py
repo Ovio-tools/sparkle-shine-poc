@@ -7,7 +7,6 @@ Calendar events go into calendar_events.
 Gmail metadata (no bodies) goes into gmail_metadata.
 """
 import json
-import sqlite3
 import time
 from datetime import date, datetime, timezone, timedelta
 from typing import Optional
@@ -35,7 +34,7 @@ CREATE TABLE IF NOT EXISTS gmail_metadata (
     to_address      TEXT,
     subject         TEXT,
     message_date    TEXT,
-    synced_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    synced_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -161,7 +160,7 @@ class GoogleSyncer(BaseSyncer):
     ) -> None:
         # Find existing document by google_file_id
         row = self.db.execute(
-            "SELECT id FROM documents WHERE google_file_id = ?", (file_id,)
+            "SELECT id FROM documents WHERE google_file_id = %s", (file_id,)
         ).fetchone()
 
         if row:
@@ -170,9 +169,9 @@ class GoogleSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE documents
-                    SET content_text   = ?,
-                        last_indexed_at = ?
-                    WHERE id = ?
+                    SET content_text   = %s,
+                        last_indexed_at = %s
+                    WHERE id = %s
                     """,
                     (content_text, modified_time, canonical_id),
                 )
@@ -181,10 +180,11 @@ class GoogleSyncer(BaseSyncer):
             with self.db:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO documents
+                    INSERT INTO documents
                         (id, title, doc_type, platform, google_file_id,
                          content_text, last_indexed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
                     """,
                     (
                         canonical_id, title, doc_type, platform,
@@ -196,12 +196,12 @@ class GoogleSyncer(BaseSyncer):
         # Refresh document_index: delete old chunks, insert fresh
         with self.db:
             self.db.execute(
-                "DELETE FROM document_index WHERE doc_id = ?", (canonical_id,)
+                "DELETE FROM document_index WHERE doc_id = %s", (canonical_id,)
             )
             self.db.execute(
                 """
                 INSERT INTO document_index (doc_id, chunk_text, source_title, indexed_at)
-                VALUES (?, ?, ?, date('now'))
+                VALUES (%s, %s, %s, CURRENT_DATE)
                 """,
                 (canonical_id, content_text, title),
             )
@@ -261,9 +261,10 @@ class GoogleSyncer(BaseSyncer):
             with self.db:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO calendar_events
+                    INSERT INTO calendar_events
                         (id, title, start_datetime, end_datetime, attendees, notes)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
                     """,
                     (canonical_id, title, start_dt, end_dt, attendees, notes),
                 )
@@ -273,12 +274,12 @@ class GoogleSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE calendar_events
-                    SET title          = ?,
-                        start_datetime = ?,
-                        end_datetime   = ?,
-                        attendees      = ?,
-                        notes          = COALESCE(?, notes)
-                    WHERE id = ?
+                    SET title          = %s,
+                        start_datetime = %s,
+                        end_datetime   = %s,
+                        attendees      = %s,
+                        notes          = COALESCE(%s, notes)
+                    WHERE id = %s
                     """,
                     (title, start_dt, end_dt, attendees, notes, canonical_id),
                 )
@@ -305,7 +306,7 @@ class GoogleSyncer(BaseSyncer):
                     msg_id = msg_ref["id"]
                     # Skip if already in our metadata table
                     existing = self.db.execute(
-                        "SELECT message_id FROM gmail_metadata WHERE message_id = ?",
+                        "SELECT message_id FROM gmail_metadata WHERE message_id = %s",
                         (msg_id,),
                     ).fetchone()
                     if existing:
@@ -326,9 +327,10 @@ class GoogleSyncer(BaseSyncer):
                     with self.db:
                         self.db.execute(
                             """
-                            INSERT OR IGNORE INTO gmail_metadata
+                            INSERT INTO gmail_metadata
                                 (message_id, from_address, to_address, subject, message_date)
-                            VALUES (?, ?, ?, ?, ?)
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT DO NOTHING
                             """,
                             (
                                 msg_id,

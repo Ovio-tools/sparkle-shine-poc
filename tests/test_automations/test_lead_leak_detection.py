@@ -224,7 +224,7 @@ def test_sentinel_file_cutoff(auto, tmp_path):
 
     captured = {}
 
-    def _capture_search(search_request):
+    def _capture_search(search_request, **kwargs):
         captured["request"] = search_request
         mock_resp = MagicMock()
         mock_resp.results = []

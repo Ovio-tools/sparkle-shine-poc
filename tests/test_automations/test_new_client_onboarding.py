@@ -201,16 +201,17 @@ def test_cross_tool_mapping_updated(
     # Jobber client mapping should be registered (j-client-123 from mock)
     jobber_row = mock_db.execute(
         "SELECT tool_specific_id FROM cross_tool_mapping "
-        "WHERE canonical_id = ? AND tool_name = 'jobber'",
+        "WHERE canonical_id = %s AND tool_name = 'jobber'",
         (canonical_id,),
     ).fetchone()
     assert jobber_row is not None, "Jobber mapping was not registered"
     assert jobber_row["tool_specific_id"] == "j-client-123"
 
     # QBO customer mapping should be registered (qbo-new-cust from mock)
+    # Note: the automation registers this with tool_name='quickbooks_customer'
     qbo_row = mock_db.execute(
         "SELECT tool_specific_id FROM cross_tool_mapping "
-        "WHERE canonical_id = ? AND tool_name = 'quickbooks'",
+        "WHERE canonical_id = %s AND tool_name = 'quickbooks_customer'",
         (canonical_id,),
     ).fetchone()
     assert qbo_row is not None, "QuickBooks mapping was not registered"

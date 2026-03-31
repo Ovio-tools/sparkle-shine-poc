@@ -7,7 +7,7 @@ CREATE_TABLES = [
     """
     CREATE TABLE IF NOT EXISTS clients (
         id                  TEXT PRIMARY KEY,          -- SS-CLIENT-NNNN
-        client_type         TEXT NOT NULL CHECK(client_type IN ('residential','commercial')),
+        client_type         TEXT NOT NULL CHECK(client_type IN ('residential','commercial','one-time')),
         first_name          TEXT,
         last_name           TEXT,
         company_name        TEXT,
@@ -50,7 +50,19 @@ CREATE_TABLES = [
     """,
 
     # ------------------------------------------------------------------ #
-    # 3. employees
+    # 3. crews (must come before employees due to FK reference)
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS crews (
+        id                  TEXT PRIMARY KEY,          -- crew-a through crew-d
+        name                TEXT NOT NULL,
+        zone                TEXT,
+        lead_employee_id    TEXT
+    )
+    """,
+
+    # ------------------------------------------------------------------ #
+    # 4. employees
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS employees (
@@ -66,18 +78,6 @@ CREATE_TABLES = [
         hourly_rate         REAL NOT NULL DEFAULT 0.0,
         email               TEXT,
         notes               TEXT
-    )
-    """,
-
-    # ------------------------------------------------------------------ #
-    # 4. crews
-    # ------------------------------------------------------------------ #
-    """
-    CREATE TABLE IF NOT EXISTS crews (
-        id                  TEXT PRIMARY KEY,          -- crew-a through crew-d
-        name                TEXT NOT NULL,
-        zone                TEXT,
-        lead_employee_id    TEXT REFERENCES employees(id)
     )
     """,
 
@@ -451,6 +451,21 @@ def get_connection(db_path: str = "sparkle_shine.db"):
 
 def init_db(db_path: str = "sparkle_shine.db") -> None:
     conn = get_connection(db_path)
+    with conn:
+        for statement in CREATE_TABLES:
+            conn.execute(statement)
+    conn.close()
+
+
+def init_db_sqlite(db_path: str) -> None:
+    """Initialize a SQLite database at db_path.
+
+    Used by simulation generators and tests that need a local SQLite DB
+    rather than the PostgreSQL instance pointed to by DATABASE_URL.
+    """
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(db_path)
+    conn.row_factory = _sqlite3.Row
     with conn:
         for statement in CREATE_TABLES:
             conn.execute(statement)

@@ -11,13 +11,13 @@ from __future__ import annotations
 import calendar
 import heapq
 import random
-import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Callable, Optional
 
 from auth import get_client
 from config.business import SERVICE_TYPES
+from database.connection import get_connection, get_column_names, date_subtract_sql
 from database.mappings import generate_id, get_tool_id, get_tool_url, register_mapping
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import JOBBER as throttler
@@ -401,7 +401,7 @@ class NewClientSetupGenerator:
     def __init__(self, db_path: str = "sparkle_shine.db"):
         self.db_path = db_path
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+    def _ensure_schema(self, conn) -> None:
         """Add client_type column to recurring_agreements if not present."""
         cols = {row[1] for row in conn.execute("PRAGMA table_info(recurring_agreements)")}
         if "client_type" not in cols:
@@ -411,8 +411,9 @@ class NewClientSetupGenerator:
             conn.commit()
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(self.db_path)
+        conn.row_factory = _sqlite3.Row
         try:
             self._ensure_schema(conn)
             ready_deals = conn.execute("""
@@ -462,7 +463,7 @@ class NewClientSetupGenerator:
         finally:
             conn.close()
 
-    def _setup_client(self, deal: dict, session, conn: sqlite3.Connection) -> None:
+    def _setup_client(self, deal: dict, session, conn) -> None:
         """Create a Jobber client + schedule for one won deal."""
         canonical_id = deal["canonical_id"]
         client_type = deal["client_type"]
@@ -705,8 +706,9 @@ class JobSchedulingGenerator:
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
         today = date.today()
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(self.db_path)
+        conn.row_factory = _sqlite3.Row
         try:
             session = get_client("jobber") if not dry_run else None
             results = []
@@ -879,7 +881,7 @@ class JobCompletionGenerator:
     def __init__(self, db_path: str = "sparkle_shine.db"):
         self.db_path = db_path
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+    def _ensure_schema(self, conn) -> None:
         """Add churn_risk column to clients if not present."""
         cols = {row[1] for row in conn.execute("PRAGMA table_info(clients)")}
         if "churn_risk" not in cols:
@@ -890,8 +892,9 @@ class JobCompletionGenerator:
         if not job_id:
             return GeneratorResult(success=False, message="job_id required")
 
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(self.db_path)
+        conn.row_factory = _sqlite3.Row
         try:
             self._ensure_schema(conn)
 
@@ -940,7 +943,7 @@ class JobCompletionGenerator:
             conn.close()
 
     def _handle_completed(
-        self, job: dict, job_id: str, jobber_job_id: str, session, conn: sqlite3.Connection
+        self, job: dict, job_id: str, jobber_job_id: str, session, conn
     ) -> None:
         service_type_id = job.get("service_type_id", "std-residential")
         expected = _expected_duration(service_type_id, "regular")
@@ -979,7 +982,7 @@ class JobCompletionGenerator:
 
     def _handle_cancelled_or_noshow(
         self, job: dict, job_id: str, jobber_job_id: str,
-        outcome: str, session, conn: sqlite3.Connection
+        outcome: str, session, conn
     ) -> None:
         conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (outcome, job_id))
 
@@ -993,19 +996,19 @@ class JobCompletionGenerator:
 
         # Churn risk: 3+ cancelled/no-show in 60 days → high
         count_row = conn.execute("""
-            SELECT COUNT(*) FROM jobs
+            SELECT COUNT(*) AS cnt FROM jobs
             WHERE client_id = ?
               AND status IN ('cancelled', 'no-show')
               AND scheduled_date >= date('now', '-60 days')
         """, (job["client_id"],)).fetchone()
-        if count_row and count_row[0] >= 3:
+        if count_row and count_row["cnt"] >= 3:
             conn.execute(
                 "UPDATE clients SET churn_risk = 'high' WHERE id = ?",
                 (job["client_id"],),
             )
 
     def _handle_rescheduled(
-        self, job: dict, job_id: str, jobber_job_id: str, session, conn: sqlite3.Connection
+        self, job: dict, job_id: str, jobber_job_id: str, session, conn
     ) -> None:
         # Cancel original slot
         conn.execute("UPDATE jobs SET status = 'cancelled' WHERE id = ?", (job_id,))
