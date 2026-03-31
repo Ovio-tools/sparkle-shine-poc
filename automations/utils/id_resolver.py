@@ -3,7 +3,6 @@ automations/utils/id_resolver.py
 
 Thin wrappers around the cross_tool_mapping table for use inside automations.
 """
-import sqlite3
 from typing import Optional
 
 
@@ -11,7 +10,7 @@ class MappingNotFoundError(Exception):
     """Raised when a cross_tool_mapping lookup finds no matching row."""
 
 
-def resolve(db: sqlite3.Connection, canonical_id: str, target_tool: str) -> str:
+def resolve(db, canonical_id: str, target_tool: str) -> str:
     """
     Return the tool-specific ID for a canonical SS-ID in the given tool.
 
@@ -19,7 +18,7 @@ def resolve(db: sqlite3.Connection, canonical_id: str, target_tool: str) -> str:
     """
     cursor = db.execute(
         "SELECT tool_specific_id FROM cross_tool_mapping "
-        "WHERE canonical_id = ? AND tool_name = ?",
+        "WHERE canonical_id = %s AND tool_name = %s",
         (canonical_id, target_tool),
     )
     row = cursor.fetchone()
@@ -27,11 +26,11 @@ def resolve(db: sqlite3.Connection, canonical_id: str, target_tool: str) -> str:
         raise MappingNotFoundError(
             f"No mapping for canonical_id='{canonical_id}' in tool='{target_tool}'"
         )
-    return row[0] if not hasattr(row, "keys") else row["tool_specific_id"]
+    return row["tool_specific_id"]
 
 
 def reverse_resolve(
-    db: sqlite3.Connection, tool_specific_id: str, source_tool: str
+    db, tool_specific_id: str, source_tool: str
 ) -> str:
     """
     Return the canonical SS-ID for a tool-specific ID.
@@ -40,7 +39,7 @@ def reverse_resolve(
     """
     cursor = db.execute(
         "SELECT canonical_id FROM cross_tool_mapping "
-        "WHERE tool_specific_id = ? AND tool_name = ?",
+        "WHERE tool_specific_id = %s AND tool_name = %s",
         (tool_specific_id, source_tool),
     )
     row = cursor.fetchone()
@@ -49,11 +48,11 @@ def reverse_resolve(
             f"No mapping for tool_specific_id='{tool_specific_id}' "
             f"in tool='{source_tool}'"
         )
-    return row[0] if not hasattr(row, "keys") else row["canonical_id"]
+    return row["canonical_id"]
 
 
 def register_mapping(
-    db: sqlite3.Connection,
+    db,
     canonical_id: str,
     tool_name: str,
     tool_specific_id: str,
@@ -68,11 +67,11 @@ def register_mapping(
     # Guard: same external ID must not point to two different canonical entities.
     existing = db.execute(
         "SELECT canonical_id FROM cross_tool_mapping "
-        "WHERE tool_name = ? AND tool_specific_id = ?",
+        "WHERE tool_name = %s AND tool_specific_id = %s",
         (tool_name, tool_specific_id),
     ).fetchone()
     if existing is not None:
-        existing_cid = existing["canonical_id"] if hasattr(existing, "keys") else existing[0]
+        existing_cid = existing["canonical_id"]
         if existing_cid != canonical_id:
             raise ValueError(
                 f"Mapping collision: {tool_name}:{tool_specific_id} is already "
@@ -97,10 +96,10 @@ def register_mapping(
             """
             INSERT INTO cross_tool_mapping
                 (canonical_id, entity_type, tool_name, tool_specific_id, synced_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
                 tool_specific_id = excluded.tool_specific_id,
-                synced_at        = datetime('now')
+                synced_at        = CURRENT_TIMESTAMP
             """,
             (canonical_id, entity_type, tool_name, tool_specific_id),
         )
