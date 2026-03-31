@@ -358,15 +358,13 @@ class OverdueInvoiceEscalation(BaseAutomation):
         phone       = ""
         if canonical_id:
             row = self.db.execute(
-                "SELECT first_name, last_name, email, phone FROM clients WHERE id = ?",
+                "SELECT first_name, last_name, email, phone FROM clients WHERE id = %s",
                 (canonical_id,),
             ).fetchone()
             if row:
-                fn    = row["first_name"] if hasattr(row, "keys") else row[0]
-                ln    = row["last_name"]  if hasattr(row, "keys") else row[1]
-                email = row["email"]      if hasattr(row, "keys") else row[2]
-                phone = row["phone"]      if hasattr(row, "keys") else row[3]
-                client_name = f"{fn} {ln}".strip() or client_name
+                email = row["email"]
+                phone = row["phone"]
+                client_name = f"{row['first_name']} {row['last_name']}".strip() or client_name
 
         return {
             "inv_id":           inv_id,
@@ -601,7 +599,6 @@ if __name__ == "__main__":
     print("=" * 65)
 
     db = get_connection(os.path.join(_PROJECT_ROOT, "sparkle_shine.db"))
-    db.row_factory = __import__("sqlite3").Row
 
     automation = OverdueInvoiceEscalation(
         clients=get_client,
