@@ -371,10 +371,10 @@ class NewClientOnboarding(BaseAutomation):
         # 2. Email already in clients table (seeded data)?
         if email:
             row = self.db.execute(
-                "SELECT id FROM clients WHERE email = ?", (email,)
+                "SELECT id FROM clients WHERE email = %s", (email,)
             ).fetchone()
             if row is not None:
-                cid = row["id"] if hasattr(row, "keys") else row[0]
+                cid = row["id"]
                 if not self.dry_run and deal_id:
                     register_mapping(self.db, cid, "pipedrive", deal_id)
                 return cid
@@ -398,9 +398,9 @@ class NewClientOnboarding(BaseAutomation):
 
         candidates = []
         if row_c:
-            candidates.append(row_c["id"] if hasattr(row_c, "keys") else row_c[0])
+            candidates.append(row_c["id"])
         if row_m:
-            candidates.append(row_m["canonical_id"] if hasattr(row_m, "keys") else row_m[0])
+            candidates.append(row_m["canonical_id"])
 
         if candidates:
             top = max(candidates)
@@ -414,9 +414,10 @@ class NewClientOnboarding(BaseAutomation):
             try:
                 self.db.execute(
                     """
-                    INSERT OR IGNORE INTO clients
+                    INSERT INTO clients
                         (id, client_type, first_name, last_name, email, status)
-                    VALUES (?, ?, ?, ?, ?, 'active')
+                    VALUES (%s, %s, %s, %s, %s, 'active')
+                    ON CONFLICT DO NOTHING
                     """,
                     (canonical_id, client_type, first_name, last_name, email),
                 )
@@ -474,9 +475,9 @@ class NewClientOnboarding(BaseAutomation):
 
         candidates = []
         if row_c:
-            candidates.append(row_c["id"] if hasattr(row_c, "keys") else row_c[0])
+            candidates.append(row_c["id"])
         if row_m:
-            candidates.append(row_m["canonical_id"] if hasattr(row_m, "keys") else row_m[0])
+            candidates.append(row_m["canonical_id"])
 
         next_n = (int(max(candidates).split("-")[-1]) + 1) if candidates else 1
         client_id = f"SS-CLIENT-{next_n:04d}"
@@ -484,9 +485,10 @@ class NewClientOnboarding(BaseAutomation):
         try:
             self.db.execute(
                 """
-                INSERT OR IGNORE INTO clients
+                INSERT INTO clients
                     (id, client_type, first_name, last_name, email, status)
-                VALUES (?, ?, ?, ?, ?, 'active')
+                VALUES (%s, %s, %s, %s, %s, 'active')
+                ON CONFLICT DO NOTHING
                 """,
                 (client_id, client_type, first_name, last_name, email),
             )
@@ -496,8 +498,8 @@ class NewClientOnboarding(BaseAutomation):
             self.db.execute(
                 """
                 UPDATE cross_tool_mapping
-                   SET canonical_id = ?, entity_type = 'CLIENT', synced_at = datetime('now')
-                 WHERE canonical_id = ?
+                   SET canonical_id = %s, entity_type = 'CLIENT', synced_at = CURRENT_TIMESTAMP
+                 WHERE canonical_id = %s
                    AND tool_name IN ('pipedrive', 'pipedrive_person')
                 """,
                 (client_id, lead_id),
@@ -831,12 +833,11 @@ class NewClientOnboarding(BaseAutomation):
         cursor = self.db.execute(
             """
             SELECT tool_name FROM cross_tool_mapping
-            WHERE canonical_id = ?
+            WHERE canonical_id = %s
             """,
             (canonical_id,),
         )
-        registered = {row[0] if not hasattr(row, "keys") else row["tool_name"]
-                      for row in cursor.fetchall()}
+        registered = {row["tool_name"] for row in cursor.fetchall()}
 
         all_present = True
         for tool in required_tools:
@@ -883,7 +884,7 @@ if __name__ == "__main__":
     print("=" * 65)
 
     db = get_connection(os.path.join(_PROJECT_ROOT, "sparkle_shine.db"))
-    db.row_factory = __import__("sqlite3").Row
+
 
     fake_event = {
         "deal_id": "DRY-RUN-9999",
