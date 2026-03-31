@@ -16,6 +16,8 @@ from datetime import date, timedelta
 from time import sleep
 from typing import Optional
 
+import requests
+
 from auth import get_client
 from auth.quickbooks_auth import get_base_url
 from database.mappings import generate_id, get_tool_id, register_mapping
@@ -120,7 +122,12 @@ class PaymentGenerator:
         self.db_path = db_path
         self.logger = logger
 
-    async def execute_one(self) -> GeneratorResult:
+    def execute(self, dry_run: bool = False) -> GeneratorResult:
+        """Synchronous entry point called by the simulation engine dispatch loop."""
+        import asyncio
+        return asyncio.run(self.execute_one(dry_run=dry_run))
+
+    async def execute_one(self, dry_run: bool = False) -> GeneratorResult:
         db = sqlite3.connect(self.db_path)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
@@ -242,8 +249,8 @@ class PaymentGenerator:
             """,
             (paid_date_str, days_outstanding, invoice_id),
         )
-        register_mapping(payment_canonical, "quickbooks", str(qbo_payment_id), db_path=self.db_path)
         db.commit()
+        register_mapping(payment_canonical, "quickbooks", str(qbo_payment_id), db_path=self.db_path)
 
         self.logger.info(
             "Payment recorded: %s → QBO %s | $%.2f | invoice %s | %s | %d days",
@@ -287,7 +294,7 @@ class PaymentGenerator:
         payment_date: date,
     ) -> str:
         """POST /payment to QuickBooks. Returns the QBO payment Id string."""
-        session = get_client("quickbooks")
+        headers = get_client("quickbooks")
         url = f"{_qbo_base()}/payment"
         payload = {
             "CustomerRef": {"value": qbo_customer_id},
@@ -304,7 +311,7 @@ class PaymentGenerator:
         }
 
         throttler.wait()
-        resp = session.post(url, json=payload, timeout=30)
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
 
         if resp.status_code in (200, 201):
             body = resp.json()

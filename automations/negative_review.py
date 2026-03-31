@@ -288,7 +288,7 @@ class NegativeReviewResponse(BaseAutomation):
             properties=["email"],
             limit=1,
         )
-        search_result = hs_client.crm.contacts.search_api.do_search(search_request)
+        search_result = hs_client.crm.contacts.search_api.do_search(search_request, _request_timeout=30)
 
         if not search_result.results:
             print(f"[WARN] HubSpot contact not found for {client_email}")
@@ -302,6 +302,7 @@ class NegativeReviewResponse(BaseAutomation):
             SimplePublicObjectInput(
                 properties={"at_risk": "true"}
             ),
+            _request_timeout=30,
         )
 
         # Create a note associated with the contact
@@ -326,7 +327,7 @@ class NegativeReviewResponse(BaseAutomation):
                 }
             ],
         )
-        hs_client.crm.objects.notes.basic_api.create(note_input)
+        hs_client.crm.objects.notes.basic_api.create(note_input, _request_timeout=30)
 
         return contact_id
 

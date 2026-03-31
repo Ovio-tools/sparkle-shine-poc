@@ -416,7 +416,7 @@ _TABLE_NAMES = [
 
 
 def get_connection(db_path: str = "sparkle_shine.db") -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

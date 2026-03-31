@@ -132,6 +132,20 @@ class SimulationEngine:
         except ImportError:
             logger.warning("ChurnGenerator not found — skipping")
 
+        # PaymentGenerator — simulation/generators/payments.py
+        try:
+            from simulation.generators.payments import PaymentGenerator
+            self.register("payments", PaymentGenerator(self.db_path))
+        except ImportError:
+            logger.warning("PaymentGenerator not found — skipping")
+
+        # TaskCompletionGenerator — simulation/generators/tasks.py
+        try:
+            from simulation.generators.tasks import TaskCompletionGenerator
+            self.register("tasks", TaskCompletionGenerator(self.db_path))
+        except ImportError:
+            logger.warning("TaskCompletionGenerator not found — skipping")
+
         if not self._generators:
             logger.warning(
                 "No generators registered. Engine will produce 0 events. "
@@ -188,6 +202,18 @@ class SimulationEngine:
         for _ in range(9):
             if should_event_happen(daily_com_churn, target_date):
                 plan.append(GeneratorCall("churn", {"client_type": "commercial"}))
+
+        # ── Payment processing ───────────────────────────────────────────────
+        # 10 attempts/day: each call scans for the next actionable invoice.
+        # The generator handles timing (due-date logic) internally.
+        for _ in range(10):
+            plan.append(GeneratorCall("payments", {}))
+
+        # ── Task completion ──────────────────────────────────────────────────
+        # 50 attempts/day against ~150 open tasks. Each call picks a random
+        # task and applies the 30% (15% for Maria) completion probability.
+        for _ in range(50):
+            plan.append(GeneratorCall("tasks", {}))
 
         # Operations events: placed BEFORE the shuffle (fixed order, not randomised)
         ops_prefix = [

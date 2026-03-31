@@ -340,20 +340,30 @@ def setup_channel(dry_run: bool = False) -> Optional[str]:
         response = client.conversations_list(types="public_channel", limit=200)
         for ch in response["channels"]:
             if ch["name"] == "automation-failure":
-                _channel_id = ch["id"]
-                client.conversations_setTopic(
-                    channel=_channel_id,
-                    topic="Simulation and automation errors — plain language only, no stack traces",
-                )
+                candidate_id = ch["id"]
+                client.conversations_join(channel=candidate_id)
+                # setTopic requires channels:write.topic scope — non-fatal if absent
+                try:
+                    client.conversations_setTopic(
+                        channel=candidate_id,
+                        topic="Simulation and automation errors — plain language only, no stack traces",
+                    )
+                except Exception as topic_exc:
+                    logger.warning("Could not set topic on #automation-failure: %s", topic_exc)
+                _channel_id = candidate_id
                 return _channel_id
 
         # Not found — create it
         create_response = client.conversations_create(name="automation-failure")
-        _channel_id = create_response["channel"]["id"]
-        client.conversations_setTopic(
-            channel=_channel_id,
-            topic="Simulation and automation errors — plain language only, no stack traces",
-        )
+        candidate_id = create_response["channel"]["id"]
+        try:
+            client.conversations_setTopic(
+                channel=candidate_id,
+                topic="Simulation and automation errors — plain language only, no stack traces",
+            )
+        except Exception as topic_exc:
+            logger.warning("Could not set topic on #automation-failure: %s", topic_exc)
+        _channel_id = candidate_id
         return _channel_id
 
     except Exception as exc:

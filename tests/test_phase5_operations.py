@@ -1073,3 +1073,128 @@ class TestOperationsIntegration(unittest.TestCase):
         """, (job_id, tomorrow, job_id)).fetchone()
         conn2.close()
         self.assertIsNotNone(new_job, "Rescheduled job not found in SQLite for tomorrow")
+
+
+# ── Bug-fix regression tests ──────────────────────────────────────────────────
+
+class TestJobSchedulingSkipsWhenPropertyIdIsNone(unittest.TestCase):
+    """Jobber rejects propertyId=''. Generator must skip — not pass empty string."""
+
+    def setUp(self):
+        import tempfile, os
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self._db_path = self._tmp.name
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT, client_type TEXT
+            );
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT,
+                scheduled_time TEXT, status TEXT
+            );
+            CREATE TABLE IF NOT EXISTS cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, entity_type TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        today = date.today()
+        dow_name = today.strftime("%A").lower()
+        conn.execute(
+            "INSERT INTO recurring_agreements VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("SS-RECUR-0001", "SS-CLIENT-0001", "recurring-biweekly",
+             "crew-a", "weekly", 150.0, today.isoformat(), None, "active",
+             dow_name, "residential"),
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        import os
+        os.unlink(self._db_path)
+
+    @patch("simulation.generators.operations._get_or_fetch_property_id", return_value=None)
+    @patch("simulation.generators.operations._gql")
+    @patch("simulation.generators.operations.get_client")
+    def test_no_gql_job_create_when_property_id_is_none(
+        self, mock_get_client, mock_gql, mock_prop_id
+    ):
+        from simulation.generators.operations import JobSchedulingGenerator
+
+        gen = JobSchedulingGenerator(db_path=self._db_path)
+        gen.execute(dry_run=False)
+
+        # _gql must NOT have been called with _JOB_CREATE input (job containing propertyId)
+        for call_args in mock_gql.call_args_list:
+            args = call_args[0]
+            if len(args) >= 3 and isinstance(args[2], dict) and "input" in args[2]:
+                self.fail("_gql was called with job input despite property_id being None")
+
+
+class TestRegisterMappingUsesConnectionTimeout(unittest.TestCase):
+    """register_mapping must open SQLite with a timeout so concurrent writes retry."""
+
+    def test_get_connection_uses_nonzero_timeout(self):
+        import sqlite3 as real_sqlite3
+        from unittest.mock import patch, MagicMock
+        captured = {}
+
+        original_connect = real_sqlite3.connect
+
+        def mock_connect(path, **kwargs):
+            captured["timeout"] = kwargs.get("timeout", 0)
+            conn = original_connect(":memory:", **kwargs)
+            conn.row_factory = real_sqlite3.Row
+            return conn
+
+        with patch("database.schema.sqlite3.connect", side_effect=mock_connect):
+            from database.schema import get_connection
+            get_connection(":memory:")
+
+        self.assertGreater(
+            captured.get("timeout", 0), 0,
+            "get_connection must pass timeout > 0 to sqlite3.connect to handle concurrent writers",
+        )
+
+
+class TestCompleteAsanaTaskArgumentOrder(unittest.TestCase):
+    """update_task(body, task_gid, opts) — the SDK's signature.
+    Previous code passed (task_gid, body, opts) which caused 'Not a Long' errors.
+    """
+
+    @patch("simulation.generators.tasks.get_tool_id")
+    @patch("simulation.generators.tasks.get_client")
+    def test_update_task_receives_body_as_first_arg(self, mock_get_client, mock_get_tool_id):
+        import asana
+        from simulation.generators.tasks import TaskCompletionGenerator
+
+        mock_tasks_api = MagicMock()
+        mock_api_client = MagicMock()
+        mock_get_client.return_value = mock_api_client
+
+        with patch("simulation.generators.tasks.asana.TasksApi", return_value=mock_tasks_api):
+            gen = TaskCompletionGenerator.__new__(TaskCompletionGenerator)
+            gen.db_path = ":memory:"
+            gen.logger = MagicMock()
+            gen._complete_asana_task("1234567890123456")
+
+        mock_tasks_api.update_task.assert_called_once()
+        call_args = mock_tasks_api.update_task.call_args[0]
+        body_arg = call_args[0]
+        gid_arg  = call_args[1]
+
+        self.assertIsInstance(
+            body_arg, dict,
+            f"First arg to update_task must be the body dict, got: {type(body_arg).__name__}",
+        )
+        self.assertEqual(
+            gid_arg, "1234567890123456",
+            f"Second arg to update_task must be the task GID string, got: {gid_arg!r}",
+        )

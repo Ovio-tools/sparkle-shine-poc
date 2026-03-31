@@ -66,7 +66,9 @@
       "jobber_client_id",
       "quickbooks_customer_id",
       "lifetime_value",
-      "last_service_date"
+      "last_service_date",
+      "service_interest",
+      "notes"
     ],
     "deal_properties": [
       "proposal_id",

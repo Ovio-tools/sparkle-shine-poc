@@ -306,7 +306,7 @@ class HubSpotQualifiedSync(BaseAutomation):
             return _DRY_RUN_CONTACTS
 
         hs_client = self.clients("hubspot")
-        response  = hs_client.crm.contacts.search_api.do_search(search_request)
+        response  = hs_client.crm.contacts.search_api.do_search(search_request, _request_timeout=30)
         results   = response.results or []
 
         contacts = []

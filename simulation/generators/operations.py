@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 from auth import get_client
 from config.business import SERVICE_TYPES
-from database.mappings import generate_id, get_tool_id, register_mapping
+from database.mappings import generate_id, get_tool_id, get_tool_url, register_mapping
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import JOBBER as throttler
 from simulation.config import DAILY_VOLUMES, JOB_VARIETY
@@ -354,12 +354,19 @@ def _get_or_fetch_property_id(canonical_id: str, session, db_path: str) -> Optio
     If absent, queries Jobber via ClientProperties and registers the result.
     Returns None if the client has no Jobber mapping or no properties.
     """
-    # Fast path: already registered
+    # Fast path 1: already registered as a dedicated jobber_property entry
     prop_id = get_tool_id(canonical_id, "jobber_property", db_path=db_path)
     if prop_id:
         return prop_id
 
-    # Slow path: query Jobber
+    # Fast path 2: seeder stored the property ID in tool_specific_url on the
+    # jobber row — check there before making an API call
+    seeder_prop_id = get_tool_url(canonical_id, "jobber", db_path=db_path)
+    if seeder_prop_id:
+        register_mapping(canonical_id, "jobber_property", seeder_prop_id, db_path=db_path)
+        return seeder_prop_id
+
+    # Slow path: query Jobber API
     jobber_client_id = get_tool_id(canonical_id, "jobber", db_path=db_path)
     if not jobber_client_id:
         return None
@@ -742,8 +749,15 @@ class JobSchedulingGenerator:
                         property_id = _get_or_fetch_property_id(
                             agreement["client_id"], session, self.db_path
                         )
+                        if property_id is None:
+                            logger.warning(
+                                "Skipping job for agreement %s: no Jobber property ID "
+                                "found for client %s",
+                                agreement["id"], agreement["client_id"],
+                            )
+                            continue
                         job_input = {
-                            "propertyId": property_id or "",
+                            "propertyId": property_id,
                             "title": agreement["service_type_id"].replace("-", " ").title(),
                             "invoicing": {
                                 "invoicingType": "FIXED_PRICE",
@@ -1012,8 +1026,13 @@ class JobCompletionGenerator:
 
         # jobCreate for the rescheduled slot
         property_id = _get_or_fetch_property_id(job["client_id"], session, self.db_path)
+        if property_id is None:
+            raise RuntimeError(
+                f"Cannot reschedule job {job_id}: no Jobber property ID for client "
+                f"{job['client_id']}"
+            )
         job_input = {
-            "propertyId": property_id or "",
+            "propertyId": property_id,
             "title": service_type_id.replace("-", " ").title(),
             "invoicing": {
                 "invoicingType": "FIXED_PRICE",

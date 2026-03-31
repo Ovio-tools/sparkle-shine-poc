@@ -315,6 +315,7 @@ class PaymentReceived(BaseAutomation):
             contact = hs_client.crm.contacts.basic_api.get_by_id(
                 contact_id,
                 properties=["total_payments_received", "outstanding_balance"],
+                _request_timeout=30,
             )
             props = contact.properties or {}
             current_payments    = int(props.get("total_payments_received") or 0)
@@ -332,6 +333,7 @@ class PaymentReceived(BaseAutomation):
                         "outstanding_balance":      str(round(new_outstanding, 2)),
                     }
                 ),
+                _request_timeout=30,
             )
         return new_outstanding
 

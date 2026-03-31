@@ -17,6 +17,9 @@ from datetime import date
 from time import sleep
 from typing import Optional
 
+import asana
+from asana.rest import ApiException as AsanaApiException
+
 from auth import get_client
 from database.mappings import get_tool_id
 from intelligence.logging_config import setup_logging
@@ -25,8 +28,6 @@ from simulation.config import DAILY_VOLUMES
 from simulation.exceptions import TokenExpiredError
 
 logger = setup_logging("simulation.tasks")
-
-_ASANA_BASE = "https://app.asana.com/api/1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +92,12 @@ class TaskCompletionGenerator:
         self.logger = logger
         self._maria_id: Optional[str] = None  # cached after first lookup
 
-    async def execute_one(self) -> GeneratorResult:
+    def execute(self, dry_run: bool = False) -> GeneratorResult:
+        """Synchronous entry point called by the simulation engine dispatch loop."""
+        import asyncio
+        return asyncio.run(self.execute_one(dry_run=dry_run))
+
+    async def execute_one(self, dry_run: bool = False) -> GeneratorResult:
         db = sqlite3.connect(self.db_path)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
@@ -254,25 +260,21 @@ class TaskCompletionGenerator:
     # -------------------------------------------------------------------------
 
     def _complete_asana_task(self, asana_gid: str) -> None:
-        """Mark a task completed via the Asana REST API."""
-        session = get_client("asana")
-        url = f"{_ASANA_BASE}/tasks/{asana_gid}"
+        """Mark a task completed via the Asana Python SDK."""
+        api_client = get_client("asana")
+        tasks_api = asana.TasksApi(api_client)
 
         throttler.wait()
-        resp = session.put(url, json={"data": {"completed": True}}, timeout=30)
-
-        if resp.status_code in (200, 201):
-            return
-
-        if resp.status_code == 401:
-            raise TokenExpiredError(f"Asana token expired: {resp.text[:200]}")
-
-        if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 5))
-            sleep(retry_after)
-            return self._complete_asana_task(asana_gid)
-
-        raise RuntimeError(f"Asana API {resp.status_code}: {resp.text[:300]}")
+        try:
+            tasks_api.update_task({"data": {"completed": True}}, asana_gid, {})
+        except AsanaApiException as exc:
+            if exc.status == 401:
+                raise TokenExpiredError(f"Asana token expired: {exc}") from exc
+            if exc.status == 429:
+                retry_after = int(exc.headers.get("Retry-After", 5))
+                sleep(retry_after)
+                return self._complete_asana_task(asana_gid)
+            raise RuntimeError(f"Asana API {exc.status}: {str(exc.body)[:300]}") from exc
 
     # -------------------------------------------------------------------------
     # Onboarding completion check

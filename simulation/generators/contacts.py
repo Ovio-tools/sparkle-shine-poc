@@ -131,7 +131,12 @@ class ContactGenerator:
     # Public interface
     # -----------------------------------------------------------------------
 
-    async def execute_one(self) -> GeneratorResult:
+    def execute(self, dry_run: bool = False) -> GeneratorResult:
+        """Synchronous entry point called by the simulation engine dispatch loop."""
+        import asyncio
+        return asyncio.run(self.execute_one(dry_run=dry_run))
+
+    async def execute_one(self, dry_run: bool = False) -> GeneratorResult:
         """Create one new HubSpot contact and register the canonical record."""
         profile = self.generate_contact_profile()
         lifecycle_stage = self.assign_lifecycle_stage(profile)
@@ -158,21 +163,43 @@ class ContactGenerator:
             # ── Atomic: generate_id → create in HubSpot → link (L9) ─────────
             canonical_id = generate_id("LEAD", self.db_path)
 
-            # Write SQLite record first so the row exists before the API call
-            self._insert_lead(db, canonical_id, profile, lifecycle_stage)
+            if dry_run:
+                self.logger.info(
+                    "[DRY RUN] Would create contact %s %s (%s, %s)",
+                    profile["first_name"], profile["last_name"],
+                    lifecycle_stage, profile["client_type"],
+                )
+                return GeneratorResult(
+                    summary=(
+                        f"[DRY RUN] Would create: {profile['first_name']} {profile['last_name']}"
+                        f" ({lifecycle_stage})"
+                    ),
+                    tool="hubspot",
+                    canonical_id=canonical_id,
+                    details={
+                        "email": profile["email"],
+                        "lifecycle_stage": lifecycle_stage,
+                        "client_type": profile["client_type"],
+                        "lead_source": profile["lead_source"],
+                    },
+                )
 
-            # Create in HubSpot (includes canonical ID as note)
+            # Write SQLite record first so the row exists before the API call.
+            # Commit immediately so register_mapping() can acquire a write lock
+            # on its own connection (two uncommitted writers would deadlock in SQLite).
+            self._insert_lead(db, canonical_id, profile, lifecycle_stage)
+            db.commit()
+
+            # Create in HubSpot
             hubspot_id = self._create_in_hubspot(canonical_id, profile, lifecycle_stage)
 
-            # Register HubSpot mapping
+            # Register HubSpot mapping (opens its own connection)
             register_mapping(canonical_id, "hubspot", hubspot_id, db_path=self.db_path)
 
             # CRITICAL SQL MAPPING RULE: Do NOT register Pipedrive mapping here.
             # The automation runner detects new SQLs by finding HubSpot contacts
             # with NO Pipedrive entry in cross_tool_mapping. Registering one here
             # would cause the runner to skip this contact forever.
-
-            db.commit()
 
             self.logger.info(
                 "Created contact %s (%s %s, %s) → HubSpot %s",
@@ -257,7 +284,9 @@ class ContactGenerator:
     def _create_in_hubspot(
         self, canonical_id: str, profile: dict, lifecycle_stage: str
     ) -> str:
-        session = get_client("hubspot")
+        from hubspot.crm.contacts import SimplePublicObjectInputForCreate
+
+        hs_client = get_client("hubspot")
         throttler.wait()
 
         properties = {
@@ -272,31 +301,36 @@ class ContactGenerator:
             "lifecyclestage":      lifecycle_stage,
             "client_type":         profile["client_type"],
             "lead_source_detail":  profile["lead_source"],
+            "neighborhood":        profile["neighborhood"],
             "service_interest":    profile["service_interest"],
+            "notes":               f"SS-ID: {canonical_id}",
             "hs_lead_status":      "NEW",
-            # L20: embed canonical ID for traceability
-            "notes": f"SS-ID: {canonical_id}",
         }
         if profile.get("company_name"):
             properties["company"] = profile["company_name"]
 
-        resp = session.post(
-            "https://api.hubapi.com/crm/v3/objects/contacts",
-            json={"properties": properties},
-            timeout=30,
+        # HubSpot lifecycle stage values have no underscores
+        _hs_stage_map = {
+            "sales_qualified_lead":     "salesqualifiedlead",
+            "marketing_qualified_lead": "marketingqualifiedlead",
+        }
+        properties["lifecyclestage"] = _hs_stage_map.get(
+            properties["lifecyclestage"], properties["lifecyclestage"]
         )
-        if resp.status_code == 409:
-            # Contact already exists in HubSpot — extract existing ID
-            existing_id = resp.json().get("message", "")
-            match = re.search(r"Existing ID: (\d+)", existing_id)
+
+        try:
+            resp = hs_client.crm.contacts.basic_api.create(
+                SimplePublicObjectInputForCreate(properties=properties),
+                _request_timeout=30,
+            )
+            return resp.id
+        except Exception as exc:
+            # HubSpot returns 409 when a contact with this email already exists;
+            # the SDK raises an ApiException whose body contains "Existing ID: <n>"
+            match = re.search(r"Existing ID: (\d+)", str(exc))
             if match:
                 return match.group(1)
-            raise RuntimeError(f"HubSpot 409 but no ID in response: {resp.text[:300]}")
-        if resp.status_code not in (200, 201):
-            raise RuntimeError(
-                f"HubSpot API error {resp.status_code}: {resp.text[:300]}"
-            )
-        return resp.json()["id"]
+            raise RuntimeError(f"HubSpot create contact failed: {exc}") from exc
 
     # -----------------------------------------------------------------------
     # SQLite write

@@ -116,6 +116,25 @@ def get_tool_id(
         conn.close()
 
 
+def get_tool_url(
+    canonical_id: str,
+    tool_name: str,
+    db_path: str = "sparkle_shine.db",
+) -> Optional[str]:
+    """Return the tool-specific URL for a canonical entity, or None."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "SELECT tool_specific_url FROM cross_tool_mapping "
+            "WHERE canonical_id = ? AND tool_name = ?",
+            (canonical_id, tool_name),
+        )
+        row = cursor.fetchone()
+        return row["tool_specific_url"] if row else None
+    finally:
+        conn.close()
+
+
 def get_canonical_id(
     tool_name: str,
     tool_specific_id: str,

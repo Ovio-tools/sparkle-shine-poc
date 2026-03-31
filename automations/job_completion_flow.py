@@ -475,7 +475,7 @@ class JobCompletionFlow(BaseAutomation):
                 }
             ],
         )
-        hs_client.crm.objects.notes.basic_api.create(note_input)
+        hs_client.crm.objects.notes.basic_api.create(note_input, _request_timeout=30)
 
         # 2. Read-modify-write counter properties under a per-contact lock.
         # HubSpot has no atomic increment: without serialization, two concurrent
@@ -487,6 +487,7 @@ class JobCompletionFlow(BaseAutomation):
             contact = hs_client.crm.contacts.basic_api.get_by_id(
                 contact_id,
                 properties=["total_services_completed", "outstanding_balance"],
+                _request_timeout=30,
             )
             props = contact.properties or {}
             current_count       = int(float(props.get("total_services_completed") or 0))
@@ -503,6 +504,7 @@ class JobCompletionFlow(BaseAutomation):
                         "outstanding_balance":        str(new_outstanding),
                     }
                 ),
+                _request_timeout=30,
             )
 
     # ── Action 4: Slack summary ───────────────────────────────────────────────

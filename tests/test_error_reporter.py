@@ -236,6 +236,31 @@ class TestSetupChannel(unittest.TestCase):
         call_kwargs = mock_get_client.return_value.conversations_list.call_args.kwargs
         assert call_kwargs.get("limit") == 200
 
+    @patch("simulation.error_reporter.get_client")
+    def test_returns_channel_id_when_set_topic_raises(self, mock_get_client):
+        """setTopic missing scope must not block error reporting — channel ID still returned."""
+        mock_client = _make_slack_mock()
+        mock_client.conversations_setTopic.side_effect = Exception(
+            "missing_scope: channels:write.topic"
+        )
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import setup_channel
+        result = setup_channel()
+        assert result == "C12345"
+
+    @patch("simulation.error_reporter.get_client")
+    def test_report_error_posts_successfully_when_set_topic_previously_failed(self, mock_get_client):
+        """End-to-end: setTopic failure must not silently disable chat.postMessage."""
+        mock_client = _make_slack_mock()
+        mock_client.conversations_setTopic.side_effect = Exception(
+            "missing_scope: channels:write.topic"
+        )
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+        result = report_error(Exception("HTTP 500"), tool_name="jobber", context="ctx")
+        assert result is True
+        mock_client.chat_postMessage.assert_called_once()
+
 
 class TestBuildErrorBlocks(unittest.TestCase):
     def test_block_types_in_correct_order(self):

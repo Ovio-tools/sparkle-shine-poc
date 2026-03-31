@@ -284,7 +284,8 @@ class CreateSQLAndWonDeal(BaseAutomation):
 
         hs_client = self.clients("hubspot")
         response  = hs_client.crm.contacts.basic_api.create(
-            SimplePublicObjectInputForCreate(properties=properties)
+            SimplePublicObjectInputForCreate(properties=properties),
+            _request_timeout=30,
         )
         return str(response.id)
 

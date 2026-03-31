@@ -188,6 +188,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _LEAD_LEAK_SENTINEL = os.path.join(_LOGS_DIR, ".lead_leak_last_run")
+_OVERDUE_INVOICE_SENTINEL = os.path.join(_LOGS_DIR, ".overdue_invoice_last_run")
 
 
 def _should_run_lead_leak() -> bool:
@@ -200,6 +201,18 @@ def _should_run_lead_leak() -> bool:
 def _mark_lead_leak_ran() -> None:
     """Touch the sentinel file to record that LeadLeakDetection just completed."""
     open(_LEAD_LEAK_SENTINEL, "w").close()
+
+
+def _should_run_overdue_invoice() -> bool:
+    """Return True if OverdueInvoiceEscalation has not run successfully in the last 7 days."""
+    if not os.path.exists(_OVERDUE_INVOICE_SENTINEL):
+        return True
+    return (time.time() - os.path.getmtime(_OVERDUE_INVOICE_SENTINEL)) >= 7 * 86400
+
+
+def _mark_overdue_invoice_ran() -> None:
+    """Touch the sentinel file to record that OverdueInvoiceEscalation just completed."""
+    open(_OVERDUE_INVOICE_SENTINEL, "w").close()
 
 
 def run_scheduled(clients, db, dry_run: bool) -> dict:
@@ -238,16 +251,20 @@ def run_scheduled(clients, db, dry_run: bool) -> dict:
 
     time.sleep(0.5)
 
-    # Overdue Invoice Escalation -- only runs on Monday
-    if datetime.date.today().weekday() == 0:  # Monday
+    # Overdue Invoice Escalation -- only runs on Monday, at most once per 7 days
+    if datetime.date.today().weekday() == 0 and _should_run_overdue_invoice():
         logger.info("Running Overdue Invoice Escalation (Monday)...")
         results["processed"] += 1
         try:
             OverdueInvoiceEscalation(clients, db, dry_run).run()
             results["succeeded"] += 1
+            if not dry_run:
+                _mark_overdue_invoice_ran()
         except Exception as e:
             results["failed"] += 1
             logger.error("Overdue invoice scan failed: %s", e)
+    elif datetime.date.today().weekday() == 0:
+        logger.info("Skipping overdue invoice scan (already ran this week)")
     else:
         logger.info("Skipping overdue invoice scan (only runs on Mondays)")
 
