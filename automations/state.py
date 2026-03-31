@@ -5,12 +5,11 @@ Simple read/write layer over the poll_state table.
 Tracks the last-processed position for each (tool_name, entity_type) pair
 so polling functions know where to resume.
 """
-import sqlite3
 from typing import Optional
 
 
 def get_last_poll(
-    db: sqlite3.Connection,
+    db,
     tool_name: str,
     entity_type: str,
 ) -> Optional[dict]:
@@ -23,23 +22,18 @@ def get_last_poll(
         SELECT tool_name, entity_type, last_processed_id,
                last_processed_timestamp, last_poll_at
         FROM poll_state
-        WHERE tool_name = ? AND entity_type = ?
+        WHERE tool_name = %s AND entity_type = %s
         """,
         (tool_name, entity_type),
     )
     row = cursor.fetchone()
     if row is None:
         return None
-    # Support both sqlite3.Row and plain tuple
-    if hasattr(row, "keys"):
-        return dict(row)
-    keys = ["tool_name", "entity_type", "last_processed_id",
-            "last_processed_timestamp", "last_poll_at"]
-    return dict(zip(keys, row))
+    return dict(row)
 
 
 def update_last_poll(
-    db: sqlite3.Connection,
+    db,
     tool_name: str,
     entity_type: str,
     last_id: Optional[str],
@@ -54,11 +48,11 @@ def update_last_poll(
             INSERT INTO poll_state
                 (tool_name, entity_type, last_processed_id,
                  last_processed_timestamp, last_poll_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT(tool_name, entity_type) DO UPDATE SET
                 last_processed_id        = excluded.last_processed_id,
                 last_processed_timestamp = excluded.last_processed_timestamp,
-                last_poll_at             = datetime('now')
+                last_poll_at             = CURRENT_TIMESTAMP
             """,
             (tool_name, entity_type, last_id, last_timestamp),
         )
