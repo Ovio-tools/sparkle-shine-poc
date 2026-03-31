@@ -127,14 +127,14 @@ class HubSpotQualifiedSync(BaseAutomation):
         failed = []
 
         # Atomically claim the full range of canonical IDs for this batch.
-        # BEGIN IMMEDIATE acquires a write lock before the MAX reads so no
-        # concurrent runner process can observe the same highest ID and
-        # generate duplicate SS-LEAD-NNNN values.  We pre-insert each
-        # contact's HubSpot mapping inside the transaction to stake the
-        # claim, then commit before making any Pipedrive API calls.
+        # psycopg2 runs with autocommit=False, so an implicit transaction is
+        # already open.  The MAX read and the pre-insert of each contact's
+        # HubSpot mapping both run inside that transaction, preventing
+        # concurrent runners from observing the same highest ID and
+        # generating duplicate SS-LEAD-NNNN values.  ON CONFLICT DO UPDATE
+        # handles any rare race that slips through.
         # _register_mappings will upsert the hubspot row (same data, no-op).
         if not self.dry_run and truly_new:
-            self.db.execute("BEGIN IMMEDIATE")
             try:
                 next_id_n = _next_lead_id_number(self.db)
                 for i, contact in enumerate(truly_new):
@@ -580,8 +580,9 @@ class HubSpotQualifiedSync(BaseAutomation):
                     )
 
         # All checks passed — write all three rows atomically.
+        # psycopg2's implicit transaction (autocommit=False) protects this
+        # block; ON CONFLICT DO UPDATE handles any concurrent insert.
         entity_type = canonical_id.split("-")[1]  # SS-LEAD-0213 → LEAD
-        self.db.execute("BEGIN IMMEDIATE")
         try:
             for tool_name, tool_id in rows_to_write:
                 self.db.execute(

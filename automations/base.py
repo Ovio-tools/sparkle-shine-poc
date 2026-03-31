@@ -20,7 +20,7 @@ class BaseAutomation:
     ----------
     clients  : callable or dict-like with a get_client(tool_name) interface,
                or any object that supports clients("tool_name") / clients.get_client(...)
-    db       : open sqlite3.Connection (row_factory already set)
+    db       : open database.connection.Connection (psycopg2, RealDictCursor; rows are dict-like)
     dry_run  : if True, no write operations are performed; actions are printed
     """
 

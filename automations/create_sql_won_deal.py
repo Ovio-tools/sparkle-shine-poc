@@ -124,8 +124,9 @@ class CreateSQLAndWonDeal(BaseAutomation):
         trigger_source = "manual:create_sql_won_deal"
 
         # ── Claim canonical ID atomically ─────────────────────────────────────
+        # psycopg2's implicit transaction (autocommit=False) ensures the MAX
+        # read and the ID claim run atomically without needing BEGIN IMMEDIATE.
         if not self.dry_run:
-            self.db.execute("BEGIN IMMEDIATE")
             try:
                 next_n       = _next_lead_id_number(self.db)
                 canonical_id = f"SS-LEAD-{next_n:04d}"
