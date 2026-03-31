@@ -143,10 +143,10 @@ class HubSpotQualifiedSync(BaseAutomation):
                         INSERT INTO cross_tool_mapping
                             (canonical_id, entity_type, tool_name,
                              tool_specific_id, synced_at)
-                        VALUES (?, 'LEAD', 'hubspot', ?, datetime('now'))
+                        VALUES (%s, 'LEAD', 'hubspot', %s, CURRENT_TIMESTAMP)
                         ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
                             tool_specific_id = excluded.tool_specific_id,
-                            synced_at        = datetime('now')
+                            synced_at        = CURRENT_TIMESTAMP
                         """,
                         (f"SS-LEAD-{next_id_n + i:04d}", contact["hubspot_id"]),
                     )
@@ -354,10 +354,10 @@ class HubSpotQualifiedSync(BaseAutomation):
             # Find all canonical IDs already mapped to this HubSpot contact.
             rows = self.db.execute(
                 "SELECT DISTINCT canonical_id FROM cross_tool_mapping "
-                "WHERE tool_specific_id = ? AND tool_name = 'hubspot'",
+                "WHERE tool_specific_id = %s AND tool_name = 'hubspot'",
                 (contact["hubspot_id"],),
             ).fetchall()
-            canonical_ids = [r[0] if not hasattr(r, "keys") else r["canonical_id"] for r in rows]
+            canonical_ids = [r["canonical_id"] for r in rows]
 
             if not canonical_ids:
                 # No hubspot mapping at all → genuinely new lead.
@@ -371,7 +371,7 @@ class HubSpotQualifiedSync(BaseAutomation):
             for cid in canonical_ids:
                 row = self.db.execute(
                     "SELECT 1 FROM cross_tool_mapping "
-                    "WHERE canonical_id = ? AND tool_name LIKE 'pipedrive%' LIMIT 1",
+                    "WHERE canonical_id = %s AND tool_name LIKE 'pipedrive%' LIMIT 1",
                     (cid,),
                 ).fetchone()
                 if row:
@@ -568,11 +568,11 @@ class HubSpotQualifiedSync(BaseAutomation):
         for tool_name, tool_id in rows_to_write:
             existing = self.db.execute(
                 "SELECT canonical_id FROM cross_tool_mapping "
-                "WHERE tool_name = ? AND tool_specific_id = ?",
+                "WHERE tool_name = %s AND tool_specific_id = %s",
                 (tool_name, tool_id),
             ).fetchone()
             if existing is not None:
-                ecid = existing[0] if not hasattr(existing, "keys") else existing["canonical_id"]
+                ecid = existing["canonical_id"]
                 if ecid != canonical_id:
                     raise ValueError(
                         f"Mapping collision: {tool_name}:{tool_id} is already "
@@ -588,10 +588,10 @@ class HubSpotQualifiedSync(BaseAutomation):
                     """
                     INSERT INTO cross_tool_mapping
                         (canonical_id, entity_type, tool_name, tool_specific_id, synced_at)
-                    VALUES (?, ?, ?, ?, datetime('now'))
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
                         tool_specific_id = excluded.tool_specific_id,
-                        synced_at        = datetime('now')
+                        synced_at        = CURRENT_TIMESTAMP
                     """,
                     (canonical_id, entity_type, tool_name, tool_id),
                 )
@@ -691,7 +691,6 @@ if __name__ == "__main__":
     print("=" * 65)
 
     db = get_connection(os.path.join(_PROJECT_ROOT, "sparkle_shine.db"))
-    db.row_factory = __import__("sqlite3").Row
 
     automation = HubSpotQualifiedSync(
         clients=get_client,
