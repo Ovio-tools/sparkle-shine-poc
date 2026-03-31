@@ -175,15 +175,12 @@ class PaymentReceived(BaseAutomation):
         client_type  = "residential"
         if canonical_id:
             row = self.db.execute(
-                "SELECT first_name, last_name, client_type FROM clients WHERE id = ?",
+                "SELECT first_name, last_name, client_type FROM clients WHERE id = %s",
                 (canonical_id,),
             ).fetchone()
             if row:
-                fn = row["first_name"] if hasattr(row, "keys") else row[0]
-                ln = row["last_name"]  if hasattr(row, "keys") else row[1]
-                ct = row["client_type"] if hasattr(row, "keys") else row[2]
-                client_name = f"{fn} {ln}".strip() or client_name
-                client_type = (ct or "residential").lower()
+                client_name = f"{row['first_name']} {row['last_name']}".strip() or client_name
+                client_type = (row["client_type"] or "residential").lower()
 
         # Compute unpaid invoice total from SQLite as a fallback for when the
         # HubSpot action fails. This prevents the Slack notification from always
@@ -192,11 +189,11 @@ class PaymentReceived(BaseAutomation):
         if canonical_id:
             row = self.db.execute(
                 "SELECT COALESCE(SUM(amount), 0.0) AS total FROM invoices "
-                "WHERE client_id = ? AND status != 'paid'",
+                "WHERE client_id = %s AND status != 'paid'",
                 (canonical_id,),
             ).fetchone()
             if row:
-                db_outstanding = float(row["total"] if hasattr(row, "keys") else row[0])
+                db_outstanding = float(row["total"])
 
         return {
             "payment_id":       str(event.get("payment_id", "")),
@@ -419,7 +416,6 @@ if __name__ == "__main__":
     print("=" * 65)
 
     db = get_connection(os.path.join(_PROJECT_ROOT, "sparkle_shine.db"))
-    db.row_factory = __import__("sqlite3").Row
 
     # Simulate a payment 35 days after an invoice would be due (for late-pay logic)
     fake_event = {
