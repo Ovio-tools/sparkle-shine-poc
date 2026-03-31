@@ -347,7 +347,6 @@ if __name__ == "__main__":
     print("=" * 65)
 
     db = get_connection(os.path.join(_PROJECT_ROOT, "sparkle_shine.db"))
-    db.row_factory = __import__("sqlite3").Row
 
     fake_event = {
         "row_index": 7,
