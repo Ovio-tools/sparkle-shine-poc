@@ -144,7 +144,7 @@ class JobCompletionFlow(BaseAutomation):
                     "SELECT id FROM invoices ORDER BY id DESC LIMIT 1"
                 ).fetchone()
                 last_n = int(
-                    (row[0] if row else "SS-INV-0000").split("-")[-1]
+                    (row["id"] if row else "SS-INV-0000").split("-")[-1]
                 )
                 inv_canonical_id = f"SS-INV-{last_n + 1:04d}"
                 # Persist the invoice to SQLite (source of truth)
@@ -157,7 +157,7 @@ class JobCompletionFlow(BaseAutomation):
                     self.db.execute(
                         "INSERT INTO invoices "
                         "(id, client_id, amount, status, issue_date, due_date) "
-                        "VALUES (?, ?, ?, 'sent', ?, ?)",
+                        "VALUES (%s, %s, %s, 'sent', %s, %s)",
                         (
                             inv_canonical_id,
                             ctx["canonical_id"],
@@ -274,15 +274,12 @@ class JobCompletionFlow(BaseAutomation):
         client_email = ""
         if canonical_id:
             row = self.db.execute(
-                "SELECT first_name, last_name, email FROM clients WHERE id = ?",
+                "SELECT first_name, last_name, email FROM clients WHERE id = %s",
                 (canonical_id,),
             ).fetchone()
             if row:
-                fn = row["first_name"] if hasattr(row, "keys") else row[0]
-                ln = row["last_name"]  if hasattr(row, "keys") else row[1]
-                em = row["email"]      if hasattr(row, "keys") else row[2]
-                client_name  = f"{fn} {ln}".strip() or client_name
-                client_email = em or ""
+                client_name  = f"{row['first_name']} {row['last_name']}".strip() or client_name
+                client_email = row["email"] or ""
 
         return {
             "job_id":           job_id,
@@ -565,7 +562,6 @@ if __name__ == "__main__":
     print("=" * 65)
 
     db = get_connection(os.path.join(_PROJECT_ROOT, "sparkle_shine.db"))
-    db.row_factory = __import__("sqlite3").Row
 
     # 150 min actual vs 120 min expected = +25% → triggers the >20% warning
     fake_event = {
