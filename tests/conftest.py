@@ -40,6 +40,18 @@ requires_google = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _init_test_db():
+    """Point DATABASE_URL at the test instance and create the schema once per session.
+
+    Autouse so every test file (including simulation tests that call
+    database.mappings functions) always hits the test DB, never production.
+    """
+    os.environ["DATABASE_URL"] = _TEST_DB_URL
+    from database.schema import init_db
+    init_db()
+
+
 @pytest.fixture(scope="session")
 def test_db_path():
     """Yield the SQLite path for simulation/legacy tests that still use SQLite."""
@@ -49,8 +61,4 @@ def test_db_path():
 @pytest.fixture(scope="session")
 def test_pg_db():
     """Yield the DSN URL for the test PostgreSQL database."""
-    # Point get_connection() at the test database
-    os.environ["DATABASE_URL"] = _TEST_DB_URL
-    from database.schema import init_db
-    init_db()
     yield _TEST_DB_URL
