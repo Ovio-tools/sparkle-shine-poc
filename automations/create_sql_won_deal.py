@@ -461,7 +461,6 @@ _SAMPLE_CONTACT = {
 
 if __name__ == "__main__":
     import argparse
-    import sqlite3 as _sqlite3
 
     from auth import get_client
     from database.schema import get_connection
@@ -508,7 +507,6 @@ if __name__ == "__main__":
     print()
 
     db = get_connection(os.path.join(_PROJECT_ROOT, "sparkle_shine.db"))
-    db.row_factory = _sqlite3.Row
 
     automation = CreateSQLAndWonDeal(
         clients=get_client,
