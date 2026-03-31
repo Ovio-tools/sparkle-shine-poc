@@ -4,7 +4,6 @@ automations/base.py
 BaseAutomation — shared scaffold for every automation in this project.
 """
 import json
-import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
@@ -25,7 +24,7 @@ class BaseAutomation:
     dry_run  : if True, no write operations are performed; actions are printed
     """
 
-    def __init__(self, clients: Any, db: sqlite3.Connection, dry_run: bool = False):
+    def __init__(self, clients: Any, db, dry_run: bool = False):
         self.clients = clients
         self.db = db
         self.dry_run = dry_run
