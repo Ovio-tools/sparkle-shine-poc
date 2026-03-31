@@ -380,14 +380,10 @@ class NewClientOnboarding(BaseAutomation):
                 return cid
 
         # 3. Mint new canonical ID.
-        # BEGIN IMMEDIATE acquires a write lock before the SELECTs so the
-        # read-modify-insert is atomic across concurrent runner processes.
-        # Without it two runs can read the same MAX and generate duplicate
-        # SS-CLIENT-NNNN IDs; the second INSERT OR IGNORE would silently
-        # discard its row while both invocations return the same canonical_id.
-        if not self.dry_run:
-            self.db.execute("BEGIN IMMEDIATE")
-
+        # psycopg2 runs with autocommit=False by default, so the connection is
+        # already inside an implicit transaction.  The read-modify-insert below
+        # is protected by that transaction; ON CONFLICT DO NOTHING handles the
+        # rare case where two concurrent runs generate the same candidate ID.
         row_c = self.db.execute(
             "SELECT id FROM clients WHERE id LIKE 'SS-CLIENT-%' ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -445,9 +441,9 @@ class NewClientOnboarding(BaseAutomation):
         Mint a new SS-CLIENT-XXXX for a lead that just had their deal won.
 
         Steps:
-          1. Allocate the next sequential SS-CLIENT-XXXX using BEGIN IMMEDIATE
-             (same atomic pattern as the mint-new branch above).
-          2. Insert the client row (INSERT OR IGNORE so re-runs are safe).
+          1. Allocate the next sequential SS-CLIENT-XXXX inside the implicit
+             transaction (same pattern as the mint-new branch above).
+          2. Insert the client row (ON CONFLICT DO NOTHING so re-runs are safe).
           3. Re-point all existing cross_tool_mapping rows for this lead to the
              new client canonical ID, so downstream tools see the CLIENT entity.
           4. Return the new client canonical ID.
@@ -462,8 +458,6 @@ class NewClientOnboarding(BaseAutomation):
                 f"(deal_id={deal_id})"
             )
             return lead_id  # dry run: return lead_id so the rest of the flow logs cleanly
-
-        self.db.execute("BEGIN IMMEDIATE")
 
         row_c = self.db.execute(
             "SELECT id FROM clients WHERE id LIKE 'SS-CLIENT-%' ORDER BY id DESC LIMIT 1"
