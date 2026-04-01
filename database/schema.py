@@ -457,7 +457,7 @@ _TABLE_NAMES = [
 
 
 def get_connection(db_path: str = "sparkle_shine.db"):
-    return _get_connection(db_path)
+    return _get_connection()
 
 
 def init_db(db_path: str = "sparkle_shine.db") -> None:
