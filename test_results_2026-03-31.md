@@ -1,0 +1,416 @@
+# Sparkle & Shine — Test Suite Results
+
+**Date:** 2026-03-31  
+**Suite:** All tests excluding `tests/test_phase2.py` (pre-seeding data checks)
+
+| Status | Count |
+|--------|-------|
+| ✅ Passed | 326 |
+| ⏭️ Skipped | 21 |
+| ❌ Failed | 0 |
+
+---
+
+## ✅ Passed (326)
+
+### `tests/test_automations/test_job_completion_flow.py`
+
+- test_invoice_created_residential_due_on_receipt
+- test_invoice_created_commercial_net30
+- test_review_request_delayed_48h
+- test_hubspot_note_created_and_properties_updated
+- test_duration_variance_flagged_over_20_percent
+- test_duration_variance_not_flagged_within_20_percent
+- test_unknown_jobber_client_logs_warning
+
+### `tests/test_automations/test_lead_leak_detection.py`
+
+- test_leaked_leads_detected
+- test_48_hour_grace_period
+- test_no_leaks_posts_positive_message
+- test_deduplication_skips_existing_task
+- test_sentinel_file_cutoff
+
+### `tests/test_automations/test_negative_review.py`
+
+- test_slack_alert_posted_to_operations
+- test_review_text_truncated_to_150_chars
+- test_asana_task_created_in_client_success
+- test_hubspot_contact_flagged_at_risk
+- test_hubspot_not_found_logs_warning_without_crash
+
+### `tests/test_automations/test_new_client_onboarding.py`
+
+- test_residential_creates_9_asana_tasks
+- test_commercial_creates_10_asana_tasks
+- test_one_time_creates_5_asana_tasks
+- test_jobber_client_created
+- test_quickbooks_customer_created
+- test_mailchimp_contact_tagged
+- test_slack_notification_sent_to_new_clients_channel
+- test_cross_tool_mapping_updated
+- test_partial_failure_continues
+- test_verify_mappings_fails_when_tool_missing
+- test_dry_run_no_api_writes
+
+### `tests/test_automations/test_overdue_invoice.py`
+
+- test_aging_buckets_correct
+- test_asana_tasks_created_for_tier2_plus
+- test_assignee_bookkeeper_for_tier2
+- test_assignee_office_manager_for_tier3_plus
+- test_deduplication_skips_existing_task
+- test_invoice_missing_due_date_flagged
+- test_no_overdue_posts_positive_message
+
+### `tests/test_automations/test_payment_received.py`
+
+- test_pipedrive_activity_created
+- test_pipedrive_skipped_when_no_deal
+- test_hubspot_financial_properties_updated
+- test_late_payment_flagged_in_slack
+
+### `tests/test_automations/test_runner.py`
+
+- test_poll_mode_fires_all_4_event_automations
+- test_scheduled_mode_runs_lead_leak
+- test_scheduled_mode_skips_overdue_on_non_monday
+- test_pending_mode_processes_due_actions
+- test_pending_mode_skips_future_actions
+- test_error_isolation_one_failure_does_not_block_others
+
+### `tests/test_deals.py`
+
+- TestProbabilities::test_advance_probability_days_10
+- TestProbabilities::test_advance_probability_days_2
+- TestProbabilities::test_advance_probability_days_20
+- TestProbabilities::test_advance_probability_days_5
+- TestProbabilities::test_loss_probability_days_10
+- TestProbabilities::test_loss_probability_days_2
+- TestProbabilities::test_loss_probability_days_20
+- TestProbabilities::test_loss_probability_days_5
+- TestEnsureSchema::test_adds_missing_columns_to_commercial_proposals
+- TestEnsureSchema::test_idempotent_on_second_call
+- TestInit::test_loads_stage_ids_from_tool_ids_json
+- TestInit::test_schema_columns_added_on_init
+- TestPickDeal::test_returns_none_when_no_open_deals
+- TestPickDeal::test_returns_one_deal_from_list
+- TestPickDeal::test_uniform_selection_over_500_trials
+- TestLogActivity::test_dry_run_skips_post
+- TestLogActivity::test_posts_note_activity_to_pipedrive
+- TestAdvanceDeal::test_advance_dry_run_does_not_call_put
+- TestAdvanceDeal::test_advance_fires_and_puts_next_stage
+- TestAdvanceDeal::test_advance_to_won_calls_complete_won_deal
+- TestAdvanceDeal::test_deal_already_at_last_stage_returns_no_change
+- TestAdvanceDeal::test_loss_fires_when_advance_misses
+- TestAdvanceDeal::test_no_advance_no_loss_returns_no_change
+- TestAdvanceDeal::test_unknown_stage_returns_failure
+- TestCompleteWonDeal::test_dry_run_skips_put_post_and_sqlite
+- TestCompleteWonDeal::test_none_canonical_id_logs_warning_and_skips_sqlite
+- TestCompleteWonDeal::test_ss_lead_does_not_write_sqlite
+- TestCompleteWonDeal::test_ss_prop_updates_commercial_proposals
+- TestServiceFrequencyBranching::test_commercial_pool
+- TestServiceFrequencyBranching::test_residential_one_time_pool_when_emv_zero
+- TestServiceFrequencyBranching::test_residential_recurring_pool_when_emv_positive
+- TestExecute::test_dry_run_reads_deals_but_skips_put_and_post
+- TestExecute::test_returns_failure_on_pipedrive_fetch_error
+- TestExecute::test_returns_failure_when_no_open_deals
+
+### `tests/test_error_reporter.py`
+
+- TestClassify::test_connection_error
+- TestClassify::test_http_400_in_message
+- TestClassify::test_http_401_in_message
+- TestClassify::test_http_403_in_message
+- TestClassify::test_http_404_in_message
+- TestClassify::test_http_429_in_message
+- TestClassify::test_http_500_in_message
+- TestClassify::test_http_503_in_message
+- TestClassify::test_rate_limit_error_class
+- TestClassify::test_str_is_manual
+- TestClassify::test_timeout
+- TestClassify::test_token_expired_error_class
+- TestClassify::test_tool_api_error_404
+- TestClassify::test_tool_api_error_non_404
+- TestClassify::test_tool_unavailable_error_class
+- TestClassify::test_unknown_exception
+- TestResolveTranslation::test_asana_permission_error_appends_note
+- TestResolveTranslation::test_client_error_severity_is_info
+- TestResolveTranslation::test_generic_tool_token_expired_uses_default
+- TestResolveTranslation::test_google_token_expired_uses_tool_override
+- TestResolveTranslation::test_jobber_token_expired_uses_tool_override
+- TestResolveTranslation::test_manual_category_uses_exc_string
+- TestResolveTranslation::test_not_found_severity_is_warning
+- TestResolveTranslation::test_quickbooks_token_expired_uses_tool_override
+- TestResolveTranslation::test_token_expired_severity_is_critical
+- TestResolveTranslation::test_tool_name_interpolated_in_what_happened
+- TestResolveTranslation::test_tool_name_interpolated_in_what_to_do
+- TestSetupChannel::test_creates_channel_when_not_found
+- TestSetupChannel::test_dry_run_returns_constant_no_api
+- TestSetupChannel::test_idempotent_second_call_skips_api
+- TestSetupChannel::test_report_error_posts_successfully_when_set_topic_previously_failed
+- TestSetupChannel::test_returns_channel_id_when_set_topic_raises
+- TestSetupChannel::test_returns_existing_channel_id
+- TestSetupChannel::test_returns_none_on_exception
+- TestSetupChannel::test_sets_topic_after_creating_channel
+- TestSetupChannel::test_sets_topic_on_existing_channel
+- TestSetupChannel::test_uses_limit_200_on_conversations_list
+- TestBuildErrorBlocks::test_block_types_in_correct_order
+- TestBuildErrorBlocks::test_context_footer_contains_tool_name
+- TestBuildErrorBlocks::test_critical_header_contains_rotating_light
+- TestBuildErrorBlocks::test_header_uses_plain_text_with_emoji_flag
+- TestBuildErrorBlocks::test_info_header_has_no_severity_emoji
+- TestBuildErrorBlocks::test_warning_header_contains_warning_emoji
+- TestBuildErrorBlocks::test_what_happened_appears_in_section
+- TestBuildErrorBlocks::test_what_was_affected_appears_in_section
+- TestReportError::test_channel_none_returns_false_never_raises
+- TestReportError::test_chat_post_exception_returns_false_never_raises
+- TestReportError::test_context_param_appears_as_what_was_affected
+- TestReportError::test_dry_run_returns_true_without_api_call
+- TestReportError::test_message_includes_top_level_blocks_and_color_attachment
+- TestReportError::test_posts_to_correct_channel
+- TestReportError::test_returns_true_on_successful_post
+- TestReportError::test_severity_override_sets_critical_color
+- TestReportError::test_str_exc_appears_as_what_happened
+- TestEscalation::test_cold_start_lazy_init_populates_channel_id
+- TestEscalation::test_escalated_message_has_repeated_failures_header
+- TestEscalation::test_escalates_to_critical_after_threshold
+- TestEscalation::test_escalation_is_per_tool_independent
+- TestEscalation::test_expired_warnings_pruned_before_count
+- TestEscalation::test_severity_override_does_not_add_to_warning_log
+- TestReportReconciliationIssue::test_automation_gap_interpolates_count
+- TestReportReconciliationIssue::test_automation_gap_posts_critical_color
+- TestReportReconciliationIssue::test_context_footer_includes_category
+- TestReportReconciliationIssue::test_details_appended_as_extra_section
+- TestReportReconciliationIssue::test_dry_run_returns_true_without_api_call
+- TestReportReconciliationIssue::test_header_uses_mag_and_data_mismatch
+- TestReportReconciliationIssue::test_mismatch_posts_info_color
+- TestReportReconciliationIssue::test_missing_posts_warning_color
+
+### `tests/test_phase1.py`
+
+- TestPhase1Integration::test_env_credentials_complete
+- TestPhase1Integration::test_database_schema_complete
+- TestPhase1Integration::test_cross_tool_mapping_roundtrip
+- TestPhase1Integration::test_auth_pipedrive
+- TestPhase1Integration::test_auth_asana
+- TestPhase1Integration::test_auth_hubspot
+- TestPhase1Integration::test_auth_mailchimp
+- TestPhase1Integration::test_auth_slack
+- TestPhase1Integration::test_auth_jobber
+- TestPhase1Integration::test_auth_quickbooks
+- TestPhase1Integration::test_auth_google_drive
+- TestPhase1Integration::test_tool_ids_populated
+- TestPhase1Integration::test_config_imports
+- TestPhase1Integration::test_google_workspace_content
+
+### `tests/test_phase4.py`
+
+- TestConfig::test_config_loads
+- TestRevenueMetrics::test_revenue_metrics_compute
+- TestOperationsMetrics::test_operations_metrics_compute
+- TestSalesMetrics::test_sales_metrics_compute
+- TestFinancialHealthMetrics::test_financial_health_compute
+- TestMarketingMetrics::test_marketing_metrics_compute
+- TestTasksMetrics::test_tasks_metrics_compute
+- TestDocSearch::test_doc_search_empty_query
+- TestDocSearch::test_doc_search_returns_results
+- TestContextBuilder::test_context_builder_different_dates
+- TestContextBuilder::test_context_builder_produces_document
+- TestBriefingSlackFormat::test_briefing_slack_format
+- TestDeepLinks::test_format_citation_returns_mrkdwn_when_url_available
+- TestDeepLinks::test_format_citation_returns_plain_text_on_fallback
+- TestDeepLinks::test_get_deep_link_asana_known_project
+- TestDeepLinks::test_get_deep_link_asana_unknown_project_fallback
+- TestDeepLinks::test_get_deep_link_jobber_client
+- TestDeepLinks::test_get_deep_link_returns_hash_when_cache_load_fails
+- TestDeepLinks::test_qbo_production_url_when_no_sandbox
+- TestDeepLinks::test_qbo_sandbox_url_when_sandbox_env
+- TestEnsureChannel::test_ensure_channel_creates_when_not_found
+- TestEnsureChannel::test_ensure_channel_joins_when_name_taken
+- TestEnsureChannel::test_ensure_channel_returns_id_when_channel_exists
+- TestWeeklyReportInsightHistory::test_build_insight_history_block_formats_graduated
+- TestWeeklyReportInsightHistory::test_extract_and_update_adds_new_insight
+- TestWeeklyReportInsightHistory::test_extract_and_update_graduates_at_three_reports
+- TestWeeklyReportInsightHistory::test_extract_and_update_increments_existing_insight
+- TestWeeklyReportInsightHistory::test_extract_and_update_strips_markers_from_text
+- TestWeeklyReportConfidenceFilter::test_strip_does_not_remove_high_confidence_refs
+- TestWeeklyReportConfidenceFilter::test_strip_removes_sentences_with_low_ref_id
+- TestWeeklyReportConfidenceFilter::test_strip_removes_sentences_with_low_tag
+- TestWeeklyReportConfidenceFilter::test_strip_returns_zero_count_when_no_low_content
+- TestWeeklyReportCitations::test_build_citation_index_covers_all_sections
+- TestWeeklyReportCitations::test_inject_citations_leaves_unknown_ref_ids_intact
+- TestWeeklyReportCitations::test_inject_citations_replaces_ref_ids_with_mrkdwn
+- TestWeeklyReportCitations::test_inject_citations_skips_hash_urls
+- TestWeeklyReportQualityScoring::test_rubric_is_non_empty
+- TestWeeklyReportQualityScoring::test_rubric_loads_and_contains_all_dimensions
+- TestWeeklyReportQualityScoring::test_score_report_handles_missing_score_in_response
+- TestWeeklyReportQualityScoring::test_score_report_returns_int_in_range
+- TestWeeklyReportGenerate::test_dry_run_returns_briefing_without_api_call
+- TestWeeklyReportGenerate::test_generate_weekly_report_no_low_confidence_in_output
+- TestWeeklyReportGenerate::test_generate_weekly_report_returns_briefing_with_correct_type
+
+### `tests/test_phase5_operations.py`
+
+- TestTimedEventQueue::test_queue_maintains_heap_order
+- TestTimedEventQueue::test_queue_timed_event_adds_to_heap
+- TestTimedEventQueue::test_timed_queue_initialized_empty
+- TestTimedQueueCheckpoint::test_load_checkpoint_restores_timed_queue
+- TestTimedQueueCheckpoint::test_save_checkpoint_includes_timed_queue
+- TestPlanDayOrdering::test_job_scheduling_is_second
+- TestPlanDayOrdering::test_new_client_setup_is_first
+- TestRunOnceDrainsTimed::test_timed_event_fired_when_past_due
+- TestAdjustedRatingDistribution::test_base_distribution
+- TestAdjustedRatingDistribution::test_crew_a_distribution
+- TestAdjustedRatingDistribution::test_crew_a_tue_wed_distribution
+- TestAdjustedRatingDistribution::test_five_star_never_exceeds_80_percent
+- TestAdjustedRatingDistribution::test_tue_wed_distribution
+- TestAdjustedRatingDistribution::test_weights_sum_to_one
+- TestIsDueToday::test_biweekly_fires_weeks_0_2_4
+- TestIsDueToday::test_monthly_clamps_day_31_to_feb_28
+- TestIsDueToday::test_monthly_fires_on_correct_day
+- TestIsDueToday::test_weekly_fires_on_correct_day
+- TestPickJobType::test_commercial_returns_standard_or_extra
+- TestPickJobType::test_residential_distribution_within_tolerance
+- TestPickJobType::test_seasonal_deep_clean_boost_march_vs_august
+- TestAssignScheduledTime::test_crew_d_starts_at_5pm
+- TestAssignScheduledTime::test_first_job_gets_window_start
+- TestAssignScheduledTime::test_gap_between_jobs_at_least_15_minutes
+- TestAssignScheduledTime::test_sequential_jobs_are_ascending
+- TestAddBusinessDays::test_friday_plus_1_is_monday
+- TestAddBusinessDays::test_thursday_plus_1_is_friday
+- TestNewClientSetupGeneratorRecurring::test_recurring_residential_creates_agreement_row
+- TestNewClientSetupErrorIsolation::test_one_failure_does_not_abort_others
+- TestJobSchedulingGeneratorQueueFn::test_queue_fn_called_for_each_due_job
+- TestJobSchedulingGeneratorPass2::test_existing_job_queued_without_creating_new
+- TestJobCompletionGeneratorCompleted::test_completed_skips_review_in_dry_run
+- TestJobCompletionGeneratorCompleted::test_completed_updates_job_and_inserts_review
+- TestJobCompletionGeneratorOutcomes::test_cancelled_sets_status
+- TestJobCompletionGeneratorOutcomes::test_churn_risk_not_set_for_only_2_cancellations
+- TestJobCompletionGeneratorOutcomes::test_churn_risk_set_to_high_after_3_cancellations
+- TestJobCompletionGeneratorOutcomes::test_noshow_sets_status
+- TestJobCompletionGeneratorOutcomes::test_rescheduled_creates_new_job_for_tomorrow
+- TestJobSchedulingSkipsWhenPropertyIdIsNone::test_no_gql_job_create_when_property_id_is_none
+- TestCompleteAsanaTaskArgumentOrder::test_update_task_receives_body_as_first_arg
+
+### `tests/test_simulation.py`
+
+- TestSimulationConfig::test_churn_rates_are_positive_fractions
+- TestSimulationConfig::test_config_math_trace_runs_without_error
+- TestSimulationConfig::test_daily_volumes_keys_exist
+- TestSimulationConfig::test_day_of_week_weights_cover_all_days
+- TestSimulationConfig::test_job_variety_rates_sum_to_one_residential
+- TestSimulationConfig::test_lifecycle_distribution_sums_to_one
+- TestSimulationConfig::test_new_contacts_values_are_numeric
+- TestSimulationConfig::test_seasonal_weights_cover_all_months
+- TestVariation::test_get_adjusted_volume_respects_zero_floor
+- TestVariation::test_get_adjusted_volume_returns_non_negative_int
+- TestVariation::test_get_daily_multiplier_is_deterministic_with_seed
+- TestVariation::test_get_daily_multiplier_returns_positive_float
+- TestVariation::test_get_next_event_delay_minimum_is_30_seconds
+- TestVariation::test_get_next_event_delay_returns_positive_number
+- TestVariation::test_should_event_happen_always_for_very_high_probability
+- TestVariation::test_should_event_happen_never_for_zero_probability
+- TestVariation::test_summer_multiplier_greater_than_winter
+- TestSimulationEngineInit::test_engine_initializes_with_defaults
+- TestSimulationEngineInit::test_engine_loads_checkpoint_in_continuous_mode
+- TestSimulationEngineInit::test_engine_runs_without_generators
+- TestSimulationEngineInit::test_engine_seeds_rng_when_date_provided
+- TestSimulationEngineInit::test_engine_skips_checkpoint_when_date_provided
+- TestSimulationEngineInit::test_generator_call_namedtuple
+- TestSimulationEngineInit::test_register_adds_generator
+- TestPlanDay::test_pick_next_generator_pops_first
+- TestPlanDay::test_pick_next_generator_returns_none_on_empty
+- TestPlanDay::test_plan_day_deterministic_with_seeded_date
+- TestPlanDay::test_plan_day_is_shuffled
+- TestPlanDay::test_plan_day_returns_generator_calls
+- TestPlanDay::test_plan_day_returns_list
+- TestPlanDay::test_plan_day_weekend_produces_fewer_contacts
+- TestDispatch::test_dispatch_calls_registered_generator
+- TestDispatch::test_dispatch_does_not_crash_on_generator_exception
+- TestDispatch::test_dispatch_increments_counter_on_success
+- TestDispatch::test_dispatch_increments_event_count_on_failure
+- TestDispatch::test_dispatch_saves_checkpoint_every_10_events
+- TestDispatch::test_dispatch_skips_checkpoint_in_dry_run
+- TestDispatch::test_dispatch_warns_on_unknown_generator
+- TestCheckpoint::test_checkpoint_file_contains_valid_json
+- TestCheckpoint::test_load_checkpoint_returns_none_when_missing
+- TestCheckpoint::test_log_daily_summary_includes_error_count
+- TestCheckpoint::test_save_and_load_roundtrip
+- TestCheckpoint::test_save_checkpoint_skipped_in_dry_run
+- TestRunOnce::test_run_once_dispatches_events
+- TestRunOnce::test_run_once_returns_dict
+- TestRunOnce::test_run_once_returns_partial_counts_on_early_stop
+- TestRunOnce::test_run_once_sets_current_date
+- TestRunOnce::test_run_once_sleeps_between_events
+- TestRunOnce::test_run_once_stops_when_running_is_false
+- TestShutdown::test_handle_shutdown_does_not_call_sys_exit
+- TestShutdown::test_handle_shutdown_logs_daily_summary
+- TestShutdown::test_handle_shutdown_saves_checkpoint_when_not_dry_run
+- TestShutdown::test_handle_shutdown_sets_running_false
+- TestShutdown::test_handle_shutdown_skips_checkpoint_in_dry_run
+- TestRun::test_run_calls_run_once_then_stops
+- TestRun::test_run_does_not_crash_when_reconciler_missing
+- TestRun::test_run_does_not_crash_when_reconciler_raises
+- TestCLI::test_dry_run_does_not_create_checkpoint
+- TestCLI::test_dry_run_once_exits_cleanly
+- TestCLI::test_dry_run_once_produces_daily_summary
+- TestCLI::test_help_flag_exits_cleanly
+- TestRevenueTargets::test_all_expected_months_present
+- TestRevenueTargets::test_each_target_is_low_high_tuple
+- TestRevenueTargets::test_forward_months_cover_simulation_era
+- TestRevenueTargets::test_ramp_up_targets_are_lower_than_mature
+- TestConfigMathTraceGrowth::test_config_math_trace_shows_growth
+- TestVariationCalibration::test_adjusted_volume_bounds
+- TestVariationCalibration::test_variation_seasonal
+- TestVariationCalibration::test_variation_weekday_vs_weekend
+- TestContactGeneratorUnit::test_contact_profile_demographics
+- TestContactGeneratorUnit::test_contact_profile_variety
+- TestDealGeneratorUnit::test_deal_advance_probability_increases_with_age
+- TestJobVarietyDistribution::test_job_variety_distribution
+- TestPaymentProfileDistribution::test_payment_profile_distribution
+- TestChurnProbabilities::test_churn_probability_referral_lower
+- TestErrorTranslation::test_error_translation_plain_language
+- TestDeepLinks::test_citation_format_slack
+- TestDeepLinks::test_deep_link_all_tools
+- TestReconciliationUnit::test_reconciliation_completed_jobs_without_invoices
+- TestSimulationEngineSubprocess::test_simulation_engine_dry_run_one_day
+- TestIntelligencePipeline::test_simulation_then_intelligence_pipeline
+- TestSchedulerContext::test_engine_from_clean_environment
+
+---
+
+## ⏭️ Skipped (21)
+
+### `tests/test_phase1.py`
+
+- TestPhase1Integration::test_document_index_populated
+
+### `tests/test_phase4.py`
+
+- TestBriefingGenerationLive::test_briefing_generation_live
+- TestSlackChannelResolution::test_slack_channel_resolution
+- TestFullPipelineDryRun::test_full_pipeline_dry_run
+- TestDiscoveryPatterns::test_pattern_surfacing_crew_quality
+- TestDiscoveryPatterns::test_pattern_surfacing_late_commercial_payers
+- TestDiscoveryPatterns::test_pattern_surfacing_maria_overdue
+- TestDiscoveryPatterns::test_pattern_surfacing_referral_value
+
+### `tests/test_phase5_operations.py`
+
+- TestOperationsIntegration::test_jobber_client_create_and_job_create_roundtrip
+- TestOperationsIntegration::test_rescheduled_job_picked_up_next_day
+- TestRegisterMappingUsesConnectionTimeout::test_get_connection_uses_nonzero_timeout
+
+### `tests/test_simulation.py`
+
+- TestIntegrationHubSpot::test_create_hubspot_contact_and_verify
+- TestIntegrationDeals::test_deal_progression_one_stage
+- TestIntegrationJobberQBO::test_jobber_completion_triggers_qbo_invoice
+- TestIntegrationErrorReporter::test_error_reporter_posts_to_slack
+- TestIntegrationReconciliationSweep::test_reconciliation_sweep
+- TestIntegrationWeeklyReport::test_weekly_report_generation
+- TestIntegrationWeeklyReport::test_weekly_report_insight_history_tracking
+- TestIntegrationWeeklyReport::test_weekly_report_insight_repetition_detection
+- TestIntegrationWeeklyReport::test_weekly_report_no_low_confidence
+- TestIntegrationWeeklyReport::test_weekly_report_quality_score

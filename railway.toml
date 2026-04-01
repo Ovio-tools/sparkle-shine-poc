@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python -m simulation.engine"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
