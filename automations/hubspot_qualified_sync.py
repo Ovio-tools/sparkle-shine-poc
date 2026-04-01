@@ -257,6 +257,48 @@ class HubSpotQualifiedSync(BaseAutomation):
                     error_message=str(exc), trigger_source=trigger_source,
                 )
 
+    # ── Step 1 helper ─────────────────────────────────────────────────────────
+
+    def _enrich_from_db(self, contact: dict) -> dict:
+        """
+        Backfill missing contact fields from the canonical leads record.
+
+        Seeded leads pushed to HubSpot before the enrichment fix may lack
+        client_type or lifetime_value.  The leads table in
+        PostgreSQL is the source of truth; we look up the canonical ID via
+        cross_tool_mapping (tool_name='hubspot') and read the missing fields.
+
+        Falls back gracefully — if no DB record exists (e.g. simulation-
+        generated contacts that already carried full data into HubSpot), the
+        contact dict is returned unchanged.
+        """
+        hubspot_id = contact["hubspot_id"]
+
+        row = self.db.execute(
+            """
+            SELECT l.lead_type, l.estimated_value
+            FROM   cross_tool_mapping ctm
+            JOIN   leads l ON l.id = ctm.canonical_id
+            WHERE  ctm.tool_name        = 'hubspot'
+              AND  ctm.tool_specific_id = %s
+            LIMIT 1
+            """,
+            (hubspot_id,),
+        ).fetchone()
+
+        if not row:
+            return contact
+
+        enriched = dict(contact)
+        if not enriched.get("client_type") and row["lead_type"]:
+            enriched["client_type"] = row["lead_type"]
+        # Only use DB estimated_value when HubSpot carried no lifetime_value
+        if (enriched.get("lifetime_value") in (None, "", "0", "0.0")
+                and row["estimated_value"]):
+            enriched["lifetime_value"] = str(round(row["estimated_value"], 2))
+
+        return enriched
+
     # ── Step 1 ────────────────────────────────────────────────────────────────
 
     def _fetch_qualified_contacts(self) -> list:
@@ -312,18 +354,23 @@ class HubSpotQualifiedSync(BaseAutomation):
         contacts = []
         for contact in results:
             props = contact.properties or {}
-            contacts.append({
+            raw = {
                 "hubspot_id":     str(contact.id),
-                "email":          props.get("email")             or "",
-                "firstname":      props.get("firstname")         or "",
-                "lastname":       props.get("lastname")          or "",
-                "phone":          props.get("phone")             or "",
-                "company":        props.get("company")           or "",
-                "client_type":    props.get("client_type")       or "residential",
+                "email":          props.get("email")              or "",
+                "firstname":      props.get("firstname")          or "",
+                "lastname":       props.get("lastname")           or "",
+                "phone":          props.get("phone")              or "",
+                "company":        props.get("company")            or "",
+                "client_type":    props.get("client_type")        or "",
                 "lead_source":    props.get("lead_source_detail") or "Unknown",
-                "neighborhood":   props.get("neighborhood")      or "",
-                "lifetime_value": props.get("lifetime_value")    or "0",
-            })
+                "neighborhood":   props.get("neighborhood")       or "",
+                "lifetime_value": props.get("lifetime_value")     or "0",
+            }
+            enriched = self._enrich_from_db(raw)
+            # Final fallback: client_type must always have a value for Pipedrive
+            if not enriched["client_type"]:
+                enriched["client_type"] = "residential"
+            contacts.append(enriched)
         return contacts
 
     # ── Step 2 ────────────────────────────────────────────────────────────────
@@ -371,7 +418,7 @@ class HubSpotQualifiedSync(BaseAutomation):
             for cid in canonical_ids:
                 row = self.db.execute(
                     "SELECT 1 FROM cross_tool_mapping "
-                    "WHERE canonical_id = %s AND tool_name LIKE 'pipedrive%' LIMIT 1",
+                    "WHERE canonical_id = %s AND tool_name LIKE 'pipedrive%%' LIMIT 1",
                     (cid,),
                 ).fetchone()
                 if row:

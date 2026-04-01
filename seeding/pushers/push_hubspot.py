@@ -136,7 +136,7 @@ def _fetch_leads(conn) -> list:
     """Fetch all leads."""
     rows = conn.execute("""
         SELECT id, first_name, last_name, company_name, email, phone,
-               lead_type, source, status
+               lead_type, source, status, estimated_value, neighborhood
         FROM leads
         ORDER BY id
     """).fetchall()
@@ -202,8 +202,6 @@ def _lead_properties(lead: dict) -> dict:
     """Build HubSpot contact properties dict from a leads row."""
     lifecycle = _LIFECYCLE_LEAD.get(lead.get("status") or "new", "lead")
 
-    # client_type is a dropdown enumeration that only allows residential/commercial;
-    # omit it for leads to avoid INVALID_OPTION errors on the batch endpoint.
     props: dict = {
         "lifecyclestage":    lifecycle,
         "service_frequency": "one-time",
@@ -219,6 +217,12 @@ def _lead_properties(lead: dict) -> dict:
         props["phone"] = lead["phone"]
     if lead.get("source"):
         props["lead_source_detail"] = lead["source"]
+    if lead.get("lead_type"):
+        props["client_type"] = lead["lead_type"]
+    if lead.get("neighborhood"):
+        props["neighborhood"] = lead["neighborhood"]
+    if lead.get("estimated_value") is not None:
+        props["lifetime_value"] = str(round(lead["estimated_value"], 2))
 
     return props
 

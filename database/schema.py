@@ -43,6 +43,7 @@ CREATE_TABLES = [
         status              TEXT NOT NULL DEFAULT 'new'
                                 CHECK(status IN ('new','contacted','qualified','lost')),
         estimated_value     REAL DEFAULT 0.0,
+        neighborhood        TEXT,
         created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_activity_at    TEXT,
         notes               TEXT

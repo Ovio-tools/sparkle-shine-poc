@@ -11,7 +11,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 ## Tech Stack
 
 - **Language:** Python 3
-- **Database:** PostgreSQL via psycopg2 (production/automations/intelligence), SQLite (seeding, some simulation generators, tests)
+- **Database:** PostgreSQL via psycopg2 (production/simulation/automations/intelligence), SQLite (seeding, setup, tests)
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
 - **Deployment:** Railway (`railway.toml` in repo root, start command: `python -m simulation.engine`)
@@ -53,7 +53,7 @@ These rules exist because of real bugs. Follow them strictly.
 
 ## Database Patterns (PostgreSQL)
 
-IMPORTANT: All new code must use PostgreSQL via psycopg2. Some legacy modules (parts of `simulation/generators/`, `seeding/`, `demo/`, `tests/`) still use SQLite directly. Do not extend that pattern.
+IMPORTANT: All new code must use PostgreSQL via psycopg2. Some legacy modules (`simulation/reconciliation/`, `seeding/`, `setup/`, `demo/`, some `scripts/`, `tests/`) still use SQLite directly. Do not extend that pattern.
 
 ### Connection
 - Preferred: `from database.connection import get_connection`
@@ -76,7 +76,7 @@ IMPORTANT: All new code must use PostgreSQL via psycopg2. Some legacy modules (p
 
 Every entity gets a canonical ID: `SS-{TYPE}-{NNNN}` (e.g., `SS-CLIENT-0047`). The `cross_tool_mapping` table links each canonical ID to its tool-specific IDs across all platforms. Email is the primary natural key for residential clients. Commercial clients use a compound key (company name + billing contact email).
 
-Use `database/mappings.py` for all ID operations: `generate_id()`, `link()`, `lookup()`, `reverse_lookup()`, `find_unmapped()`.
+Use `database/mappings.py` for all ID operations: `generate_id()`, `register_mapping()`, `get_tool_id()`, `get_canonical_id()`, `find_unmapped()`, `get_tool_url()`, `bulk_register()`.
 
 ### Writing to APIs
 - Check `cross_tool_mapping` before creating any record to avoid duplicates.
@@ -198,4 +198,4 @@ Read the relevant skill doc before building new modules:
 
 ## Environment
 
-API keys and secrets are in `.env` (never commit). `DATABASE_URL` must also be set (e.g., `postgresql://localhost/sparkle_shine`; Railway provides this automatically). OAuth tokens are managed by `auth/token_store.py` with JSON file fallback. See `.env.example` for the full list of required variables.
+API keys and secrets are in `.env` (never commit). `DATABASE_URL` must also be set (e.g., `postgresql://localhost/sparkle_shine`; Railway provides this automatically). OAuth tokens are managed by `auth/token_store.py` with JSON file fallback. See `.env.example` for local dev variables and `.env.railway.example` for the full Railway deployment template (auto-generated via `python scripts/extract_railway_env.py`).

@@ -996,7 +996,7 @@ class JobCompletionGenerator:
             SELECT COUNT(*) AS cnt FROM jobs
             WHERE client_id = %s
               AND status IN ('cancelled', 'no-show')
-              AND scheduled_date >= CURRENT_DATE - INTERVAL '60 days'
+              AND scheduled_date::date >= CURRENT_DATE - INTERVAL '60 days'
         """, (job["client_id"],)).fetchone()
         if count_row and count_row["cnt"] >= 3:
             conn.execute(

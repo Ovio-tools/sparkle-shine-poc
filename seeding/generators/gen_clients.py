@@ -886,6 +886,7 @@ def _gen_commercial_leads(person_offset: int) -> List[dict]:
             "source":         source,
             "status":         status,
             "estimated_value": float(random.choice(value_choices)),
+            "neighborhood":   None,
             "created_at":     created_date,
             "last_activity_at": created_date,
             "notes":          None,
@@ -925,6 +926,7 @@ def _gen_residential_leads(
     for i, slot in enumerate(campaign_slots):
         p = fake_person(person_offset + i)
         created_date = fake_date_in_range(_first_of("2025-06"), _last_of("2025-06"))
+        neighborhood = random.choice(RES_NEIGHBORHOODS)
 
         notes_parts = ["campaign_source: summer_2025_campaign"]
         if slot["converted_id"]:
@@ -941,6 +943,7 @@ def _gen_residential_leads(
             "source":         "summer_2025_campaign",
             "status":         slot["status"],
             "estimated_value": float(random.choice([135, 150, 165]) * random.randint(6, 24)),
+            "neighborhood":   neighborhood,
             "created_at":     created_date,
             "last_activity_at": created_date,
             "notes":          " | ".join(notes_parts),
@@ -967,6 +970,7 @@ def _gen_residential_leads(
         created_month = random.choice(all_months)
         created_date = fake_date_in_range(_first_of(created_month), _last_of(created_month))
         source = random.choices(lead_sources, weights=lead_weights, k=1)[0]
+        neighborhood = random.choice(RES_NEIGHBORHOODS)
 
         records.append({
             "id":             _next_lead_id(),
@@ -979,6 +983,7 @@ def _gen_residential_leads(
             "source":         source,
             "status":         status,
             "estimated_value": float(random.choice([135, 150, 165]) * random.randint(6, 24)),
+            "neighborhood":   neighborhood,
             "created_at":     created_date,
             "last_activity_at": created_date,
             "notes":          None,
@@ -1000,7 +1005,7 @@ _CLIENT_COLS = (
 
 _LEAD_COLS = (
     "id", "first_name", "last_name", "company_name", "email", "phone",
-    "lead_type", "source", "status", "estimated_value",
+    "lead_type", "source", "status", "estimated_value", "neighborhood",
     "created_at", "last_activity_at", "notes",
 )
 
@@ -1009,6 +1014,15 @@ def _ensure_leads_notes_col(conn: sqlite3.Connection) -> None:
     """Add notes column to leads if the schema predates this generator."""
     try:
         conn.execute("ALTER TABLE leads ADD COLUMN notes TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # already exists
+
+
+def _ensure_leads_neighborhood_col(conn: sqlite3.Connection) -> None:
+    """Add neighborhood column to leads if the schema predates this generator."""
+    try:
+        conn.execute("ALTER TABLE leads ADD COLUMN neighborhood TEXT")
         conn.commit()
     except sqlite3.OperationalError:
         pass  # already exists
@@ -1106,6 +1120,7 @@ def main() -> None:
 
     conn = get_connection(DB_PATH)
     _ensure_leads_notes_col(conn)
+    _ensure_leads_neighborhood_col(conn)
     _init_counters(conn)
     conn.close()
 

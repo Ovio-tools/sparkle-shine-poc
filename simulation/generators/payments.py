@@ -137,7 +137,26 @@ class PaymentGenerator:
                 return GeneratorResult(success=True, message="No unpaid invoices")
 
             for invoice in candidates:
-                result = self._try_process(invoice, db, today)
+                try:
+                    result = self._try_process(invoice, db, today)
+                except RuntimeError as exc:
+                    if "QBO payment API 400" in str(exc):
+                        # QBO rejected this invoice (e.g. already paid there,
+                        # draft, or otherwise unlinakble). Mark it written_off
+                        # so it is excluded from future _get_unpaid_invoices
+                        # queries and we stop retrying it endlessly.
+                        inv_id = invoice["id"]
+                        self.logger.warning(
+                            "Invoice %s cannot be linked in QBO — marking written_off. Error: %s",
+                            inv_id, str(exc)[:120],
+                        )
+                        db.execute(
+                            "UPDATE invoices SET status = 'written_off' WHERE id = %s",
+                            (inv_id,),
+                        )
+                        db.commit()
+                        continue
+                    raise
                 if result is not None:
                     return result
 
