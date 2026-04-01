@@ -101,3 +101,60 @@ def test_check_table_inventory_empty_list():
     mock_conn = MagicMock()
     results = check_table_inventory(mock_conn, [])
     assert results == []
+
+
+def _make_seq_conn(seq_exists: bool, last_value: int, max_id):
+    """Helper: build a mock conn that simulates sequence queries."""
+    mock_conn = MagicMock()
+
+    def _execute(sql, params=None):
+        cursor = MagicMock()
+        if "information_schema.sequences" in sql:
+            cursor.fetchone.return_value = (
+                {"sequence_name": "pending_actions_id_seq"} if seq_exists else None
+            )
+        elif "last_value" in sql:
+            cursor.fetchone.return_value = {"last_value": last_value}
+        elif "MAX(id)" in sql:
+            cursor.fetchone.return_value = {"max_id": max_id}
+        return cursor
+
+    mock_conn.execute.side_effect = _execute
+    return mock_conn
+
+
+def test_check_sequences_skips_text_pk_tables():
+    """Tables without a SERIAL PK produce no HealthCheck entries."""
+    from database.health import check_sequences
+    mock_conn = MagicMock()
+    # information_schema.sequences returns nothing for 'clients'
+    mock_conn.execute.return_value.fetchone.return_value = None
+    results = check_sequences(mock_conn, ["clients"])
+    assert results == []
+
+
+def test_check_sequences_pass_in_sync():
+    from database.health import check_sequences
+    conn = _make_seq_conn(seq_exists=True, last_value=50, max_id=50)
+    results = check_sequences(conn, ["pending_actions"])
+    assert len(results) == 1
+    assert results[0].status == "PASS"
+    assert "last=50" in results[0].message
+
+
+def test_check_sequences_fail_behind():
+    from database.health import check_sequences
+    conn = _make_seq_conn(seq_exists=True, last_value=45, max_id=50)
+    results = check_sequences(conn, ["pending_actions"])
+    assert results[0].status == "FAIL"
+    assert "behind" in results[0].message
+    assert "last=45" in results[0].message
+    assert "max=50" in results[0].message
+
+
+def test_check_sequences_pass_empty_table():
+    """Sequence exists but table has no rows — nothing can drift."""
+    from database.health import check_sequences
+    conn = _make_seq_conn(seq_exists=True, last_value=1, max_id=None)
+    results = check_sequences(conn, ["pending_actions"])
+    assert results[0].status == "PASS"

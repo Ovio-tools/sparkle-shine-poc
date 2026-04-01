@@ -87,3 +87,52 @@ def check_table_inventory(conn, tables: list[str]) -> list[HealthCheck]:
                 f"Table: {table}", "FAIL", "missing — run migrations"
             ))
     return results
+
+
+def check_sequences(conn, table_names: list[str]) -> list[HealthCheck]:
+    """Verify SERIAL sequences are not behind their table's max(id).
+
+    A sequence falls behind when rows are inserted with explicit IDs
+    (bypassing nextval), typically during data migrations. If the
+    sequence is behind, the next INSERT will fail with a unique-
+    constraint violation.
+
+    Tables without a SERIAL PK are silently skipped.
+    """
+    results = []
+    for table in table_names:
+        seq_name = f"{table}_id_seq"
+
+        # Check if this sequence exists in the public schema
+        cursor = conn.execute(
+            "SELECT 1 FROM information_schema.sequences "
+            "WHERE sequence_schema = 'public' AND sequence_name = %s",
+            (seq_name,),
+        )
+        if not cursor.fetchone():
+            continue  # TEXT PK or no sequence — skip silently
+
+        # Get sequence current last_value
+        cursor = conn.execute(f'SELECT last_value FROM "{seq_name}"')
+        last_value = cursor.fetchone()["last_value"]
+
+        # Get max id in the table
+        cursor = conn.execute(f'SELECT MAX(id) AS max_id FROM "{table}"')
+        row = cursor.fetchone()
+        max_id = row["max_id"] if row["max_id"] is not None else 0
+
+        if max_id == 0:
+            results.append(HealthCheck(
+                f"Sequence: {seq_name}", "PASS", "table is empty"
+            ))
+        elif last_value < max_id:
+            results.append(HealthCheck(
+                f"Sequence: {seq_name}", "FAIL",
+                f"behind: last={last_value}, max={max_id} — next INSERT will fail",
+            ))
+        else:
+            results.append(HealthCheck(
+                f"Sequence: {seq_name}", "PASS",
+                f"last={last_value}, max={max_id}",
+            ))
+    return results
