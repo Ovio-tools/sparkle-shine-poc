@@ -371,3 +371,54 @@ def test_automations_runner_health_warns_stale_lead_leak(tmp_path):
     warn_checks = [c for c in rendered_checks if c.status == "WARN" and "lead" in c.name.lower()]
     assert len(warn_checks) == 1
     assert "h ago" in warn_checks[0].message
+
+
+def test_intelligence_runner_health_exits_0_all_pass():
+    """--health exits 0 when DB, ANTHROPIC_API_KEY, and briefings/ are all good."""
+    mock_conn = MagicMock()
+
+    with patch("database.health.get_connection", return_value=mock_conn), \
+         patch("database.health.table_exists", return_value=True), \
+         patch("database.health.check_sequences", return_value=[]), \
+         patch("database.health.check_oauth_tokens", return_value=[]), \
+         patch("database.health.render_table"), \
+         patch("os.environ.get", return_value="sk-fake-key"), \
+         patch("os.path.isdir", return_value=True):
+
+        from intelligence.runner import _run_health_check
+        with pytest.raises(SystemExit) as exc_info:
+            _run_health_check()
+
+    assert exc_info.value.code == 0
+
+
+def test_intelligence_runner_health_fails_without_api_key():
+    """--health exits 1 when ANTHROPIC_API_KEY is not set."""
+    mock_conn = MagicMock()
+    rendered_checks = []
+
+    def _capture(title, checks):
+        rendered_checks.extend(checks)
+
+    with patch("database.health.get_connection", return_value=mock_conn), \
+         patch("database.health.table_exists", return_value=True), \
+         patch("database.health.check_sequences", return_value=[]), \
+         patch("database.health.check_oauth_tokens", return_value=[]), \
+         patch("database.health.render_table", side_effect=_capture), \
+         patch("os.path.isdir", return_value=True):
+
+        # Simulate ANTHROPIC_API_KEY missing: os.environ.get returns None
+        original_get = os.environ.get
+        def _fake_get(key, default=None):
+            if key == "ANTHROPIC_API_KEY":
+                return None
+            return original_get(key, default)
+
+        with patch("os.environ.get", side_effect=_fake_get):
+            from intelligence.runner import _run_health_check
+            with pytest.raises(SystemExit) as exc_info:
+                _run_health_check()
+
+    assert exc_info.value.code == 1
+    fail_checks = [c for c in rendered_checks if c.status == "FAIL" and "ANTHROPIC" in c.name]
+    assert len(fail_checks) == 1

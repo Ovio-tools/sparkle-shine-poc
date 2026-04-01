@@ -414,6 +414,94 @@ def _print_summary(result: PipelineResult) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+def _run_health_check() -> None:
+    """Run intelligence pipeline health checks and exit.
+
+    Answers: 'Can the intelligence pipeline produce a briefing right now?'
+    Called by --health before any pipeline stage runs.
+    Exits 0 if all checks PASS or WARN, exits 1 if any FAIL.
+    """
+    import importlib
+
+    from database.health import (
+        HealthCheck,
+        check_connection,
+        check_table_inventory,
+        check_sequences,
+        check_oauth_tokens,
+        render_table,
+    )
+
+    checks: list[HealthCheck] = []
+
+    _TABLES = [
+        "daily_metrics_snapshot", "document_index",
+        "jobs", "clients", "invoices",
+    ]
+
+    # 1. DB connection
+    conn_check, conn = check_connection()
+    checks.append(conn_check)
+
+    if conn is None:
+        for name in ("Table inventory", "Sequence health", "OAuth tokens"):
+            checks.append(HealthCheck(name, "SKIP", "DB unreachable"))
+    else:
+        try:
+            # 2. Table inventory
+            checks.extend(check_table_inventory(conn, _TABLES))
+            # 3. Sequence health (document_index has SERIAL PK; others use TEXT)
+            checks.extend(check_sequences(conn, _TABLES))
+            # 4. OAuth tokens (jobber, quickbooks, google)
+            checks.extend(check_oauth_tokens(conn))
+        finally:
+            conn.close()
+
+    # 5. ANTHROPIC_API_KEY
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        checks.append(HealthCheck("ANTHROPIC_API_KEY", "PASS", "set"))
+    else:
+        checks.append(HealthCheck(
+            "ANTHROPIC_API_KEY", "FAIL",
+            "not set — add to .env or Railway environment",
+        ))
+
+    # 6. briefings/ directory
+    if os.path.isdir(BRIEFINGS_DIR):
+        checks.append(HealthCheck("briefings/ directory", "PASS", ""))
+    else:
+        checks.append(HealthCheck(
+            "briefings/ directory", "WARN",
+            f"{BRIEFINGS_DIR} does not exist (will be created on first run)",
+        ))
+
+    # 7. Syncer imports
+    _SYNCER_IMPORTS = [
+        ("intelligence.syncers.sync_google",     "GoogleSyncer"),
+        ("intelligence.syncers.sync_jobber",      "JobberSyncer"),
+        ("intelligence.syncers.sync_quickbooks",  "QuickBooksSyncer"),
+        ("intelligence.syncers.sync_hubspot",     "HubSpotSyncer"),
+        ("intelligence.syncers.sync_pipedrive",   "PipedriveSyncer"),
+        ("intelligence.syncers.sync_mailchimp",   "MailchimpSyncer"),
+        ("intelligence.syncers.sync_asana",       "AsanaSyncer"),
+        ("intelligence.syncers.sync_slack",       "SlackSyncer"),
+    ]
+    for module_path, class_name in _SYNCER_IMPORTS:
+        try:
+            mod = importlib.import_module(module_path)
+            getattr(mod, class_name)
+            checks.append(HealthCheck(f"Import: {class_name}", "PASS", ""))
+        except (ImportError, AttributeError) as exc:
+            checks.append(HealthCheck(f"Import: {class_name}", "WARN", str(exc)))
+
+    render_table("Intelligence Runner — Health Check", checks)
+    sys.exit(1 if any(c.status == "FAIL" for c in checks) else 0)
+
+
+# ---------------------------------------------------------------------------
 # CLI argument parsing
 # ---------------------------------------------------------------------------
 
@@ -485,6 +573,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "past 7 days with a TL;DR, posted to #weekly-briefing."
         ),
     )
+    parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Run service health checks and exit. Does not run the pipeline.",
+    )
     return parser
 
 
@@ -495,6 +588,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args   = parser.parse_args()
+
+    if args.health:
+        _run_health_check()  # exits internally
 
     # --- Configure logging level ---
     if args.verbose:
