@@ -113,9 +113,22 @@ def check_sequences(conn, table_names: list[str]) -> list[HealthCheck]:
         if not cursor.fetchone():
             continue  # TEXT PK or no sequence — skip silently
 
-        # Get sequence current last_value
-        cursor = conn.execute(f'SELECT last_value FROM "{seq_name}"')
-        last_value = cursor.fetchone()["last_value"]
+        # Get sequence state via pg_sequences view (last_value + is_called)
+        # is_called=false means the sequence hasn't been consumed yet —
+        # nextval() would return last_value, not last_value+1
+        cursor = conn.execute(
+            "SELECT last_value, is_called FROM pg_sequences "
+            "WHERE schemaname = 'public' AND sequencename = %s",
+            (seq_name,),
+        )
+        seq_row = cursor.fetchone()
+        if seq_row is None:
+            # Sequence disappeared between discovery and read — skip
+            continue
+        last_value = seq_row["last_value"]
+        is_called = seq_row["is_called"]
+        # effective_last: the highest ID the sequence has actually produced
+        effective_last = last_value if is_called else last_value - 1
 
         # Get max id in the table
         cursor = conn.execute(f'SELECT MAX(id) AS max_id FROM "{table}"')
@@ -126,10 +139,10 @@ def check_sequences(conn, table_names: list[str]) -> list[HealthCheck]:
             results.append(HealthCheck(
                 f"Sequence: {seq_name}", "PASS", "table is empty"
             ))
-        elif last_value < max_id:
+        elif effective_last < max_id:
             results.append(HealthCheck(
                 f"Sequence: {seq_name}", "FAIL",
-                f"behind: last={last_value}, max={max_id} — next INSERT will fail",
+                f"behind: last={last_value} (is_called={is_called}), max={max_id} — next INSERT will fail",
             ))
         else:
             results.append(HealthCheck(

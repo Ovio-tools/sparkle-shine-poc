@@ -114,8 +114,8 @@ def _make_seq_conn(seq_exists: bool, last_value: int, max_id):
             cursor.fetchone.return_value = (
                 {"sequence_name": "pending_actions_id_seq"} if seq_exists else None
             )
-        elif "last_value" in sql:
-            cursor.fetchone.return_value = {"last_value": last_value}
+        elif "pg_sequences" in sql:
+            cursor.fetchone.return_value = {"last_value": last_value, "is_called": True}
         elif "MAX(id)" in sql:
             cursor.fetchone.return_value = {"max_id": max_id}
         return cursor
@@ -248,7 +248,7 @@ def test_pg_health_check_exits_0_when_all_pass():
 
 def test_pg_health_check_exits_1_on_fail():
     """main() exits 1 when DATABASE_URL is not set."""
-    with patch("os.environ.get", return_value=None), \
+    with patch("scripts.pg_health_check.os.environ.get", return_value=None), \
          patch("database.health.render_table"), \
          pytest.raises(SystemExit) as exc_info:
         import importlib
