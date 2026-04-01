@@ -219,3 +219,40 @@ def test_check_oauth_tokens_expired_access_token():
     results = check_oauth_tokens(_make_oauth_conn(rows))
     assert all(c.status == "WARN" for c in results)
     assert all("expires_at" in c.message for c in results)
+
+
+def test_pg_health_check_exits_0_when_all_pass():
+    """main() exits 0 when all checks pass."""
+    import sys
+    from unittest.mock import patch, MagicMock
+    from database.health import HealthCheck
+
+    mock_conn = MagicMock()
+    pass_check = HealthCheck("DB connection", "PASS", "")
+
+    with patch("scripts.pg_health_check.os.environ.get", return_value="postgresql://fake"), \
+         patch("database.health.get_connection", return_value=mock_conn), \
+         patch("database.health.table_exists", return_value=True), \
+         patch("database.health.check_sequences", return_value=[HealthCheck("Sequence: x", "PASS", "")]), \
+         patch("database.health.check_oauth_tokens", return_value=[HealthCheck("OAuth token: jobber", "PASS", "")]), \
+         patch("database.health.render_table"), \
+         pytest.raises(SystemExit) as exc_info:
+        import importlib
+        import scripts.pg_health_check as m
+        importlib.reload(m)
+        m.main()
+
+    assert exc_info.value.code == 0
+
+
+def test_pg_health_check_exits_1_on_fail():
+    """main() exits 1 when DATABASE_URL is not set."""
+    with patch("os.environ.get", return_value=None), \
+         patch("database.health.render_table"), \
+         pytest.raises(SystemExit) as exc_info:
+        import importlib
+        import scripts.pg_health_check as m
+        importlib.reload(m)
+        m.main()
+
+    assert exc_info.value.code == 1
