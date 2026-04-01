@@ -69,3 +69,35 @@ def test_check_connection_fail():
     assert result_check.status == "FAIL"
     assert result_conn is None
     assert "connection refused" in result_check.message
+
+
+def test_check_table_inventory_all_present():
+    from database.health import check_table_inventory
+    mock_conn = MagicMock()
+    with patch("database.health.table_exists", return_value=True):
+        results = check_table_inventory(mock_conn, ["clients", "jobs"])
+    assert len(results) == 2
+    assert all(c.status == "PASS" for c in results)
+
+
+def test_check_table_inventory_one_missing():
+    from database.health import check_table_inventory
+    mock_conn = MagicMock()
+
+    def _exists(conn, table):
+        return table != "jobs"
+
+    with patch("database.health.table_exists", side_effect=_exists):
+        results = check_table_inventory(mock_conn, ["clients", "jobs"])
+
+    by_name = {c.name: c for c in results}
+    assert by_name["Table: clients"].status == "PASS"
+    assert by_name["Table: jobs"].status == "FAIL"
+    assert "missing" in by_name["Table: jobs"].message
+
+
+def test_check_table_inventory_empty_list():
+    from database.health import check_table_inventory
+    mock_conn = MagicMock()
+    results = check_table_inventory(mock_conn, [])
+    assert results == []

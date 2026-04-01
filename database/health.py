@@ -69,3 +69,21 @@ def check_connection() -> tuple[HealthCheck, object]:
         return HealthCheck("DB connection", "PASS", ""), conn
     except Exception as exc:
         return HealthCheck("DB connection", "FAIL", str(exc)), None
+
+
+def check_table_inventory(conn, tables: list[str]) -> list[HealthCheck]:
+    """Check that every table in `tables` exists in the public schema.
+
+    Uses table_exists() from database.connection.
+    Pass _TABLE_NAMES from database.schema for a full inventory,
+    or a subset for a service-scoped check.
+    """
+    results = []
+    for table in tables:
+        if table_exists(conn, table):
+            results.append(HealthCheck(f"Table: {table}", "PASS", ""))
+        else:
+            results.append(HealthCheck(
+                f"Table: {table}", "FAIL", "missing — run migrations"
+            ))
+    return results
