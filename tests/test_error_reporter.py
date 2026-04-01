@@ -620,8 +620,13 @@ class TestReportReconciliationIssue(unittest.TestCase):
             "entity": "SS-CLIENT-0047",
         })
         call_kwargs = mock_client.chat_postMessage.call_args.kwargs
-        context_text = call_kwargs["blocks"][-1]["elements"][0]["text"]
-        assert "reconciliation_missing" in context_text
+        all_context_text = " ".join(
+            el["text"]
+            for block in call_kwargs["blocks"]
+            if block.get("type") == "context"
+            for el in block.get("elements", [])
+        )
+        assert "reconciliation_missing" in all_context_text
 
     def test_dry_run_returns_true_without_api_call(self):
         from simulation.error_reporter import report_reconciliation_issue

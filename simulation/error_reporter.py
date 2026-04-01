@@ -1,6 +1,8 @@
 import logging
+import os
 import time
-from datetime import datetime
+import traceback
+from datetime import datetime, date
 from typing import Union, Optional
 
 import requests
@@ -38,6 +40,34 @@ _warning_log: dict[str, list[float]] = {}
 # On each report_error() call, only _warning_log[tool_name] is pruned (entries older than
 # ESCALATION_WINDOW_MINUTES are removed). Then len(_warning_log[tool_name]) is checked
 # against ESCALATION_THRESHOLD.
+
+
+# ---------------------------------------------------------------------------
+# Location helpers
+# ---------------------------------------------------------------------------
+
+def _get_log_file_name() -> str:
+    """Return the current daily log file name."""
+    return f"logs/intelligence_{date.today().strftime('%Y-%m-%d')}.log"
+
+
+def _extract_location(exc: Exception) -> Optional[str]:
+    """Return 'filename:lineno' of the innermost traceback frame, or None."""
+    if not isinstance(exc, Exception) or exc.__traceback__ is None:
+        return None
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return None
+    last = frames[-1]
+    filename = last.filename
+    for marker in ("sparkle-shine-poc/", "sparkle_shine_poc/"):
+        idx = filename.find(marker)
+        if idx != -1:
+            filename = filename[idx + len(marker):]
+            break
+    else:
+        filename = os.path.basename(filename)
+    return f"{filename}:{last.lineno}"
 
 
 # ---------------------------------------------------------------------------
@@ -220,12 +250,14 @@ def _build_error_blocks(
     severity: str,
     tool_name: str,
     header_text: str = "Automation Issue",
+    error_location: Optional[str] = None,
+    log_file: Optional[str] = None,
 ) -> list[dict]:
     """Build Block Kit blocks for report_error() messages."""
     emoji = _SEVERITY_EMOJIS[severity]
     now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-    return [
+    blocks = [
         {
             "type": "header",
             "text": {
@@ -256,6 +288,21 @@ def _build_error_blocks(
         },
     ]
 
+    if log_file or error_location:
+        parts = []
+        if log_file:
+            parts.append(f":page_facing_up: Log: `{log_file}`")
+        if error_location:
+            parts.append(f"`{error_location}`")
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": " · ".join(parts)},
+            ],
+        })
+
+    return blocks
+
 
 def _build_reconciliation_blocks(
     what_happened: str,
@@ -265,6 +312,7 @@ def _build_reconciliation_blocks(
     tool_name: str,
     category: str,
     details: Optional[str] = None,
+    log_file: Optional[str] = None,
 ) -> list[dict]:
     """Build Block Kit blocks for report_reconciliation_issue() messages."""
     now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -311,6 +359,14 @@ def _build_reconciliation_blocks(
             ],
         },
     ])
+
+    if log_file:
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f":page_facing_up: Log: `{log_file}`"},
+            ],
+        })
 
     return blocks
 
@@ -421,6 +477,9 @@ def report_error(
                     final_severity = "critical"
                     header_text = "Automation Issue — Repeated Failures"
 
+        error_location = _extract_location(exc) if isinstance(exc, Exception) else None
+        log_file = _get_log_file_name()
+
         blocks = _build_error_blocks(
             what_happened=what_happened,
             what_was_affected=context,
@@ -428,13 +487,17 @@ def report_error(
             severity=final_severity,
             tool_name=tool_name,
             header_text=header_text,
+            error_location=error_location,
+            log_file=log_file,
         )
 
         if dry_run:
             logger.info(
-                "[DRY RUN] Would post to #automation-failure: %s — %s",
+                "[DRY RUN] Would post to #automation-failure: %s — %s (log: %s%s)",
                 header_text,
                 what_happened,
+                log_file,
+                f", location: {error_location}" if error_location else "",
             )
             return True
 
@@ -496,6 +559,7 @@ def report_reconciliation_issue(
             tool_name=tool,
             category=category,
             details=details,
+            log_file=_get_log_file_name(),
         )
 
         if dry_run:
