@@ -4,6 +4,7 @@ tests/test_health.py
 Unit tests for database/health.py check functions and render_table.
 All DB interactions are mocked — no live database required.
 """
+import os
 import pytest
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
@@ -321,3 +322,52 @@ def test_simulation_engine_health_warns_stale_checkpoint(tmp_path):
     warn_checks = [c for c in rendered_checks if c.status == "WARN" and "Checkpoint" in c.name]
     assert len(warn_checks) == 1
     assert "days old" in warn_checks[0].message
+
+
+def test_automations_runner_health_exits_0_all_pass():
+    """--health exits 0 when tables present and no stale sentinels."""
+    mock_conn = MagicMock()
+
+    with patch("database.health.get_connection", return_value=mock_conn), \
+         patch("database.health.table_exists", return_value=True), \
+         patch("database.health.check_sequences", return_value=[]), \
+         patch("database.health.render_table"), \
+         patch("os.path.exists", return_value=False):  # sentinels missing = first run
+
+        from automations.runner import _run_health_check
+        with pytest.raises(SystemExit) as exc_info:
+            _run_health_check()
+
+    assert exc_info.value.code == 0
+
+
+def test_automations_runner_health_warns_stale_lead_leak(tmp_path):
+    """--health emits WARN when lead_leak sentinel is >48h old."""
+    import time
+
+    sentinel = tmp_path / ".lead_leak_last_run"
+    sentinel.write_text("")
+    # backdate mtime to 3 days ago
+    old_mtime = time.time() - (3 * 86400)
+    os.utime(str(sentinel), (old_mtime, old_mtime))
+
+    mock_conn = MagicMock()
+    rendered_checks = []
+
+    def _capture(title, checks):
+        rendered_checks.extend(checks)
+
+    with patch("database.health.get_connection", return_value=mock_conn), \
+         patch("database.health.table_exists", return_value=True), \
+         patch("database.health.check_sequences", return_value=[]), \
+         patch("database.health.render_table", side_effect=_capture), \
+         patch("automations.runner._LEAD_LEAK_SENTINEL", str(sentinel)), \
+         patch("automations.runner._OVERDUE_INVOICE_SENTINEL", str(tmp_path / ".overdue_invoice_last_run")):
+
+        from automations.runner import _run_health_check
+        with pytest.raises(SystemExit):
+            _run_health_check()
+
+    warn_checks = [c for c in rendered_checks if c.status == "WARN" and "lead" in c.name.lower()]
+    assert len(warn_checks) == 1
+    assert "h ago" in warn_checks[0].message

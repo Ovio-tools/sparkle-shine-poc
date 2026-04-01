@@ -398,6 +398,88 @@ def _merge(totals: dict, result: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Health check
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_health_check() -> None:
+    """Run automation runner health checks and exit.
+
+    Answers: 'Can the automation runner process triggers right now?'
+    Called by --health before migrations or polling run.
+    Exits 0 if all checks PASS or WARN, exits 1 if any FAIL.
+    """
+    import importlib
+
+    from database.health import (
+        HealthCheck,
+        check_connection,
+        check_table_inventory,
+        check_sequences,
+        render_table,
+    )
+
+    checks: list[HealthCheck] = []
+
+    # 1. DB connection
+    conn_check, conn = check_connection()
+    checks.append(conn_check)
+
+    _TABLES     = ["pending_actions", "poll_state"]
+    _SEQ_TABLES = ["pending_actions", "automation_log"]
+
+    if conn is None:
+        for name in ("Table inventory", "Sequence health"):
+            checks.append(HealthCheck(name, "SKIP", "DB unreachable"))
+    else:
+        try:
+            # 2. Table inventory
+            checks.extend(check_table_inventory(conn, _TABLES))
+            # 3. Sequence health for the two SERIAL-PK automation tables
+            checks.extend(check_sequences(conn, _SEQ_TABLES))
+        finally:
+            conn.close()
+
+    # 4. Sentinel age
+    _sentinels = [
+        (_LEAD_LEAK_SENTINEL,       "Lead leak sentinel",       48 * 3600),
+        (_OVERDUE_INVOICE_SENTINEL, "Overdue invoice sentinel", 14 * 86400),
+    ]
+    for sentinel_path, name, max_age_seconds in _sentinels:
+        if not os.path.exists(sentinel_path):
+            checks.append(HealthCheck(name, "PASS", "missing (first run)"))
+        else:
+            age_seconds = time.time() - os.path.getmtime(sentinel_path)
+            if age_seconds > max_age_seconds:
+                checks.append(HealthCheck(
+                    name, "WARN",
+                    f"last ran {age_seconds / 3600:.0f}h ago",
+                ))
+            else:
+                checks.append(HealthCheck(name, "PASS", ""))
+
+    # 5. Automation module imports
+    _AUTOMATION_IMPORTS = [
+        ("automations.new_client_onboarding",  "NewClientOnboarding"),
+        ("automations.job_completion_flow",     "JobCompletionFlow"),
+        ("automations.payment_received",        "PaymentReceived"),
+        ("automations.negative_review",         "NegativeReviewResponse"),
+        ("automations.lead_leak_detection",     "LeadLeakDetection"),
+        ("automations.overdue_invoice",         "OverdueInvoiceEscalation"),
+        ("automations.hubspot_qualified_sync",  "HubSpotQualifiedSync"),
+    ]
+    for module_path, class_name in _AUTOMATION_IMPORTS:
+        try:
+            mod = importlib.import_module(module_path)
+            getattr(mod, class_name)
+            checks.append(HealthCheck(f"Import: {class_name}", "PASS", ""))
+        except (ImportError, AttributeError) as exc:
+            checks.append(HealthCheck(f"Import: {class_name}", "WARN", str(exc)))
+
+    render_table("Automation Runner — Health Check", checks)
+    sys.exit(1 if any(c.status == "FAIL" for c in checks) else 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -431,7 +513,15 @@ def main() -> None:
         action="store_true",
         help="No API writes. Prints [DRY RUN] prefix.",
     )
+    parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Run service health checks and exit. Does not process any triggers.",
+    )
     args = parser.parse_args()
+
+    if args.health:
+        _run_health_check()  # exits internally
 
     # Default to --all when no mode flag is given
     if not (args.poll or args.scheduled or args.pending or args.run_all):
