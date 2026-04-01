@@ -139,8 +139,7 @@ class DealGenerator:
         self._service_type_field = fields["Service Type"]
         self._emv_field          = fields["Estimated Monthly Value"]
 
-        import sqlite3 as _sqlite3
-        with _sqlite3.connect(db_path) as conn:
+        with get_connection(db_path) as conn:
             self._ensure_schema(conn)
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
@@ -352,7 +351,7 @@ class DealGenerator:
 
     def _ensure_schema(self, conn) -> None:
         """Add missing columns to commercial_proposals if absent."""
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(commercial_proposals)")}
+        existing = get_column_names(conn, "commercial_proposals")
         for col_name, col_type in [
             ("start_date",        "TEXT"),
             ("crew_assignment",   "TEXT"),
