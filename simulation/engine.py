@@ -429,6 +429,92 @@ class SimulationEngine:
         logger.info("Engine stopped.")
 
 
+def _run_health_check() -> None:
+    """Run simulation engine health checks and exit.
+
+    Answers: 'Can the simulation engine generate events right now?'
+    Called by --health before the engine is constructed.
+    Exits 0 if all checks PASS or WARN, exits 1 if any FAIL.
+    """
+    import importlib
+
+    from database.health import (
+        HealthCheck,
+        check_connection,
+        check_table_inventory,
+        check_sequences,
+        render_table,
+    )
+
+    checks: list[HealthCheck] = []
+
+    # 1. DB connection
+    conn_check, conn = check_connection()
+    checks.append(conn_check)
+
+    _TABLES = ["clients", "jobs", "invoices", "payments", "cross_tool_mapping"]
+
+    if conn is None:
+        for name in ("Table inventory", "Sequence health"):
+            checks.append(HealthCheck(name, "SKIP", "DB unreachable"))
+    else:
+        try:
+            # 2. Table inventory
+            checks.extend(check_table_inventory(conn, _TABLES))
+            # 3. Sequence health (cross_tool_mapping has SERIAL PK; others use TEXT)
+            checks.extend(check_sequences(conn, _TABLES))
+        finally:
+            conn.close()
+
+    # 4. Checkpoint freshness
+    if CHECKPOINT_FILE.exists():
+        try:
+            import json
+            from datetime import date as _date
+            state = json.loads(CHECKPOINT_FILE.read_text())
+            cp_date = _date.fromisoformat(state["date"])
+            delta = (_date.today() - cp_date).days
+            if delta > 1:
+                checks.append(HealthCheck(
+                    "Checkpoint freshness", "WARN",
+                    f"checkpoint is {delta} days old — engine may have stopped",
+                ))
+            else:
+                checks.append(HealthCheck(
+                    "Checkpoint freshness", "PASS", f"date={cp_date}",
+                ))
+        except Exception as exc:
+            checks.append(HealthCheck(
+                "Checkpoint freshness", "WARN", f"could not parse checkpoint: {exc}",
+            ))
+    else:
+        checks.append(HealthCheck(
+            "Checkpoint freshness", "PASS", "no checkpoint file (first run)",
+        ))
+
+    # 5. Generator imports
+    _GENERATOR_IMPORTS = [
+        ("simulation.generators.operations", "NewClientSetupGenerator"),
+        ("simulation.generators.operations", "JobSchedulingGenerator"),
+        ("simulation.generators.operations", "JobCompletionGenerator"),
+        ("simulation.generators.contacts",   "ContactGenerator"),
+        ("simulation.generators.deals",      "DealGenerator"),
+        ("simulation.generators.churn",      "ChurnGenerator"),
+        ("simulation.generators.payments",   "PaymentGenerator"),
+        ("simulation.generators.tasks",      "TaskCompletionGenerator"),
+    ]
+    for module_path, class_name in _GENERATOR_IMPORTS:
+        try:
+            mod = importlib.import_module(module_path)
+            getattr(mod, class_name)
+            checks.append(HealthCheck(f"Import: {class_name}", "PASS", ""))
+        except (ImportError, AttributeError) as exc:
+            checks.append(HealthCheck(f"Import: {class_name}", "WARN", str(exc)))
+
+    render_table("Simulation Engine — Health Check", checks)
+    sys.exit(1 if any(c.status == "FAIL" for c in checks) else 0)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Sparkle & Shine simulation engine — generates live business events."
@@ -453,7 +539,15 @@ if __name__ == "__main__":
         "--verbose", action="store_true",
         help="Enable DEBUG logging"
     )
+    parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Run service health checks and exit. Does not start the engine.",
+    )
     args = parser.parse_args()
+
+    if args.health:
+        _run_health_check()  # exits internally
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)

@@ -256,3 +256,68 @@ def test_pg_health_check_exits_1_on_fail():
         m.main()
 
     assert exc_info.value.code == 1
+
+
+def test_simulation_engine_health_exits_0_all_pass():
+    """--health exits 0 when connection and tables are healthy."""
+    from database.health import HealthCheck
+
+    pass_hc = HealthCheck("DB connection", "PASS", "")
+    mock_conn = MagicMock()
+
+    with patch("database.health.get_connection", return_value=mock_conn), \
+         patch("database.health.table_exists", return_value=True), \
+         patch("database.health.check_sequences", return_value=[]), \
+         patch("database.health.render_table"), \
+         patch("simulation.engine.CHECKPOINT_FILE") as mock_cp:
+
+        mock_cp.exists.return_value = False  # no checkpoint — first run
+
+        from simulation.engine import _run_health_check
+        with pytest.raises(SystemExit) as exc_info:
+            _run_health_check()
+
+    assert exc_info.value.code == 0
+
+
+def test_simulation_engine_health_exits_1_on_db_fail():
+    """--health exits 1 when DB connection fails."""
+    with patch("database.health.get_connection", side_effect=Exception("timeout")), \
+         patch("database.health.render_table"):
+
+        from simulation.engine import _run_health_check
+        with pytest.raises(SystemExit) as exc_info:
+            _run_health_check()
+
+    assert exc_info.value.code == 1
+
+
+def test_simulation_engine_health_warns_stale_checkpoint(tmp_path):
+    """--health emits WARN when checkpoint date is >1 day old."""
+    import json
+    from datetime import date, timedelta
+    from database.health import HealthCheck
+
+    old_date = (date.today() - timedelta(days=3)).isoformat()
+    cp_file = tmp_path / "checkpoint.json"
+    cp_file.write_text(json.dumps({"date": old_date, "counters": {}}))
+
+    mock_conn = MagicMock()
+    rendered_checks = []
+
+    def _capture(title, checks):
+        rendered_checks.extend(checks)
+
+    with patch("database.health.get_connection", return_value=mock_conn), \
+         patch("database.health.table_exists", return_value=True), \
+         patch("database.health.check_sequences", return_value=[]), \
+         patch("database.health.render_table", side_effect=_capture), \
+         patch("simulation.engine.CHECKPOINT_FILE", cp_file):
+
+        from simulation.engine import _run_health_check
+        with pytest.raises(SystemExit):
+            _run_health_check()
+
+    warn_checks = [c for c in rendered_checks if c.status == "WARN" and "Checkpoint" in c.name]
+    assert len(warn_checks) == 1
+    assert "days old" in warn_checks[0].message
