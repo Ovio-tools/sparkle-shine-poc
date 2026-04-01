@@ -403,7 +403,7 @@ class NewClientSetupGenerator:
 
     def _ensure_schema(self, conn) -> None:
         """Add client_type column to recurring_agreements if not present."""
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(recurring_agreements)")}
+        cols = get_column_names(conn, "recurring_agreements")
         if "client_type" not in cols:
             conn.execute(
                 "ALTER TABLE recurring_agreements ADD COLUMN client_type TEXT DEFAULT 'residential'"
@@ -411,14 +411,12 @@ class NewClientSetupGenerator:
             conn.commit()
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
-        import sqlite3 as _sqlite3
-        conn = _sqlite3.connect(self.db_path)
-        conn.row_factory = _sqlite3.Row
+        conn = get_connection()
         try:
             self._ensure_schema(conn)
             ready_deals = conn.execute("""
                 SELECT * FROM won_deals
-                WHERE start_date <= date('now')
+                WHERE start_date <= CURRENT_DATE
                   AND canonical_id NOT IN (
                       SELECT canonical_id FROM cross_tool_mapping
                       WHERE tool_name = 'jobber'
@@ -476,7 +474,7 @@ class NewClientSetupGenerator:
         # 1. Look up client info from the appropriate table
         if client_type == "commercial":
             row = conn.execute(
-                "SELECT * FROM clients WHERE id = ?", (canonical_id,)
+                "SELECT * FROM clients WHERE id = %s", (canonical_id,)
             ).fetchone()
             if row is None:
                 raise RuntimeError(f"No clients row for {canonical_id}")
@@ -487,7 +485,7 @@ class NewClientSetupGenerator:
             address = row.get("address", "Austin, TX")
         else:
             row = conn.execute(
-                "SELECT * FROM leads WHERE id = ?", (canonical_id,)
+                "SELECT * FROM leads WHERE id = %s", (canonical_id,)
             ).fetchone()
             if row is None:
                 raise RuntimeError(f"No leads row for {canonical_id}")
@@ -642,10 +640,11 @@ class NewClientSetupGenerator:
         # Insert into recurring_agreements
         recur_id = generate_id("RECUR", db_path=self.db_path)
         conn.execute("""
-            INSERT OR IGNORE INTO recurring_agreements
+            INSERT INTO recurring_agreements
             (id, client_id, service_type_id, crew_id, frequency,
              price_per_visit, start_date, status, day_of_week, client_type)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT DO NOTHING
         """, (
             recur_id, canonical_id, service_type_id, crew_id,
             recur_frequency, contract_value,
@@ -675,9 +674,10 @@ class NewClientSetupGenerator:
 
         job_id = generate_id("JOB", db_path=self.db_path)
         conn.execute("""
-            INSERT OR IGNORE INTO jobs
+            INSERT INTO jobs
             (id, client_id, crew_id, service_type_id, scheduled_date, status)
-            VALUES (?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            ON CONFLICT DO NOTHING
         """, (
             job_id, canonical_id, crew_id, service_type_id,
             start_date.isoformat(), "scheduled",
@@ -706,9 +706,7 @@ class JobSchedulingGenerator:
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
         today = date.today()
-        import sqlite3 as _sqlite3
-        conn = _sqlite3.connect(self.db_path)
-        conn.row_factory = _sqlite3.Row
+        conn = get_connection()
         try:
             session = get_client("jobber") if not dry_run else None
             results = []
@@ -729,7 +727,7 @@ class JobSchedulingGenerator:
 
                 # Idempotent guard: skip if job already exists for this client+date
                 existing = conn.execute(
-                    "SELECT id FROM jobs WHERE client_id = ? AND scheduled_date = ?",
+                    "SELECT id FROM jobs WHERE client_id = %s AND scheduled_date = %s",
                     (agreement["client_id"], today.isoformat()),
                 ).fetchone()
                 if existing:
@@ -774,10 +772,11 @@ class JobSchedulingGenerator:
                         jobber_job_id = resp["data"]["jobCreate"]["job"]["id"]
 
                         conn.execute("""
-                            INSERT OR IGNORE INTO jobs
+                            INSERT INTO jobs
                             (id, client_id, crew_id, service_type_id,
                              scheduled_date, scheduled_time, status)
-                            VALUES (?,?,?,?,?,?,?)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT DO NOTHING
                         """, (
                             job_id, agreement["client_id"], crew_id,
                             agreement["service_type_id"], today.isoformat(),
@@ -808,7 +807,7 @@ class JobSchedulingGenerator:
             already_scheduled = conn.execute("""
                 SELECT * FROM jobs
                 WHERE status = 'scheduled'
-                  AND scheduled_date = ?
+                  AND scheduled_date = %s
             """, (today.isoformat(),)).fetchall()
             already_scheduled = [dict(j) for j in already_scheduled]
 
@@ -883,7 +882,7 @@ class JobCompletionGenerator:
 
     def _ensure_schema(self, conn) -> None:
         """Add churn_risk column to clients if not present."""
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(clients)")}
+        cols = get_column_names(conn, "clients")
         if "churn_risk" not in cols:
             conn.execute("ALTER TABLE clients ADD COLUMN churn_risk TEXT DEFAULT 'normal'")
             conn.commit()
@@ -892,14 +891,12 @@ class JobCompletionGenerator:
         if not job_id:
             return GeneratorResult(success=False, message="job_id required")
 
-        import sqlite3 as _sqlite3
-        conn = _sqlite3.connect(self.db_path)
-        conn.row_factory = _sqlite3.Row
+        conn = get_connection()
         try:
             self._ensure_schema(conn)
 
             job = conn.execute(
-                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+                "SELECT * FROM jobs WHERE id = %s", (job_id,)
             ).fetchone()
             if not job:
                 return GeneratorResult(success=False, message=f"job {job_id}: not found")
@@ -961,8 +958,8 @@ class JobCompletionGenerator:
 
         conn.execute("""
             UPDATE jobs
-            SET status = 'completed', duration_minutes_actual = ?, completed_at = ?
-            WHERE id = ?
+            SET status = 'completed', duration_minutes_actual = %s, completed_at = %s
+            WHERE id = %s
         """, (actual, completed_at, job_id))
 
         # Insert review
@@ -977,14 +974,14 @@ class JobCompletionGenerator:
         review_id = generate_id("REV", db_path=self.db_path)
         conn.execute("""
             INSERT INTO reviews (id, client_id, job_id, rating, platform, review_date)
-            VALUES (?, ?, ?, ?, 'internal', ?)
+            VALUES (%s, %s, %s, %s, 'internal', %s)
         """, (review_id, job["client_id"], job_id, rating, today.isoformat()))
 
     def _handle_cancelled_or_noshow(
         self, job: dict, job_id: str, jobber_job_id: str,
         outcome: str, session, conn
     ) -> None:
-        conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (outcome, job_id))
+        conn.execute("UPDATE jobs SET status = %s WHERE id = %s", (outcome, job_id))
 
         close_resp = _gql(session, _JOB_CLOSE, {
             "jobId": jobber_job_id,
@@ -997,13 +994,13 @@ class JobCompletionGenerator:
         # Churn risk: 3+ cancelled/no-show in 60 days → high
         count_row = conn.execute("""
             SELECT COUNT(*) AS cnt FROM jobs
-            WHERE client_id = ?
+            WHERE client_id = %s
               AND status IN ('cancelled', 'no-show')
-              AND scheduled_date >= date('now', '-60 days')
+              AND scheduled_date >= CURRENT_DATE - INTERVAL '60 days'
         """, (job["client_id"],)).fetchone()
         if count_row and count_row["cnt"] >= 3:
             conn.execute(
-                "UPDATE clients SET churn_risk = 'high' WHERE id = ?",
+                "UPDATE clients SET churn_risk = 'high' WHERE id = %s",
                 (job["client_id"],),
             )
 
@@ -1011,7 +1008,7 @@ class JobCompletionGenerator:
         self, job: dict, job_id: str, jobber_job_id: str, session, conn
     ) -> None:
         # Cancel original slot
-        conn.execute("UPDATE jobs SET status = 'cancelled' WHERE id = ?", (job_id,))
+        conn.execute("UPDATE jobs SET status = 'cancelled' WHERE id = %s", (job_id,))
         close_resp = _gql(session, _JOB_CLOSE, {
             "jobId": jobber_job_id,
             "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
@@ -1051,7 +1048,7 @@ class JobCompletionGenerator:
 
         conn.execute("""
             INSERT INTO jobs (id, client_id, crew_id, service_type_id, scheduled_date, status)
-            VALUES (?, ?, ?, ?, ?, 'scheduled')
+            VALUES (%s, %s, %s, %s, %s, 'scheduled')
         """, (new_job_id, job["client_id"], crew_id, service_type_id, tomorrow.isoformat()))
 
         register_mapping(new_job_id, "jobber", new_jobber_job_id, db_path=self.db_path)
