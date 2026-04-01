@@ -118,8 +118,7 @@ class DealGenerator:
     Engine calls execute(dry_run=...) on each tick.
     """
 
-    def __init__(self, db_path: str = "sparkle_shine.db"):
-        self.db_path = db_path
+    def __init__(self):
         tool_ids = json.loads(Path("config/tool_ids.json").read_text())
         stages = tool_ids["pipedrive"]["stages"]
         self._stage_order = [
@@ -139,7 +138,7 @@ class DealGenerator:
         self._service_type_field = fields["Service Type"]
         self._emv_field          = fields["Estimated Monthly Value"]
 
-        with get_connection(db_path) as conn:
+        with get_connection() as conn:
             self._ensure_schema(conn)
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
@@ -213,14 +212,13 @@ class DealGenerator:
                     logger.warning("PUT deals/%s failed: %s", deal_id, resp.status_code)
                     return GeneratorResult(success=False, message=f"PUT deals failed: {resp.status_code}")
 
-                # Write stage_change_time to SQLite for SS-PROP deals only
-                canonical_id = get_canonical_id("pipedrive", str(deal_id), self.db_path)
+                # Write stage_change_time to DB for SS-PROP deals only
+                canonical_id = get_canonical_id("pipedrive", str(deal_id))
                 if canonical_id and canonical_id.startswith("SS-PROP-"):
-                    import sqlite3 as _sqlite3
-                    with _sqlite3.connect(self.db_path) as conn:
+                    with get_connection() as conn:
                         conn.execute(
-                            "UPDATE commercial_proposals SET stage_change_time = ? WHERE id = ?",
-                            (datetime.utcnow().isoformat(), canonical_id),
+                            "UPDATE commercial_proposals SET stage_change_time = CURRENT_TIMESTAMP WHERE id = %s",
+                            (canonical_id,),
                         )
 
                 stage_name = self._stage_names.get(next_stage_id, str(next_stage_id))
@@ -273,21 +271,20 @@ class DealGenerator:
         else:
             logger.debug("[dry_run] Would mark deal %s as won", deal_id)
 
-        # SQLite: commercial deals (SS-PROP) only
+        # DB: commercial deals (SS-PROP) only
         # canonical ID lookup always performed — reads are permitted in dry_run (Type 2 generator)
-        canonical_id = get_canonical_id("pipedrive", str(deal_id), self.db_path)
+        canonical_id = get_canonical_id("pipedrive", str(deal_id))
         if canonical_id is None:
             logger.warning(
-                "Won deal %s has no canonical ID mapping — skipping SQLite update", deal_id
+                "Won deal %s has no canonical ID mapping — skipping DB update", deal_id
             )
         elif canonical_id.startswith("SS-PROP-"):
             if not dry_run:
-                import sqlite3 as _sqlite3
-                with _sqlite3.connect(self.db_path) as conn:
+                with get_connection() as conn:
                     conn.execute(
                         "UPDATE commercial_proposals "
-                        "SET status='won', start_date=?, crew_assignment=? "
-                        "WHERE id=?",
+                        "SET status='won', start_date=%s, crew_assignment=%s "
+                        "WHERE id=%s",
                         (
                             contract["start_date"].isoformat(),
                             contract["crew_assignment"],
@@ -299,13 +296,13 @@ class DealGenerator:
         # This is the operations generator's trigger table — it needs start_date
         # queryable for both commercial and residential won deals.
         if not dry_run:
-            import sqlite3 as _sqlite3
-            with _sqlite3.connect(self.db_path) as conn:
+            with get_connection() as conn:
                 conn.execute(
-                    "INSERT OR IGNORE INTO won_deals "
+                    "INSERT INTO won_deals "
                     "(canonical_id, client_type, service_frequency, contract_value, "
                     " start_date, crew_assignment, pipedrive_deal_id) "
-                    "VALUES (?,?,?,?,?,?,?)",
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (canonical_id) DO NOTHING",
                     (
                         canonical_id,
                         contract["contract_type"],
@@ -387,18 +384,17 @@ class DealGenerator:
         if sct:
             return (now - datetime.fromisoformat(sct.replace(" ", "T"))).days
 
-        # Level 2: SQLite commercial_proposals.stage_change_time (SS-PROP only)
+        # Level 2: DB commercial_proposals.stage_change_time (SS-PROP only)
         try:
-            canonical_id = get_canonical_id("pipedrive", str(deal["id"]), self.db_path)
+            canonical_id = get_canonical_id("pipedrive", str(deal["id"]))
             if canonical_id and canonical_id.startswith("SS-PROP-"):
-                import sqlite3 as _sqlite3
-                with _sqlite3.connect(self.db_path) as conn:
+                with get_connection() as conn:
                     row = conn.execute(
-                        "SELECT stage_change_time FROM commercial_proposals WHERE id = ?",
+                        "SELECT stage_change_time FROM commercial_proposals WHERE id = %s",
                         (canonical_id,),
                     ).fetchone()
-                    if row and row[0]:
-                        return (now - datetime.fromisoformat(row[0])).days
+                    if row and row["stage_change_time"]:
+                        return (now - datetime.fromisoformat(row["stage_change_time"])).days
         except Exception:
             pass
 

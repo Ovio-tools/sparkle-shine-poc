@@ -16,10 +16,6 @@ class Connection:
     Provides conn.execute() / conn.executemany() shortcuts that return
     RealDictCursor results (dict-like row access). Implements context
     manager: commits on clean exit, rolls back on exception.
-
-    The db_path parameter is accepted but ignored -- all connections go
-    to the DATABASE_URL PostgreSQL instance. This avoids changing every
-    call site that currently passes db_path.
     """
 
     def __init__(self, pg_conn):
@@ -64,11 +60,10 @@ class Connection:
         return False  # don't suppress exceptions
 
 
-def get_connection(db_path: str = None) -> Connection:
+def get_connection() -> Connection:
     """Return a PostgreSQL connection wrapped in Connection.
 
-    Reads DATABASE_URL from environment. The db_path parameter is
-    accepted but ignored (kept for call-site compatibility).
+    Reads DATABASE_URL from environment.
 
     Raises EnvironmentError if DATABASE_URL is not set.
     """
