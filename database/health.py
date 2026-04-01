@@ -15,6 +15,7 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from database.connection import get_connection, table_exists
 
@@ -135,4 +136,84 @@ def check_sequences(conn, table_names: list[str]) -> list[HealthCheck]:
                 f"Sequence: {seq_name}", "PASS",
                 f"last={last_value}, max={max_id}",
             ))
+    return results
+
+
+_OAUTH_TOOLS = ["jobber", "quickbooks", "google"]
+_OAUTH_STALE_DAYS = 7  # ESTIMATED: refresh tokens typically valid 30–90 days;
+                       # 7-day staleness suggests the token pipeline has stalled.
+
+
+def check_oauth_tokens(conn) -> list[HealthCheck]:
+    """Check that OAuth token rows exist and aren't stale or expired.
+
+    Queries the oauth_tokens table (tool_name PK, token_data JSONB,
+    updated_at TIMESTAMP). Works identically locally and on Railway
+    — no file-system reads.
+
+    FAIL  — row missing for a tool (no token stored at all)
+    WARN  — updated_at > 7 days old (token pipeline may have stalled)
+    WARN  — token_data['expires_at'] is in the past (access token expired;
+             may auto-refresh on next use, but worth flagging)
+    PASS  — token present, updated recently, not expired
+    """
+    cursor = conn.execute(
+        "SELECT tool_name, token_data, updated_at FROM oauth_tokens "
+        "WHERE tool_name = ANY(%s)",
+        (_OAUTH_TOOLS,),
+    )
+    rows = {row["tool_name"]: row for row in cursor.fetchall()}
+
+    results = []
+    now = datetime.now(timezone.utc)
+
+    for tool in _OAUTH_TOOLS:
+        if tool not in rows:
+            results.append(HealthCheck(
+                f"OAuth token: {tool}", "FAIL", "no row in oauth_tokens"
+            ))
+            continue
+
+        row = rows[tool]
+        updated_at = row["updated_at"]
+
+        # Staleness check
+        if isinstance(updated_at, datetime):
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            age_days = (now - updated_at).total_seconds() / 86400
+            if age_days > _OAUTH_STALE_DAYS:
+                results.append(HealthCheck(
+                    f"OAuth token: {tool}", "WARN",
+                    f"updated_at is {age_days:.0f} days ago — token may be stale",
+                ))
+                continue
+
+        # Access token expiry check
+        token_data = row["token_data"]
+        if isinstance(token_data, dict):
+            raw_exp = token_data.get("expires_at") or token_data.get("expiry")
+            if raw_exp:
+                try:
+                    if isinstance(raw_exp, str):
+                        exp_dt = datetime.fromisoformat(raw_exp.replace("Z", "+00:00"))
+                    elif isinstance(raw_exp, (int, float)):
+                        exp_dt = datetime.fromtimestamp(raw_exp, tz=timezone.utc)
+                    else:
+                        exp_dt = None
+
+                    if exp_dt is not None:
+                        if exp_dt.tzinfo is None:
+                            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                        if exp_dt < now:
+                            results.append(HealthCheck(
+                                f"OAuth token: {tool}", "WARN",
+                                f"expires_at in the past ({exp_dt.strftime('%Y-%m-%d %H:%M')} UTC)",
+                            ))
+                            continue
+                except (ValueError, OSError, OverflowError):
+                    pass  # unparseable expiry — don't FAIL, just skip the check
+
+        results.append(HealthCheck(f"OAuth token: {tool}", "PASS", "present and not expired"))
+
     return results

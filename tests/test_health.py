@@ -158,3 +158,64 @@ def test_check_sequences_pass_empty_table():
     conn = _make_seq_conn(seq_exists=True, last_value=1, max_id=None)
     results = check_sequences(conn, ["pending_actions"])
     assert results[0].status == "PASS"
+
+
+from datetime import datetime, timezone, timedelta
+
+
+def _make_oauth_conn(rows: list[dict]):
+    """Helper: conn whose execute().fetchall() returns rows."""
+    mock_conn = MagicMock()
+    mock_conn.execute.return_value.fetchall.return_value = rows
+    return mock_conn
+
+
+def test_check_oauth_tokens_all_present_and_valid():
+    from database.health import check_oauth_tokens
+    now = datetime.now(timezone.utc)
+    future = (now + timedelta(hours=2)).isoformat()
+    rows = [
+        {"tool_name": "jobber",     "token_data": {"expires_at": future}, "updated_at": now},
+        {"tool_name": "quickbooks", "token_data": {"expires_at": future}, "updated_at": now},
+        {"tool_name": "google",     "token_data": {},                     "updated_at": now},
+    ]
+    results = check_oauth_tokens(_make_oauth_conn(rows))
+    assert all(c.status == "PASS" for c in results), [c for c in results if c.status != "PASS"]
+
+
+def test_check_oauth_tokens_missing_tool():
+    from database.health import check_oauth_tokens
+    now = datetime.now(timezone.utc)
+    rows = [{"tool_name": "jobber", "token_data": {}, "updated_at": now}]
+    results = check_oauth_tokens(_make_oauth_conn(rows))
+    by_name = {c.name: c for c in results}
+    assert by_name["OAuth token: jobber"].status == "PASS"
+    assert by_name["OAuth token: quickbooks"].status == "FAIL"
+    assert by_name["OAuth token: google"].status == "FAIL"
+
+
+def test_check_oauth_tokens_stale_updated_at():
+    from database.health import check_oauth_tokens
+    stale = datetime.now(timezone.utc) - timedelta(days=10)
+    rows = [
+        {"tool_name": "jobber",     "token_data": {}, "updated_at": stale},
+        {"tool_name": "quickbooks", "token_data": {}, "updated_at": stale},
+        {"tool_name": "google",     "token_data": {}, "updated_at": stale},
+    ]
+    results = check_oauth_tokens(_make_oauth_conn(rows))
+    assert all(c.status == "WARN" for c in results)
+    assert all("days ago" in c.message for c in results)
+
+
+def test_check_oauth_tokens_expired_access_token():
+    from database.health import check_oauth_tokens
+    now = datetime.now(timezone.utc)
+    past = (now - timedelta(hours=1)).isoformat()
+    rows = [
+        {"tool_name": "jobber",     "token_data": {"expires_at": past}, "updated_at": now},
+        {"tool_name": "quickbooks", "token_data": {"expires_at": past}, "updated_at": now},
+        {"tool_name": "google",     "token_data": {"expires_at": past}, "updated_at": now},
+    ]
+    results = check_oauth_tokens(_make_oauth_conn(rows))
+    assert all(c.status == "WARN" for c in results)
+    assert all("expires_at" in c.message for c in results)
