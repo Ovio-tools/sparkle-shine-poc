@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from database.connection import get_connection, table_exists
+
 
 @dataclass
 class HealthCheck:
@@ -52,3 +54,18 @@ def render_table(title: str, checks: list[HealthCheck]) -> None:
     else:
         print("  Result: PASS")
     print()
+
+
+def check_connection() -> tuple[HealthCheck, object]:
+    """Open a DB connection and run SELECT 1.
+
+    Returns (HealthCheck, conn) on success, (HealthCheck, None) on failure.
+    Caller is responsible for closing the returned conn.
+    Connection-dependent checks should be skipped if conn is None.
+    """
+    try:
+        conn = get_connection()
+        conn.execute("SELECT 1")
+        return HealthCheck("DB connection", "PASS", ""), conn
+    except Exception as exc:
+        return HealthCheck("DB connection", "FAIL", str(exc)), None

@@ -51,3 +51,21 @@ def test_render_table_skip(capsys):
     captured = capsys.readouterr()
     assert "SKIP" in captured.out
     assert "Result: PASS" in captured.out  # SKIP is neutral, not a failure
+
+
+def test_check_connection_pass():
+    from database.health import check_connection, HealthCheck
+    mock_conn = MagicMock()
+    with patch("database.health.get_connection", return_value=mock_conn):
+        result_check, result_conn = check_connection()
+    assert result_check.status == "PASS"
+    assert result_conn is mock_conn
+
+
+def test_check_connection_fail():
+    from database.health import check_connection
+    with patch("database.health.get_connection", side_effect=Exception("connection refused")):
+        result_check, result_conn = check_connection()
+    assert result_check.status == "FAIL"
+    assert result_conn is None
+    assert "connection refused" in result_check.message
