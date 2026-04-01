@@ -162,7 +162,9 @@ class TestSimulationEngineInit(unittest.TestCase):
 
     def test_engine_initializes_with_defaults(self):
         from simulation.engine import SimulationEngine
-        with patch("signal.signal"):  # don't register real signal handlers in tests
+        from pathlib import Path
+        with patch("signal.signal"), \
+             patch("simulation.engine.CHECKPOINT_FILE", Path("/nonexistent/checkpoint.json")):
             engine = SimulationEngine()
         self.assertFalse(engine.dry_run)
         self.assertEqual(engine.speed, 1.0)
