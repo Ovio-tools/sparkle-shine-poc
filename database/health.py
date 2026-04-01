@@ -113,14 +113,10 @@ def check_sequences(conn, table_names: list[str]) -> list[HealthCheck]:
         if not cursor.fetchone():
             continue  # TEXT PK or no sequence — skip silently
 
-        # Get sequence state via pg_sequences view (last_value + is_called)
-        # is_called=false means the sequence hasn't been consumed yet —
-        # nextval() would return last_value, not last_value+1
-        cursor = conn.execute(
-            "SELECT last_value, is_called FROM pg_sequences "
-            "WHERE schemaname = 'public' AND sequencename = %s",
-            (seq_name,),
-        )
+        # Query the sequence object directly — pg_sequences lacks is_called.
+        # is_called=false means the sequence hasn't been consumed yet:
+        # nextval() would return start_value, so effective_last = last_value - 1.
+        cursor = conn.execute(f'SELECT last_value, is_called FROM "{seq_name}"')
         seq_row = cursor.fetchone()
         if seq_row is None:
             # Sequence disappeared between discovery and read — skip

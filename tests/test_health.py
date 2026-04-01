@@ -114,7 +114,7 @@ def _make_seq_conn(seq_exists: bool, last_value: int, max_id):
             cursor.fetchone.return_value = (
                 {"sequence_name": "pending_actions_id_seq"} if seq_exists else None
             )
-        elif "pg_sequences" in sql:
+        elif "is_called" in sql:
             cursor.fetchone.return_value = {"last_value": last_value, "is_called": True}
         elif "MAX(id)" in sql:
             cursor.fetchone.return_value = {"max_id": max_id}
