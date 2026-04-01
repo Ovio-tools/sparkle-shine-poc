@@ -416,7 +416,7 @@ class NewClientSetupGenerator:
             self._ensure_schema(conn)
             ready_deals = conn.execute("""
                 SELECT * FROM won_deals
-                WHERE start_date <= CURRENT_DATE
+                WHERE start_date::date <= CURRENT_DATE
                   AND canonical_id NOT IN (
                       SELECT canonical_id FROM cross_tool_mapping
                       WHERE tool_name = 'jobber'
