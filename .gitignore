@@ -11,3 +11,4 @@ token.json
 checkpoints/
 logs/
 .worktrees/
+.env.railway

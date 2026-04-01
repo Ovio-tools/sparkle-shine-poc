@@ -20,6 +20,7 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from credentials import get_credential
+from auth import token_store
 
 _TOKEN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".quickbooks_tokens.json")
 _AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2"
@@ -34,15 +35,11 @@ _EXPIRY_BUFFER = 300  # seconds
 # ------------------------------------------------------------------ #
 
 def _load_tokens() -> dict:
-    if os.path.exists(_TOKEN_FILE):
-        with open(_TOKEN_FILE) as f:
-            return json.load(f)
-    return {}
+    return token_store.load_tokens("quickbooks", _TOKEN_FILE)
 
 
 def _save_tokens(data: dict) -> None:
-    with open(_TOKEN_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    token_store.save_tokens("quickbooks", data, _TOKEN_FILE)
 
 
 def _basic_auth_header() -> str:
@@ -88,22 +85,27 @@ def _refresh_token(refresh_token: str) -> dict:
 def get_quickbooks_token() -> str:
     """
     Return a valid QBO access token.
-    Order: token file → auto-refresh → env-var fallback.
+    Order: DB/file → auto-refresh → QBO_REFRESH_TOKEN bootstrap → env-var fallback.
     """
     tokens = _load_tokens()
+
+    # Bootstrap from env var if no stored refresh token
+    if not tokens.get("refresh_token") and os.getenv("QBO_REFRESH_TOKEN"):
+        tokens = {"refresh_token": os.getenv("QBO_REFRESH_TOKEN")}
 
     if tokens.get("access_token"):
         expires_at = tokens.get("expires_at", 0)
         if time.time() < expires_at - _EXPIRY_BUFFER:
             return tokens["access_token"]
 
-        if tokens.get("refresh_token"):
-            try:
-                new_tokens = _refresh_token(tokens["refresh_token"])
-                _save_tokens(new_tokens)
-                return new_tokens["access_token"]
-            except Exception as exc:
-                print(f"[quickbooks] Token refresh failed ({exc}), falling back to env token.")
+    # Try to refresh if we have a refresh token (stored or bootstrapped)
+    if tokens.get("refresh_token"):
+        try:
+            new_tokens = _refresh_token(tokens["refresh_token"])
+            _save_tokens(new_tokens)
+            return new_tokens["access_token"]
+        except Exception as exc:
+            print(f"[quickbooks] Token refresh failed ({exc}), falling back to env token.")
 
     return get_credential("QBO_ACCESS_TOKEN")
 
@@ -118,6 +120,12 @@ def get_quickbooks_headers() -> dict:
 
 
 def get_company_id() -> str:
+    # Check env var override first, then stored tokens (realm_id saved during OAuth), then credential
+    if os.getenv("QBO_REALM_ID"):
+        return os.getenv("QBO_REALM_ID")
+    tokens = _load_tokens()
+    if tokens.get("realm_id"):
+        return tokens["realm_id"]
     return get_credential("QBO_COMPANY_ID")
 
 

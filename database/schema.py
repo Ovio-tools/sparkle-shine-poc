@@ -431,6 +431,17 @@ CREATE_TABLES = [
         synced_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
+
+    # ------------------------------------------------------------------ #
+    # 24. oauth_tokens — DB-backed storage for OAuth refresh/access tokens
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+        tool_name   TEXT PRIMARY KEY,
+        token_data  JSONB NOT NULL,
+        updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
 ]
 
 # Table name → human label (for __main__ summary only)
@@ -441,7 +452,7 @@ _TABLE_NAMES = [
     "calendar_events", "documents", "cross_tool_mapping",
     "daily_metrics_snapshot", "document_index",
     "poll_state", "automation_log", "pending_actions",
-    "won_deals", "gmail_metadata",
+    "won_deals", "gmail_metadata", "oauth_tokens",
 ]
 
 

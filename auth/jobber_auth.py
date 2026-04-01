@@ -20,6 +20,7 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from credentials import get_credential
+from auth import token_store
 
 _TOKEN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".jobber_tokens.json")
 _AUTHORIZE_URL = "https://api.getjobber.com/api/oauth/authorize"
@@ -34,15 +35,11 @@ _EXPIRY_BUFFER = 300  # seconds — refresh if within 5 min of expiry
 # ------------------------------------------------------------------ #
 
 def _load_tokens() -> dict:
-    if os.path.exists(_TOKEN_FILE):
-        with open(_TOKEN_FILE) as f:
-            return json.load(f)
-    return {}
+    return token_store.load_tokens("jobber", _TOKEN_FILE)
 
 
 def _save_tokens(data: dict) -> None:
-    with open(_TOKEN_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    token_store.save_tokens("jobber", data, _TOKEN_FILE)
 
 
 # ------------------------------------------------------------------ #
@@ -83,23 +80,27 @@ def _refresh_token(refresh_token: str) -> dict:
 def get_jobber_token() -> str:
     """
     Return a valid Jobber access token.
-    Order: token file → auto-refresh → env-var fallback.
+    Order: DB/file → auto-refresh → JOBBER_REFRESH_TOKEN bootstrap → env-var fallback.
     """
     tokens = _load_tokens()
+
+    # Bootstrap from env var if no stored refresh token
+    if not tokens.get("refresh_token") and os.getenv("JOBBER_REFRESH_TOKEN"):
+        tokens = {"refresh_token": os.getenv("JOBBER_REFRESH_TOKEN")}
 
     if tokens.get("access_token"):
         expires_at = tokens.get("expires_at", 0)
         if time.time() < expires_at - _EXPIRY_BUFFER:
             return tokens["access_token"]
 
-        # Try to refresh
-        if tokens.get("refresh_token"):
-            try:
-                new_tokens = _refresh_token(tokens["refresh_token"])
-                _save_tokens(new_tokens)
-                return new_tokens["access_token"]
-            except Exception as exc:
-                print(f"[jobber] Token refresh failed ({exc}), falling back to env token.")
+    # Try to refresh if we have a refresh token (stored or bootstrapped)
+    if tokens.get("refresh_token"):
+        try:
+            new_tokens = _refresh_token(tokens["refresh_token"])
+            _save_tokens(new_tokens)
+            return new_tokens["access_token"]
+        except Exception as exc:
+            print(f"[jobber] Token refresh failed ({exc}), falling back to env token.")
 
     # Fall back to the env-var token (e.g. sandbox pre-auth token)
     return get_credential("JOBBER_ACCESS_TOKEN")

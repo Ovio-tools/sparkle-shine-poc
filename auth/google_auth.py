@@ -8,6 +8,8 @@ Credentials file: credentials.json (path from GOOGLE_CREDENTIALS_FILE env var).
 get_google_credentials() auto-refreshes when the token is expired.
 If no valid token file exists it launches the browser consent flow.
 """
+from __future__ import annotations
+
 import os
 import sys
 import json
@@ -19,6 +21,7 @@ from googleapiclient.discovery import build
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from credentials import get_credential
+from auth import token_store
 
 _SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -66,16 +69,43 @@ def _token_file() -> str:
 # Core credential loader
 # ------------------------------------------------------------------ #
 
+def _build_creds_from_dict(data: dict) -> Credentials | None:
+    """Construct a Credentials object from a token dict (e.g. from DB or env vars)."""
+    try:
+        return Credentials(
+            token=data.get("token"),
+            refresh_token=data.get("refresh_token"),
+            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=data.get("client_id") or os.getenv("GOOGLE_CLIENT_ID") or get_credential("GOOGLE_CLIENT_ID"),
+            client_secret=data.get("client_secret") or os.getenv("GOOGLE_CLIENT_SECRET") or get_credential("GOOGLE_CLIENT_SECRET"),
+            scopes=data.get("scopes", _SCOPES),
+        )
+    except Exception:
+        return None
+
+
 def get_google_credentials() -> Credentials:
     """
     Return valid Google Credentials.
-    - Loads token.json if present and refreshes if expired.
-    - Falls back to browser consent flow if no valid token exists.
+    Order: GOOGLE_REFRESH_TOKEN env var → DB → token.json → browser consent flow.
+    After any refresh, updated credentials are saved to DB.
     """
     token_path = _token_file()
     creds = None
 
-    if os.path.exists(token_path):
+    # Tier 1: bootstrap from GOOGLE_REFRESH_TOKEN env var
+    refresh_token_env = os.getenv("GOOGLE_REFRESH_TOKEN")
+    if refresh_token_env:
+        creds = _build_creds_from_dict({"refresh_token": refresh_token_env})
+
+    # Tier 2: load from DB
+    if not creds or not (creds.valid or creds.refresh_token):
+        db_data = token_store.load_tokens("google")
+        if db_data:
+            creds = _build_creds_from_dict(db_data)
+
+    # Tier 3: token.json (only if env/DB didn't yield usable creds)
+    if (not creds or not (creds.valid or creds.refresh_token)) and os.path.exists(token_path):
         # Read the raw token to check what scopes were actually granted
         with open(token_path) as _f:
             _raw = json.load(_f)
@@ -102,6 +132,9 @@ def get_google_credentials() -> Credentials:
 
         with open(token_path, "w") as f:
             f.write(creds.to_json())
+
+        # Save refreshed/new credentials to DB
+        token_store.save_tokens("google", json.loads(creds.to_json()))
 
     return creds
 
