@@ -54,12 +54,40 @@ def _pipedrive_base(session) -> str:
     return base
 
 
-def _next_lead_id_number(db) -> int:
+def _allocate_lead_id(db, hubspot_id: str) -> str:
     """
-    Return the next available integer for a SS-LEAD-NNNN canonical ID.
-    Checks both the leads table and any existing LEAD entries in
-    cross_tool_mapping to avoid collisions across both sources.
+    Atomically allocate the next SS-LEAD-NNNN canonical ID and register
+    the HubSpot mapping in a single transaction.
+
+    Uses SELECT ... FOR UPDATE on the highest existing LEAD row in
+    cross_tool_mapping to serialize concurrent callers, preventing two
+    runners from allocating the same ID.
+
+    If this hubspot_id is already mapped, returns the existing canonical ID
+    (idempotent on retry).
+
+    Returns the canonical_id string (e.g. "SS-LEAD-0314").
     """
+    # Check if this HubSpot contact already has a canonical ID.
+    existing = db.execute(
+        "SELECT canonical_id FROM cross_tool_mapping "
+        "WHERE tool_name = 'hubspot' AND tool_specific_id = %s",
+        (hubspot_id,),
+    ).fetchone()
+    if existing:
+        return existing["canonical_id"]
+
+    # Lock the highest LEAD row to serialize concurrent ID allocation.
+    # This prevents two runners from reading the same max and generating
+    # duplicate IDs.  The lock is held until this transaction commits.
+    db.execute(
+        "SELECT canonical_id FROM cross_tool_mapping "
+        "WHERE entity_type = 'LEAD' "
+        "ORDER BY canonical_id DESC LIMIT 1 "
+        "FOR UPDATE"
+    )
+
+    # Compute next ID from both sources.
     row = db.execute("SELECT id FROM leads ORDER BY id DESC LIMIT 1").fetchone()
     leads_max = int(row["id"].split("-")[-1]) if row else 0
 
@@ -69,7 +97,21 @@ def _next_lead_id_number(db) -> int:
     ).fetchone()
     mapping_max = int(row2["canonical_id"].split("-")[-1]) if row2 else 0
 
-    return max(leads_max, mapping_max) + 1
+    next_n = max(leads_max, mapping_max) + 1
+    canonical_id = f"SS-LEAD-{next_n:04d}"
+
+    # Insert the HubSpot mapping atomically with the ID allocation.
+    db.execute(
+        """
+        INSERT INTO cross_tool_mapping
+            (canonical_id, entity_type, tool_name, tool_specific_id, synced_at)
+        VALUES (%s, 'LEAD', 'hubspot', %s, CURRENT_TIMESTAMP)
+        """,
+        (canonical_id, hubspot_id),
+    )
+    db.commit()
+
+    return canonical_id
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,40 +168,19 @@ class HubSpotQualifiedSync(BaseAutomation):
         synced = []
         failed = []
 
-        # Atomically claim the full range of canonical IDs for this batch.
-        # psycopg2 runs with autocommit=False, so an implicit transaction is
-        # already open.  The MAX read and the pre-insert of each contact's
-        # HubSpot mapping both run inside that transaction, preventing
-        # concurrent runners from observing the same highest ID and
-        # generating duplicate SS-LEAD-NNNN values.  ON CONFLICT DO UPDATE
-        # handles any rare race that slips through.
-        # _register_mappings will upsert the hubspot row (same data, no-op).
-        if not self.dry_run and truly_new:
+        # Allocate canonical IDs one at a time using _allocate_lead_id(),
+        # which serializes concurrent runners via SELECT ... FOR UPDATE.
+        # Each ID is committed atomically with its HubSpot mapping before
+        # proceeding to Pipedrive creation, so a partial failure can never
+        # leave IDs misaligned across contacts.
+        for contact in truly_new:
+            canonical_id = None
             try:
-                next_id_n = _next_lead_id_number(self.db)
-                for i, contact in enumerate(truly_new):
-                    self.db.execute(
-                        """
-                        INSERT INTO cross_tool_mapping
-                            (canonical_id, entity_type, tool_name,
-                             tool_specific_id, synced_at)
-                        VALUES (%s, 'LEAD', 'hubspot', %s, CURRENT_TIMESTAMP)
-                        ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
-                            tool_specific_id = excluded.tool_specific_id,
-                            synced_at        = CURRENT_TIMESTAMP
-                        """,
-                        (f"SS-LEAD-{next_id_n + i:04d}", contact["hubspot_id"]),
-                    )
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-                raise
-        else:
-            next_id_n = _next_lead_id_number(self.db)
+                if self.dry_run:
+                    canonical_id = f"SS-LEAD-DRY-{contact['hubspot_id'][:6]}"
+                else:
+                    canonical_id = _allocate_lead_id(self.db, contact["hubspot_id"])
 
-        for i, contact in enumerate(truly_new):
-            canonical_id = f"SS-LEAD-{next_id_n + i:04d}"
-            try:
                 person_id, deal_id = self._create_pipedrive_records(contact, canonical_id)
                 self._register_mappings(canonical_id, contact["hubspot_id"], person_id, deal_id)
                 synced.append({
@@ -187,7 +208,7 @@ class HubSpotQualifiedSync(BaseAutomation):
                     error_message=str(exc),
                     trigger_source=trigger_source,
                     trigger_detail={
-                        "canonical_id": canonical_id,
+                        "canonical_id": canonical_id or "unallocated",
                         "hubspot_id":   contact["hubspot_id"],
                     },
                 )
@@ -337,6 +358,9 @@ class HubSpotQualifiedSync(BaseAutomation):
                 "client_type", "lead_source_detail", "neighborhood",
                 "lifetime_value", "company",
             ],
+            # Stable sort order prevents ID misalignment if the contact list
+            # is processed across retries or concurrent runners.
+            sorts=[{"propertyName": "createdate", "direction": "ASCENDING"}],
             limit=200,
         )
 
@@ -627,8 +651,11 @@ class HubSpotQualifiedSync(BaseAutomation):
                     )
 
         # All checks passed — write all three rows atomically.
-        # psycopg2's implicit transaction (autocommit=False) protects this
-        # block; ON CONFLICT DO UPDATE handles any concurrent insert.
+        # ON CONFLICT DO NOTHING is used instead of DO UPDATE to prevent
+        # silent overwrites when concurrent runners race on the same ID.
+        # The collision guard above catches cross-canonical conflicts;
+        # DO NOTHING handles the benign case where the exact same row
+        # already exists (idempotent retry).
         entity_type = canonical_id.split("-")[1]  # SS-LEAD-0213 → LEAD
         try:
             for tool_name, tool_id in rows_to_write:
@@ -637,9 +664,7 @@ class HubSpotQualifiedSync(BaseAutomation):
                     INSERT INTO cross_tool_mapping
                         (canonical_id, entity_type, tool_name, tool_specific_id, synced_at)
                     VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                    ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
-                        tool_specific_id = excluded.tool_specific_id,
-                        synced_at        = CURRENT_TIMESTAMP
+                    ON CONFLICT(canonical_id, tool_name) DO NOTHING
                     """,
                     (canonical_id, entity_type, tool_name, tool_id),
                 )

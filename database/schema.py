@@ -290,7 +290,8 @@ CREATE_TABLES = [
         tool_specific_id    TEXT NOT NULL,
         tool_specific_url   TEXT,
         synced_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(canonical_id, tool_name)
+        UNIQUE(canonical_id, tool_name),
+        UNIQUE(entity_type, tool_name, tool_specific_id)
     )
     """,
 
