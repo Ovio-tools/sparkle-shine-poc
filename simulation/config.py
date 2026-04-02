@@ -21,6 +21,16 @@ DAILY_VOLUMES = {
         # Austin market is mid-range. Using 3-8 as base before
         # seasonal/day-of-week adjustments.
 
+        "commercial_lead_fraction": 0.30,
+        # ESTIMATED -- reasoning: 30% of inbound leads are commercial.
+        # Austin market has a strong small-business sector (tech offices,
+        # medical practices, restaurants). ISSA Cleaning Industry report
+        # shows 25-35% commercial mix for diversified cleaning companies.
+        # Using 30% to reflect Sparkle & Shine's growing commercial
+        # portfolio (~8-10 active commercial clients out of ~190 total).
+        # Previously hardcoded at 0.15, which underrepresented commercial
+        # leads relative to the company's stated growth strategy.
+
         "sql_fraction": 0.35,
         # ESTIMATED -- reasoning: 35% of cleaning inquiries are
         # serious enough to warrant a sales conversation. Higher
@@ -262,11 +272,16 @@ def config_math_trace():
     Target: net +3 to +5 clients per month (slight growth).
     If this shows negative growth, the config is broken.
     """
-    avg_daily_contacts = (DAILY_VOLUMES["new_contacts"]["base_min"]
-                          + DAILY_VOLUMES["new_contacts"]["base_max"]) / 2
+    contact_config = DAILY_VOLUMES["new_contacts"]
+    avg_daily_contacts = (contact_config["base_min"]
+                          + contact_config["base_max"]) / 2
     avg_monthly_contacts = avg_daily_contacts * 22  # ~22 business days
 
-    sqls_per_month = avg_monthly_contacts * DAILY_VOLUMES["new_contacts"]["sql_fraction"]
+    commercial_fraction = contact_config["commercial_lead_fraction"]
+    monthly_commercial_leads = avg_monthly_contacts * commercial_fraction
+    monthly_residential_leads = avg_monthly_contacts * (1 - commercial_fraction)
+
+    sqls_per_month = avg_monthly_contacts * contact_config["sql_fraction"]
 
     deal_config = DAILY_VOLUMES["deal_progression"]
     loss_per_stage = deal_config["lost_probability_per_stage"]
@@ -293,7 +308,9 @@ def config_math_trace():
     print("=" * 55)
     print(f"  Avg daily contacts:          {avg_daily_contacts:.1f}")
     print(f"  Monthly contacts (~22 days): {avg_monthly_contacts:.0f}")
-    print(f"  Monthly SQLs (x{DAILY_VOLUMES['new_contacts']['sql_fraction']:.0%}):       {sqls_per_month:.0f}")
+    print(f"    Commercial ({commercial_fraction:.0%}):           {monthly_commercial_leads:.0f}")
+    print(f"    Residential ({1 - commercial_fraction:.0%}):          {monthly_residential_leads:.0f}")
+    print(f"  Monthly SQLs (x{contact_config['sql_fraction']:.0%}):       {sqls_per_month:.0f}")
     print(f"  Pipeline survival to Negotiation: {cumulative_loss:.0%}")
     print(f"  Deals reaching Negotiation:  {deals_reaching_negotiation:.0f}")
     print(f"  Won deals (x{deal_config['won_probability_from_negotiation']:.0%}):          {wins_per_month:.1f}")

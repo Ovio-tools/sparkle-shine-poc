@@ -242,7 +242,8 @@ class ContactGenerator:
         last_name = random.choice(names["last_names"])
         email = self._generate_email(first_name, last_name)
         phone = self._generate_phone()
-        client_type = "commercial" if random.random() < 0.15 else "residential"
+        commercial_fraction = DAILY_VOLUMES["new_contacts"]["commercial_lead_fraction"]
+        client_type = "commercial" if random.random() < commercial_fraction else "residential"
         lead_source = self._weighted_choice(_LEAD_SOURCES)
         crew_zone, zip_code, street = self._pick_address(addresses)
         house_number = random.randint(100, 9999)
