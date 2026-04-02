@@ -27,16 +27,17 @@ def get_pipedrive_session() -> requests.Session:
 
     session = requests.Session()
     session.headers.update({"x-api-token": token})
-    session.base_url = base_url  # type: ignore[attr-defined]
 
     # Normalise: strip trailing slash, append /v1 only if the URL doesn't
     # already contain a version segment (e.g. sandbox URLs end with /api).
-    ping_base = base_url.rstrip("/")
-    if not any(seg in ping_base for seg in ("/v1", "/v2")):
-        ping_base = f"{ping_base}/v1"
+    normalised = base_url.rstrip("/")
+    if not any(seg in normalised for seg in ("/v1", "/v2")):
+        normalised = f"{normalised}/v1"
+
+    session.base_url = normalised  # type: ignore[attr-defined]
 
     try:
-        resp = session.get(f"{ping_base}/users/me", timeout=10)
+        resp = session.get(f"{normalised}/users/me", timeout=10)
         resp.raise_for_status()
     except Exception as exc:
         raise RuntimeError(f"Pipedrive auth failed: {exc}") from exc

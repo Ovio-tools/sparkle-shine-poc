@@ -43,6 +43,7 @@ load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from auth.token_store import load_tokens
 from intelligence.logging_config import setup_logging
 
 logger = setup_logging("hardening.token_preflight")
@@ -94,20 +95,18 @@ class PreflightResult:
 
 def check_jobber_token() -> TokenCheck:
     """
-    Load .jobber_tokens.json. Check if access_token exists.
+    Load Jobber tokens via token_store (DB -> JSON file -> env vars).
     Make a minimal GraphQL query: { account { name } }
     If 401: try refresh. If refresh works, return "ok" with warning.
     If refresh fails: return "expired" with action instructions.
     """
-    if not os.path.exists(_JOBBER_TOKEN_FILE):
+    tokens = load_tokens("jobber", _JOBBER_TOKEN_FILE)
+    if not tokens:
         return TokenCheck(
             "Jobber", "error",
-            "Token file .jobber_tokens.json not found",
+            "No Jobber tokens found (checked DB, file, env vars)",
             action="Run: python -m auth.jobber_auth",
         )
-
-    with open(_JOBBER_TOKEN_FILE) as f:
-        tokens = json.load(f)
 
     access_token = tokens.get("access_token")
     if not access_token:
@@ -166,20 +165,18 @@ def _jobber_try_refresh(tokens: dict) -> TokenCheck:
 
 def check_quickbooks_token() -> TokenCheck:
     """
-    Load .quickbooks_tokens.json. Check token age.
+    Load QuickBooks tokens via token_store (DB -> JSON file -> env vars).
     If access token has < 5 min remaining: refresh proactively.
     Make a minimal query: GET /v3/company/{id}/companyinfo/{id}
     Handle 401 same as Jobber.
     """
-    if not os.path.exists(_QBO_TOKEN_FILE):
+    tokens = load_tokens("quickbooks", _QBO_TOKEN_FILE)
+    if not tokens:
         return TokenCheck(
             "QuickBooks", "error",
-            "Token file .quickbooks_tokens.json not found",
+            "No QuickBooks tokens found (checked DB, file, env vars)",
             action="Run: python -m auth.quickbooks_auth",
         )
-
-    with open(_QBO_TOKEN_FILE) as f:
-        tokens = json.load(f)
 
     access_token = tokens.get("access_token")
     if not access_token:
@@ -257,25 +254,12 @@ def _qbo_try_refresh(tokens: dict) -> TokenCheck | None:
 
 def check_google_token() -> TokenCheck:
     """
-    Load token.json (Google OAuth). Check if refresh token exists.
+    Load Google tokens via token_store (DB -> JSON file -> env vars).
     Make a minimal call: GET /drive/v3/about?fields=user
     If 401/expired: attempt refresh via google.auth.transport.requests.Request().
     IMPORTANT: Warn if the Google Cloud app is still in "Testing" mode
     (tokens expire after 7 days). Check by looking at token file age.
     """
-    token_path = _GOOGLE_TOKEN_FILE
-    # Try alternate location one level up
-    alt_path = os.path.join(os.path.dirname(_PROJECT_ROOT), "token.json")
-    if not os.path.exists(token_path) and os.path.exists(alt_path):
-        token_path = alt_path
-
-    if not os.path.exists(token_path):
-        return TokenCheck(
-            "Google", "error",
-            "token.json not found",
-            action="Run: python -m auth.google_auth",
-        )
-
     try:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
@@ -283,22 +267,27 @@ def check_google_token() -> TokenCheck:
     except ImportError as exc:
         return TokenCheck("Google", "error", f"google-auth library not installed: {exc}")
 
-    try:
-        with open(token_path) as f:
-            raw = json.load(f)
-    except Exception as exc:
-        return TokenCheck("Google", "error", f"Cannot read token.json: {exc}")
+    raw = load_tokens("google", _GOOGLE_TOKEN_FILE)
+    if not raw:
+        return TokenCheck(
+            "Google", "error",
+            "No Google tokens found (checked DB, file, env vars)",
+            action="Run: python -m auth.google_auth",
+        )
 
     if not raw.get("refresh_token"):
         return TokenCheck(
             "Google", "expired",
-            "No refresh token in token.json",
+            "No refresh token in stored Google tokens",
             action="Run: python -m auth.google_auth",
         )
 
-    # Check file age for Testing-mode warning
-    file_age_days = (time.time() - os.path.getmtime(token_path)) / (24 * 3600)
-    testing_mode_warn = file_age_days >= _GOOGLE_TESTING_WARN_DAYS
+    # Check file age for Testing-mode warning (only if file exists)
+    testing_mode_warn = False
+    token_path = _GOOGLE_TOKEN_FILE
+    if os.path.exists(token_path):
+        file_age_days = (time.time() - os.path.getmtime(token_path)) / (24 * 3600)
+        testing_mode_warn = file_age_days >= _GOOGLE_TESTING_WARN_DAYS
 
     # Load credentials and refresh if needed
     scopes = raw.get("scopes", [])
@@ -307,16 +296,16 @@ def check_google_token() -> TokenCheck:
     try:
         creds = Credentials.from_authorized_user_info(raw, scopes)
     except Exception as exc:
-        return TokenCheck("Google", "error", f"Cannot parse token.json: {exc}")
+        return TokenCheck("Google", "error", f"Cannot parse Google token data: {exc}")
 
     # If expired, try to refresh
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                # Save refreshed token
-                with open(token_path, "w") as f:
-                    f.write(creds.to_json())
+                # Save refreshed token to DB and file
+                from auth.token_store import save_tokens
+                save_tokens("google", json.loads(creds.to_json()), _GOOGLE_TOKEN_FILE)
                 logger.info("Google token refreshed during preflight")
             except RefreshError as exc:
                 return TokenCheck(

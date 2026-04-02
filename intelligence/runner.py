@@ -138,7 +138,7 @@ class PipelineResult:
 # Stage 0: Token preflight helpers
 # ---------------------------------------------------------------------------
 
-_SYNCER_TIMEOUT_SECONDS = 120
+_SYNCER_TIMEOUT_SECONDS = 600  # 10 min; Asana full sync needs ~520s at 2.2 req/s
 _OAUTH_TOOLS = {"jobber", "quickbooks", "google"}
 _PERMANENT_TOKEN_TOOLS = {"hubspot", "pipedrive", "asana", "mailchimp", "slack"}
 

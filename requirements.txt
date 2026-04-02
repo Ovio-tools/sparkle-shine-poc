@@ -9,4 +9,5 @@ hubspot-api-client
 mailchimp-marketing
 asana
 slack-sdk
+anthropic
 pytest
