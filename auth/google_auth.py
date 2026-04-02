@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import logging
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -22,6 +23,8 @@ from googleapiclient.discovery import build
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from credentials import get_credential
 from auth import token_store
+
+logger = logging.getLogger(__name__)
 
 _SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -87,54 +90,75 @@ def _build_creds_from_dict(data: dict) -> Credentials | None:
 def get_google_credentials() -> Credentials:
     """
     Return valid Google Credentials.
-    Order: GOOGLE_REFRESH_TOKEN env var → DB → token.json → browser consent flow.
+    Order: DB -> JSON file -> env vars (all via token_store) -> browser consent flow.
     After any refresh, updated credentials are saved to DB.
     """
     token_path = _token_file()
     creds = None
 
-    # Tier 1: bootstrap from GOOGLE_REFRESH_TOKEN env var
-    refresh_token_env = os.getenv("GOOGLE_REFRESH_TOKEN")
-    if refresh_token_env:
-        creds = _build_creds_from_dict({"refresh_token": refresh_token_env})
+    # Load tokens via token_store (DB -> JSON -> env vars)
+    token_data = token_store.load_tokens(
+        "google", token_path if os.path.exists(token_path) else None
+    )
 
-    # Tier 2: load from DB
-    if not creds or not (creds.valid or creds.refresh_token):
-        db_data = token_store.load_tokens("google")
-        if db_data:
-            creds = _build_creds_from_dict(db_data)
-
-    # Tier 3: token.json (only if env/DB didn't yield usable creds)
-    if (not creds or not (creds.valid or creds.refresh_token)) and os.path.exists(token_path):
-        # Read the raw token to check what scopes were actually granted
-        with open(token_path) as _f:
-            _raw = json.load(_f)
-        _stored_raw = _raw.get("scopes", "")
+    # Scope check: only applies when data came from token.json (includes "scopes" key).
+    # DB and env var dicts don't have a "scopes" key, so this is skipped for them.
+    if token_data.get("refresh_token") and "scopes" in token_data:
+        _stored_raw = token_data["scopes"]
         if isinstance(_stored_raw, list):
             _stored_scopes = set(_stored_raw)
         else:
             _stored_scopes = set(str(_stored_raw).split())
+        if not all(s in _stored_scopes for s in _SCOPES):
+            # Scopes insufficient — delete stale token.json, fall through to browser flow
+            if os.path.exists(token_path):
+                os.remove(token_path)
+            token_data = {}
 
-        if all(s in _stored_scopes for s in _SCOPES):
-            creds = Credentials.from_authorized_user_file(token_path, _SCOPES)
-        else:
-            # Scopes insufficient — delete stale token to force re-auth
-            os.remove(token_path)
+    if token_data.get("refresh_token"):
+        creds = _build_creds_from_dict(token_data)
 
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+        if creds and creds.refresh_token and (not creds.token or creds.expired):
+            try:
+                creds.refresh(Request())
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Google token refresh failed: {exc}. "
+                    "Check that GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and "
+                    "GOOGLE_REFRESH_TOKEN are correct."
+                ) from exc
+
+            # Save refreshed credentials to token.json (local dev convenience)
+            try:
+                with open(token_path, "w") as f:
+                    f.write(creds.to_json())
+            except (OSError, PermissionError):
+                logger.debug("[google] Could not write token.json (read-only filesystem?)")
+
+            # Save refreshed credentials to DB (primary persistence)
+            token_store.save_tokens("google", json.loads(creds.to_json()))
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                _credentials_file(), _SCOPES
-            )
+            # Browser consent flow — only works locally with credentials.json
+            try:
+                creds_file = _credentials_file()
+            except FileNotFoundError:
+                raise RuntimeError(
+                    "No valid Google credentials available. "
+                    "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN "
+                    "as environment variables (for Railway/CI), or provide credentials.json "
+                    "for the browser consent flow (local dev)."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(creds_file, _SCOPES)
             creds = flow.run_local_server(port=8025, open_browser=True)
 
-        with open(token_path, "w") as f:
-            f.write(creds.to_json())
+            try:
+                with open(token_path, "w") as f:
+                    f.write(creds.to_json())
+            except (OSError, PermissionError):
+                logger.debug("[google] Could not write token.json (read-only filesystem?)")
 
-        # Save refreshed/new credentials to DB
-        token_store.save_tokens("google", json.loads(creds.to_json()))
+            token_store.save_tokens("google", json.loads(creds.to_json()))
 
     return creds
 
