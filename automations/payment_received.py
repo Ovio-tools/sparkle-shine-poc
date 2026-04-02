@@ -129,30 +129,48 @@ class PaymentReceived(BaseAutomation):
             )
 
         # ── Action 3: Slack notification ──────────────────────────────────────
-        try:
-            self._action_slack_notification(ctx, new_outstanding)
-            self.log_action(
-                run_id, "post_slack_notification",
-                "slack:channel:operations",
-                "success",
-                trigger_source=trigger_source,
-            )
-        except Exception as exc:
-            self.log_action(
-                run_id, "post_slack_notification", None, "failed",
-                error_message=str(exc), trigger_source=trigger_source,
-            )
+        # Guard: skip if a Slack notification was already posted for this payment
+        # (protects against partial-run retries where Actions 1-2 logged but
+        # the run_id changed on the second attempt).
+        already_notified = self.db.execute(
+            """
+            SELECT 1 FROM automation_log
+            WHERE trigger_source = %s
+              AND automation_name = 'PaymentReceived'
+              AND action_name = 'post_slack_notification'
+              AND status = 'success'
+            LIMIT 1
+            """,
+            (trigger_source,),
+        ).fetchone()
+        if already_notified is None:
+            try:
+                self._action_slack_notification(ctx, new_outstanding)
+                self.log_action(
+                    run_id, "post_slack_notification",
+                    "slack:channel:operations",
+                    "success",
+                    trigger_source=trigger_source,
+                )
+            except Exception as exc:
+                self.log_action(
+                    run_id, "post_slack_notification", None, "failed",
+                    error_message=str(exc), trigger_source=trigger_source,
+                )
 
     # ── Idempotency ────────────────────────────────────────────────────────────
 
     def _already_processed(self, trigger_source: str) -> bool:
-        """Return True if automation_log already has a successful run for this trigger."""
+        """Return True if automation_log already has any record for this trigger.
+
+        Checks for any status (not just 'success') to prevent re-entry when a
+        prior run is still in progress or partially completed.
+        """
         row = self.db.execute(
             """
             SELECT 1 FROM automation_log
             WHERE trigger_source = %s
               AND automation_name = 'PaymentReceived'
-              AND status = 'success'
             LIMIT 1
             """,
             (trigger_source,),
