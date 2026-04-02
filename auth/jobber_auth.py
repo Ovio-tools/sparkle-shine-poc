@@ -1,14 +1,16 @@
 """
 Jobber authentication.
 
-Token precedence:
-  1. .jobber_tokens.json  (written by run_initial_auth or a prior refresh)
-  2. JOBBER_ACCESS_TOKEN in .env  (pre-authorised token supplied by the sandbox)
+Token precedence (via token_store four-tier fallback):
+  1. PostgreSQL DB (primary, written after successful refresh)
+  2. .jobber_tokens.json (local dev fallback)
+  3. JOBBER_REFRESH_TOKEN env var (Railway bootstrap)
+  4. JOBBER_ACCESS_TOKEN env var (stale last resort after refresh failure)
 
 Auto-refresh fires when the stored token is within 5 minutes of expiry.
-If no refresh_token is available the env-var token is returned as-is.
 """
 import json
+import logging
 import os
 import sys
 import time
@@ -17,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from credentials import get_credential
@@ -80,30 +84,44 @@ def _refresh_token(refresh_token: str) -> dict:
 def get_jobber_token() -> str:
     """
     Return a valid Jobber access token.
-    Order: DB/file → auto-refresh → JOBBER_REFRESH_TOKEN bootstrap → env-var fallback.
+    Order: DB/file/env (via token_store) → auto-refresh → stale env-var fallback.
     """
     tokens = _load_tokens()
-
-    # Bootstrap from env var if no stored refresh token
-    if not tokens.get("refresh_token") and os.getenv("JOBBER_REFRESH_TOKEN"):
-        tokens = {"refresh_token": os.getenv("JOBBER_REFRESH_TOKEN")}
 
     if tokens.get("access_token"):
         expires_at = tokens.get("expires_at", 0)
         if time.time() < expires_at - _EXPIRY_BUFFER:
             return tokens["access_token"]
 
-    # Try to refresh if we have a refresh token (stored or bootstrapped)
+    # Try to refresh if we have a refresh token
     if tokens.get("refresh_token"):
         try:
             new_tokens = _refresh_token(tokens["refresh_token"])
             _save_tokens(new_tokens)
             return new_tokens["access_token"]
+        except requests.HTTPError as exc:
+            logger.warning(
+                "[jobber] Token refresh failed: HTTP %s — %s",
+                exc.response.status_code if exc.response is not None else "?",
+                exc.response.text[:300] if exc.response is not None else str(exc),
+            )
         except Exception as exc:
-            print(f"[jobber] Token refresh failed ({exc}), falling back to env token.")
+            logger.warning("[jobber] Token refresh failed: %s", exc)
 
-    # Fall back to the env-var token (e.g. sandbox pre-auth token)
-    return get_credential("JOBBER_ACCESS_TOKEN")
+    # Last resort: stale access token from env var
+    stale_token = os.getenv("JOBBER_ACCESS_TOKEN")
+    if stale_token:
+        logger.warning(
+            "[jobber] Using JOBBER_ACCESS_TOKEN env var as last resort (may be stale)"
+        )
+        return stale_token
+
+    raise RuntimeError(
+        "No valid Jobber token available. "
+        "Set JOBBER_REFRESH_TOKEN (plus JOBBER_CLIENT_ID and JOBBER_CLIENT_SECRET) "
+        "in environment variables to enable token refresh. "
+        "Or provide JOBBER_ACCESS_TOKEN as a temporary fallback."
+    )
 
 
 def get_jobber_session() -> requests.Session:
