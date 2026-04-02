@@ -1,5 +1,5 @@
 """
-Three-tier token storage: DB -> JSON file -> empty dict.
+Four-tier token storage: DB -> JSON file -> env vars -> empty dict.
 
 load_tokens(tool_name, json_path=None) -> dict
 save_tokens(tool_name, token_data, json_path=None) -> None
@@ -57,8 +57,27 @@ def _save_to_db(tool_name: str, token_data: dict) -> None:
         logger.warning("[token_store] DB save failed for %s: %s", tool_name, exc)
 
 
+_ENV_PREFIX_MAP = {
+    "quickbooks": "QBO",
+}
+
+
+def _load_from_env(tool_name: str) -> dict | None:
+    """Load tokens from environment variables (bootstrap-only fallback)."""
+    prefix = _ENV_PREFIX_MAP.get(tool_name, tool_name.upper())
+    refresh = os.getenv(f"{prefix}_REFRESH_TOKEN")
+    if not refresh:
+        return None
+    result = {"refresh_token": refresh}
+    access = os.getenv(f"{prefix}_ACCESS_TOKEN")
+    if access:
+        result["access_token"] = access
+    logger.debug("[token_store] Bootstrapped %s tokens from env vars", tool_name)
+    return result
+
+
 def load_tokens(tool_name: str, json_path: str | None = None) -> dict:
-    """Load tokens using three-tier fallback: DB -> JSON file -> empty dict."""
+    """Load tokens using four-tier fallback: DB -> JSON file -> env vars -> empty dict."""
     data = _load_from_db(tool_name)
     if data:
         return data
@@ -69,6 +88,10 @@ def load_tokens(tool_name: str, json_path: str | None = None) -> dict:
                 return json.load(f)
         except Exception as exc:
             logger.debug("[token_store] JSON load failed for %s: %s", json_path, exc)
+
+    data = _load_from_env(tool_name)
+    if data:
+        return data
 
     return {}
 
