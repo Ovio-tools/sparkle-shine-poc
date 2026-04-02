@@ -1,9 +1,11 @@
 """
 QuickBooks Online (QBO) authentication.
 
-Token precedence:
-  1. .quickbooks_tokens.json  (written by run_initial_auth or a prior refresh)
-  2. QBO_ACCESS_TOKEN in .env  (pre-authorised sandbox token)
+Token precedence (via token_store four-tier fallback):
+  1. PostgreSQL DB (primary, written after successful refresh)
+  2. .quickbooks_tokens.json (local dev fallback)
+  3. QBO_REFRESH_TOKEN env var (Railway bootstrap)
+  4. QBO_ACCESS_TOKEN env var (stale last resort after refresh failure)
 
 Auto-refresh fires when the stored token is within 5 minutes of expiry.
 """
@@ -16,7 +18,11 @@ from base64 import b64encode
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlencode, urlparse, parse_qs
 
+import logging
+
 import requests
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from credentials import get_credential
@@ -85,29 +91,44 @@ def _refresh_token(refresh_token: str) -> dict:
 def get_quickbooks_token() -> str:
     """
     Return a valid QBO access token.
-    Order: DB/file → auto-refresh → QBO_REFRESH_TOKEN bootstrap → env-var fallback.
+    Order: DB/file/env (via token_store) → auto-refresh → stale env-var fallback.
     """
     tokens = _load_tokens()
-
-    # Bootstrap from env var if no stored refresh token
-    if not tokens.get("refresh_token") and os.getenv("QBO_REFRESH_TOKEN"):
-        tokens = {"refresh_token": os.getenv("QBO_REFRESH_TOKEN")}
 
     if tokens.get("access_token"):
         expires_at = tokens.get("expires_at", 0)
         if time.time() < expires_at - _EXPIRY_BUFFER:
             return tokens["access_token"]
 
-    # Try to refresh if we have a refresh token (stored or bootstrapped)
+    # Try to refresh if we have a refresh token
     if tokens.get("refresh_token"):
         try:
             new_tokens = _refresh_token(tokens["refresh_token"])
             _save_tokens(new_tokens)
             return new_tokens["access_token"]
+        except requests.HTTPError as exc:
+            logger.warning(
+                "[quickbooks] Token refresh failed: HTTP %s — %s",
+                exc.response.status_code if exc.response is not None else "?",
+                exc.response.text[:300] if exc.response is not None else str(exc),
+            )
         except Exception as exc:
-            print(f"[quickbooks] Token refresh failed ({exc}), falling back to env token.")
+            logger.warning("[quickbooks] Token refresh failed: %s", exc)
 
-    return get_credential("QBO_ACCESS_TOKEN")
+    # Last resort: stale access token from env var
+    stale_token = os.getenv("QBO_ACCESS_TOKEN")
+    if stale_token:
+        logger.warning(
+            "[quickbooks] Using QBO_ACCESS_TOKEN env var as last resort (may be stale)"
+        )
+        return stale_token
+
+    raise RuntimeError(
+        "No valid QuickBooks token available. "
+        "Set QBO_REFRESH_TOKEN (plus QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET) "
+        "in environment variables to enable token refresh. "
+        "Or provide QBO_ACCESS_TOKEN as a temporary fallback."
+    )
 
 
 def get_quickbooks_headers() -> dict:
