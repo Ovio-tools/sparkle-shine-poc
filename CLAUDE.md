@@ -14,7 +14,16 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 - **Database:** PostgreSQL via psycopg2 (production/simulation/automations/intelligence), SQLite (seeding, setup, tests)
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
-- **Deployment:** Railway (`railway.toml` in repo root, start command: `python -m simulation.engine`)
+- **Deployment:** Railway (`railway.toml` in repo root, 4 services — start commands configured per-service on dashboard)
+
+### Railway Services
+
+| Service | Type | Schedule (UTC) | Start Command |
+|---------|------|---------------|---------------|
+| simulation-engine | Long-lived | — | `python -m simulation.engine` |
+| automation-runner | Cron | `*/5 * * * *` | `python -m automations.runner --poll` |
+| intelligence-daily | Cron | `0 11 * * 1-5` (6 AM CDT) | `python -m intelligence.runner --report-type daily` |
+| intelligence-weekly | Cron | `0 13 * * 0` (8 AM CDT Sun) | `python -m intelligence.runner --report-type weekly` |
 - **Local dev:** macOS, Postgres.app
 
 ## Tool Stack
@@ -50,6 +59,7 @@ These rules exist because of real bugs. Follow them strictly.
 - NEVER hardcode rate limit delays. Import pre-configured `Throttler` instances from `seeding/utils/throttler.py`.
 - NEVER register a Pipedrive mapping for SQL contacts. Only register the HubSpot mapping. The missing Pipedrive mapping is what triggers the automation runner's lead-leak detection.
 - NEVER remove simulation invoicing logic without confirming the automation runner handles QBO invoice creation for completed Jobber jobs.
+- NEVER change `database/schema.py` without a corresponding migration script in `scripts/` that applies the same change to the live PostgreSQL database via ALTER statements.
 
 ## Database Patterns (PostgreSQL)
 
