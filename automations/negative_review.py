@@ -26,7 +26,7 @@ from automations.utils.asana_tasks import create_tasks
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_OFFICE_MANAGER_EMAIL = "patricia.nguyen@oviodigital.com"
+_OFFICE_MANAGER_EMAIL = "maria.gonzalez@oviodigital.com"
 
 # HubSpot note-to-contact association type (HUBSPOT_DEFINED category, id 202)
 _HS_NOTE_TO_CONTACT_TYPE_ID = 202

@@ -35,8 +35,8 @@ from automations.utils.id_resolver import MappingNotFoundError, register_mapping
 
 _JOBBER_GQL_URL = "https://api.getjobber.com/api/graphql"
 
-_OFFICE_MANAGER_EMAIL = "patricia.nguyen@oviodigital.com"
-_CREW_LEAD_EMAIL      = "travis.coleman@oviodigital.com"
+_OFFICE_MANAGER_EMAIL = "maria.gonzalez@oviodigital.com"
+_CREW_LEAD_EMAIL      = "maria.gonzalez@oviodigital.com"
 
 # QBO sandbox Net 30 term ID (standard in all QBO sandboxes)
 _QBO_NET30_TERM_ID = "3"

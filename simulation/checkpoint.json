@@ -5,11 +5,11 @@
     "job_scheduling": 3,
     "job_completion": 35,
     "contacts": 10,
-    "deals": 5,
+    "deals": 6,
     "churn": 1
   },
-  "last_event_time": "2026-04-02T16:27:13.164136",
-  "event_count": 150,
-  "error_count": 93,
+  "last_event_time": "2026-04-02T17:39:22.048525",
+  "event_count": 159,
+  "error_count": 101,
   "timed_queue": []
 }
