@@ -21,7 +21,7 @@ from database.connection import get_connection, get_column_names, date_subtract_
 from database.mappings import generate_id, get_tool_id, get_tool_url, register_mapping
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import JOBBER as throttler
-from simulation.config import DAILY_VOLUMES, JOB_VARIETY
+from simulation.config import CREW_CAPACITY, DAILY_VOLUMES, JOB_VARIETY
 
 logger = setup_logging("simulation.operations")
 
@@ -718,11 +718,38 @@ class JobSchedulingGenerator:
             """).fetchall()
             agreements = [dict(a) for a in agreements]
 
-            # Track prior jobs per crew for sequential time assignment
+            # Track prior jobs per crew for sequential time assignment.
+            # Preload existing jobs for today so re-runs don't over-schedule.
             prior_jobs_by_crew: dict[str, list[dict]] = {}
+            existing_today = conn.execute("""
+                SELECT crew_id, COALESCE(duration_minutes_actual, 120) AS dur
+                FROM jobs WHERE scheduled_date = %s
+            """, (today.isoformat(),)).fetchall()
+            for ej in existing_today:
+                prior_jobs_by_crew.setdefault(
+                    ej["crew_id"] or "crew-a", []
+                ).append({"expected_duration": ej["dur"]})
+
+            max_jobs = CREW_CAPACITY["max_jobs_per_crew"]
+            max_minutes = int(
+                CREW_CAPACITY["daily_minutes"] * CREW_CAPACITY["target_utilization_max"]
+            )
 
             for agreement in agreements:
                 if not _is_due_today(agreement, today):
+                    continue
+
+                crew_id_check = agreement.get("crew_id") or "crew-a"
+                prior = prior_jobs_by_crew.get(crew_id_check, [])
+                crew_minutes = sum(j["expected_duration"] for j in prior)
+                next_duration = _expected_duration(
+                    agreement["service_type_id"], "regular"
+                )
+                if len(prior) >= max_jobs or (crew_minutes + next_duration) > max_minutes:
+                    logger.debug(
+                        "Capacity cap: skipping %s for %s (%d jobs, %d min)",
+                        agreement["id"], crew_id_check, len(prior), crew_minutes,
+                    )
                     continue
 
                 # Idempotent guard: skip if job already exists for this client+date
@@ -731,6 +758,11 @@ class JobSchedulingGenerator:
                     (agreement["client_id"], today.isoformat()),
                 ).fetchone()
                 if existing:
+                    prior_jobs_by_crew.setdefault(crew_id_check, []).append(
+                        {"expected_duration": _expected_duration(
+                            agreement["service_type_id"], "regular"
+                        )}
+                    )
                     continue
 
                 try:
@@ -803,6 +835,120 @@ class JobSchedulingGenerator:
                     logger.exception("Job scheduling failed for agreement %s", agreement.get("id"))
                     results.append(("failed", agreement.get("id"), str(e)))
 
+            # ── Pass 1b: commercial nightly scheduling ────────────────────
+            # Commercial clients (Crew D) don't have recurring_agreements.
+            # Their schedules are encoded in client notes (nightly, 3x, 2x, daily).
+            # This pass creates jobs for active commercial clients on scheduled days.
+            commercial_clients = conn.execute("""
+                SELECT id, company_name, notes
+                FROM clients
+                WHERE client_type = 'commercial' AND status = 'active'
+            """).fetchall()
+            commercial_clients = [dict(c) for c in commercial_clients]
+
+            for client in commercial_clients:
+                notes = (client.get("notes") or "").lower()
+                client_id = client["id"]
+                weekday = today.weekday()  # 0=Mon ... 6=Sun
+
+                # Determine if this client has a job today
+                is_scheduled = False
+                if "nightly" in notes or "5x" in notes:
+                    is_scheduled = weekday < 5  # Mon-Fri
+                elif "daily" in notes:
+                    is_scheduled = weekday < 6  # Mon-Sat
+                elif "3x" in notes:
+                    is_scheduled = weekday in (0, 2, 4)  # Mon, Wed, Fri
+                elif "2x" in notes:
+                    is_scheduled = weekday in (1, 3)  # Tue, Thu
+
+                if not is_scheduled:
+                    continue
+
+                # Capacity cap for Crew D
+                prior_d = prior_jobs_by_crew.get("crew-d", [])
+                d_minutes = sum(j["expected_duration"] for j in prior_d)
+                if len(prior_d) >= max_jobs or (d_minutes + 180) > max_minutes:
+                    continue
+
+                # Idempotent guard
+                existing = conn.execute(
+                    "SELECT id FROM jobs WHERE client_id = %s AND scheduled_date = %s",
+                    (client_id, today.isoformat()),
+                ).fetchone()
+                if existing:
+                    prior_jobs_by_crew.setdefault("crew-d", []).append(
+                        {"expected_duration": 180}
+                    )
+                    continue
+
+                try:
+                    crew_id = "crew-d"
+                    duration = 180  # commercial-nightly duration
+                    prior = prior_jobs_by_crew.get(crew_id, [])
+                    scheduled_dt = _assign_scheduled_time(crew_id, prior, today)
+                    completion_dt = scheduled_dt + timedelta(minutes=duration)
+                    completion_dt += timedelta(
+                        minutes=random.uniform(-duration * 0.15, duration * 0.15)
+                    )
+
+                    if not dry_run:
+                        job_id = generate_id("JOB", db_path=self.db_path)
+                        property_id = _get_or_fetch_property_id(
+                            client_id, session, self.db_path
+                        )
+                        if property_id is None:
+                            logger.warning(
+                                "Skipping commercial job for %s: no Jobber property ID",
+                                client["company_name"],
+                            )
+                            continue
+                        job_input = {
+                            "propertyId": property_id,
+                            "title": f"Commercial Nightly Clean - {client['company_name']}",
+                            "invoicing": {
+                                "invoicingType": "FIXED_PRICE",
+                                "invoicingSchedule": "ON_COMPLETION",
+                            },
+                            "timeframe": {"startAt": today.isoformat()},
+                        }
+                        resp = _gql(session, _JOB_CREATE, {"input": job_input})
+                        errs = _gql_user_errors(resp, "jobCreate")
+                        if errs:
+                            raise RuntimeError(f"jobCreate errors: {errs}")
+                        jobber_job_id = resp["data"]["jobCreate"]["job"]["id"]
+
+                        conn.execute("""
+                            INSERT INTO jobs
+                            (id, client_id, crew_id, service_type_id,
+                             scheduled_date, scheduled_time, status)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT DO NOTHING
+                        """, (
+                            job_id, client_id, crew_id,
+                            "commercial-nightly", today.isoformat(),
+                            scheduled_dt.strftime("%H:%M"), "scheduled",
+                        ))
+                        register_mapping(job_id, "jobber", jobber_job_id, db_path=self.db_path)
+                    else:
+                        job_id = f"dry-run-comm-{client_id}"
+
+                    if self._queue_fn:
+                        self._queue_fn(
+                            fire_at=completion_dt,
+                            generator_name="job_completion",
+                            kwargs={"job_id": job_id},
+                        )
+
+                    prior_jobs_by_crew.setdefault(crew_id, []).append(
+                        {"expected_duration": duration}
+                    )
+                    results.append(("ok", job_id))
+
+                except Exception as e:
+                    logger.exception("Commercial scheduling failed for %s", client.get("company_name"))
+                    results.append(("failed", client.get("id"), str(e)))
+
             # ── Pass 2: already-scheduled jobs (rescheduled + one-time) ──────
             already_scheduled = conn.execute("""
                 SELECT * FROM jobs
@@ -847,16 +993,161 @@ class JobSchedulingGenerator:
                     logger.exception("Completion queuing failed for existing job %s", job.get("id"))
                     results.append(("failed", job.get("id"), str(e)))
 
+            # ── Pass 3: utilization balancing (fill-in jobs) ────────────
+            # For crews below 80% target, add one-time deep cleans or
+            # standard cleans for clients overdue for service.
+            # Skip crew-d (commercial nightly, already at 100%+ utilization).
+            _CREW_ZONE_MAP = {
+                "crew-a": "West Austin",
+                "crew-b": "East Austin",
+                "crew-c": "South Austin",
+            }
+            target_min_minutes = int(
+                CREW_CAPACITY["daily_minutes"] * CREW_CAPACITY["target_utilization_min"]
+            )
+            target_max_minutes = int(
+                CREW_CAPACITY["daily_minutes"] * CREW_CAPACITY["target_utilization_max"]
+            )
+            max_jobs = CREW_CAPACITY["max_jobs_per_crew"]
+
+            for crew_id in ("crew-a", "crew-b", "crew-c"):
+                prior = prior_jobs_by_crew.get(crew_id, [])
+                total_minutes = sum(j["expected_duration"] for j in prior)
+                job_count = len(prior)
+
+                if total_minutes >= target_min_minutes or job_count >= max_jobs:
+                    continue
+
+                # Don't overshoot the max target
+                gap_minutes = min(
+                    target_min_minutes - total_minutes,
+                    target_max_minutes - total_minutes,
+                )
+                zone = _CREW_ZONE_MAP.get(crew_id)
+
+                # Find clients in the crew's zone overdue for a deep clean (>60 days)
+                cutoff_date = (today - timedelta(days=60)).isoformat()
+                fillin_candidates = conn.execute("""
+                    SELECT c.id AS client_id
+                    FROM clients c
+                    WHERE c.status IN ('active', 'occasional')
+                      AND c.zone = %s
+                      AND c.id NOT IN (
+                          SELECT j.client_id FROM jobs j
+                          WHERE j.service_type_id = 'deep-clean'
+                            AND j.scheduled_date > %s
+                      )
+                      AND c.id NOT IN (
+                          SELECT j.client_id FROM jobs j
+                          WHERE j.scheduled_date = %s
+                      )
+                    ORDER BY c.last_service_date ASC NULLS FIRST
+                    LIMIT %s
+                """, (zone, cutoff_date, today.isoformat(), max_jobs - job_count)).fetchall()
+                fillin_candidates = [dict(r) for r in fillin_candidates]
+
+                for candidate in fillin_candidates:
+                    if gap_minutes <= 0 or job_count >= max_jobs:
+                        break
+
+                    # Choose service type based on available gap:
+                    # deep clean (210 min) if gap is large, standard (120 min) if small
+                    if gap_minutes >= 200:
+                        service_type_id = "deep-clean"
+                        duration = _expected_duration(service_type_id, "deep_clean")
+                    else:
+                        service_type_id = "std-residential"
+                        duration = _expected_duration(service_type_id, "regular")
+                    scheduled_dt = _assign_scheduled_time(crew_id, prior, today)
+                    completion_dt = scheduled_dt + timedelta(minutes=duration)
+                    completion_dt += timedelta(
+                        minutes=random.uniform(-duration * 0.15, duration * 0.15)
+                    )
+
+                    try:
+                        if not dry_run:
+                            fill_job_id = generate_id("JOB", db_path=self.db_path)
+                            property_id = _get_or_fetch_property_id(
+                                candidate["client_id"], session, self.db_path
+                            )
+                            if property_id is None:
+                                continue
+
+                            fill_title = "Deep Clean (Fill-In)" if service_type_id == "deep-clean" else "Standard Clean (Fill-In)"
+                            job_input = {
+                                "propertyId": property_id,
+                                "title": fill_title,
+                                "invoicing": {
+                                    "invoicingType": "FIXED_PRICE",
+                                    "invoicingSchedule": "ON_COMPLETION",
+                                },
+                                "timeframe": {"startAt": today.isoformat()},
+                            }
+                            resp = _gql(session, _JOB_CREATE, {"input": job_input})
+                            errs = _gql_user_errors(resp, "jobCreate")
+                            if errs:
+                                raise RuntimeError(f"jobCreate errors: {errs}")
+                            jobber_job_id = resp["data"]["jobCreate"]["job"]["id"]
+
+                            conn.execute("""
+                                INSERT INTO jobs
+                                (id, client_id, crew_id, service_type_id,
+                                 scheduled_date, scheduled_time, status)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                                ON CONFLICT DO NOTHING
+                            """, (
+                                fill_job_id, candidate["client_id"], crew_id,
+                                service_type_id, today.isoformat(),
+                                scheduled_dt.strftime("%H:%M"), "scheduled",
+                            ))
+                            register_mapping(fill_job_id, "jobber", jobber_job_id,
+                                             db_path=self.db_path)
+                        else:
+                            fill_job_id = f"dry-run-fill-{candidate['client_id']}"
+
+                        if self._queue_fn:
+                            self._queue_fn(
+                                fire_at=completion_dt,
+                                generator_name="job_completion",
+                                kwargs={"job_id": fill_job_id},
+                            )
+
+                        prior.append({"expected_duration": duration})
+                        gap_minutes -= duration
+                        job_count += 1
+                        results.append(("ok_fill", fill_job_id))
+                        logger.info(
+                            "Fill-in: %s deep clean for %s (%s), %d min gap remaining",
+                            crew_id, candidate["client_id"], zone, gap_minutes,
+                        )
+
+                    except Exception as e:
+                        logger.exception(
+                            "Fill-in scheduling failed for %s", candidate["client_id"]
+                        )
+                        results.append(("failed", candidate.get("client_id"), str(e)))
+
+            # ── Utilization summary ──────────────────────────────────────
+            for crew_id in ("crew-a", "crew-b", "crew-c", "crew-d"):
+                prior = prior_jobs_by_crew.get(crew_id, [])
+                total_min = sum(j["expected_duration"] for j in prior)
+                util_pct = total_min / CREW_CAPACITY["daily_minutes"] * 100
+                logger.info(
+                    "%s: %d jobs, %d min scheduled, %.0f%% utilization",
+                    crew_id, len(prior), total_min, util_pct,
+                )
+
             if not dry_run:
                 conn.commit()
-            succeeded = sum(1 for r in results if r[0] in ("ok", "ok_existing"))
+            succeeded = sum(1 for r in results if r[0] in ("ok", "ok_existing", "ok_fill"))
+            fill_count = sum(1 for r in results if r[0] == "ok_fill")
             failed = sum(1 for r in results if r[0] == "failed")
+            msg = f"scheduled {succeeded} jobs"
+            if fill_count:
+                msg += f" ({fill_count} fill-in)"
             if failed:
-                return GeneratorResult(
-                    success=False,
-                    message=f"scheduled {succeeded} jobs, {failed} failed",
-                )
-            return GeneratorResult(success=True, message=f"scheduled {succeeded} jobs")
+                return GeneratorResult(success=False, message=f"{msg}, {failed} failed")
+            return GeneratorResult(success=True, message=msg)
 
         except Exception:
             conn.rollback()

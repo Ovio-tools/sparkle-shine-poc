@@ -204,9 +204,11 @@ class SimulationEngine:
                 plan.append(GeneratorCall("churn", {"client_type": "commercial"}))
 
         # ── Payment processing ───────────────────────────────────────────────
-        # 10 attempts/day: each call scans for the next actionable invoice.
+        # 20 attempts/day: each call scans for the next actionable invoice.
         # The generator handles timing (due-date logic) internally.
-        for _ in range(10):
+        # Increased from 10 to 20 to keep pace with higher job volumes
+        # (20-24 jobs/day → 20-24 invoices/day, plus existing backlog).
+        for _ in range(20):
             plan.append(GeneratorCall("payments", {}))
 
         # ── Task completion ──────────────────────────────────────────────────
@@ -323,9 +325,10 @@ class SimulationEngine:
         return state
 
     def log_daily_summary(self) -> None:
-        """Log a one-line summary of the day's event counts.
+        """Log a one-line summary of the day's event counts and crew utilization.
 
         Format: Daily summary YYYY-MM-DD: N events (E errors): gen1=X, gen2=Y, ...
+        Followed by per-crew utilization lines.
         """
         error_label = f"{self.error_count} error{'s' if self.error_count != 1 else ''}"
         counts = ", ".join(
@@ -335,6 +338,31 @@ class SimulationEngine:
             f"Daily summary {self.current_date}: "
             f"{self.event_count} events ({error_label}): {counts}"
         )
+
+        # Per-crew utilization
+        try:
+            from database.connection import get_connection
+            from simulation.config import CREW_CAPACITY
+            conn = get_connection()
+            try:
+                for crew_id in ("crew-a", "crew-b", "crew-c", "crew-d"):
+                    row = conn.execute("""
+                        SELECT COUNT(*) AS job_count,
+                               COALESCE(SUM(COALESCE(duration_minutes_actual, 120)), 0) AS total_min
+                        FROM jobs
+                        WHERE crew_id = %s AND scheduled_date = %s
+                          AND status IN ('completed', 'scheduled')
+                    """, (crew_id, self.current_date.isoformat())).fetchone()
+                    total_min = row["total_min"]
+                    util_pct = total_min / CREW_CAPACITY["daily_minutes"] * 100
+                    logger.info(
+                        f"  {crew_id}: {row['job_count']} jobs, "
+                        f"{total_min} min, {util_pct:.0f}% utilization"
+                    )
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Could not log utilization: {e}")
 
     def run_once(self, target_date: date) -> dict:
         """Run exactly one full simulated day.

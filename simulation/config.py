@@ -184,6 +184,36 @@ JOB_VARIETY = {
 }
 
 # ────────────────────────────────────────────────────────────────
+# CREW CAPACITY AND UTILIZATION TARGETS
+# ────────────────────────────────────────────────────────────────
+
+CREW_CAPACITY = {
+    "daily_minutes": 660,
+    # Source: BUSINESS_HOURS start=7, end=18 → 11 hours × 60 = 660 minutes.
+
+    "target_utilization_min": 0.80,
+    "target_utilization_max": 0.90,
+    # ESTIMATED -- reasoning: 80-90% is the standard operating range for
+    # field service businesses. Below 80% means underutilized crews (wasted
+    # labor cost). Above 90% leaves no buffer for travel delays, callbacks,
+    # or emergencies. Source: ServiceTitan industry benchmark reports.
+
+    "travel_buffer_avg": 22,
+    # ESTIMATED -- reasoning: average travel time between jobs in Austin metro.
+    # _assign_scheduled_time uses random.randint(15, 30), midpoint ≈ 22.
+
+    "max_jobs_per_crew": 5,
+    # ESTIMATED -- reasoning: 660 min ÷ (120 min avg job + 22 min travel) = 4.6.
+    # With 10% deep clean rate (210 min), average job is ~129 min.
+    # 5 × 129 = 645 min = ~98% peak. Cap at 5 for 80-90% average target.
+
+    "min_jobs_per_crew": 4,
+    # ESTIMATED -- reasoning: even on slow days, crews should have at least 4
+    # jobs to justify dispatching. Below 4 means the crew should be merged or
+    # given a day off.
+}
+
+# ────────────────────────────────────────────────────────────────
 # TIMING AND VARIATION
 # ────────────────────────────────────────────────────────────────
 

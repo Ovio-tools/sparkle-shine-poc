@@ -154,7 +154,7 @@ CREATE_TABLES = [
         job_id              TEXT REFERENCES jobs(id),
         amount              REAL NOT NULL,
         status              TEXT NOT NULL DEFAULT 'draft'
-                                CHECK(status IN ('draft','sent','paid','overdue')),
+                                CHECK(status IN ('draft','sent','paid','overdue','written_off')),
         issue_date          TEXT NOT NULL,
         due_date            TEXT,
         paid_date           TEXT,

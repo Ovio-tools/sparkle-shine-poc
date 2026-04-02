@@ -1,14 +1,8 @@
 {
-  "date": "2026-04-01",
-  "counters": {
-    "new_client_setup": 3,
-    "job_scheduling": 3,
-    "job_completion": 35,
-    "contacts": 8,
-    "deals": 5
-  },
-  "last_event_time": "2026-04-01T21:54:19.905720",
-  "event_count": 130,
-  "error_count": 76,
+  "date": "2026-03-27",
+  "counters": {},
+  "last_event_time": "2026-04-02T01:50:59.233432",
+  "event_count": 0,
+  "error_count": 0,
   "timed_queue": []
 }
