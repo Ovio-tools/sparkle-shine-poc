@@ -87,6 +87,10 @@ class PaymentReceived(BaseAutomation):
             f"quickbooks:payment:{trigger_event.get('payment_id', 'unknown')}"
         )
 
+        # ── Idempotency guard: skip if this payment was already processed ─────
+        if self._already_processed(trigger_source):
+            return
+
         ctx = self._build_context(trigger_event)
 
         # ── Action 1: Pipedrive activity ──────────────────────────────────────
@@ -138,6 +142,26 @@ class PaymentReceived(BaseAutomation):
                 run_id, "post_slack_notification", None, "failed",
                 error_message=str(exc), trigger_source=trigger_source,
             )
+
+    # ── Idempotency ────────────────────────────────────────────────────────────
+
+    def _already_processed(self, trigger_source: str) -> bool:
+        """Return True if automation_log already has a successful run for this trigger."""
+        row = self.db.execute(
+            """
+            SELECT 1 FROM automation_log
+            WHERE trigger_source = %s
+              AND automation_name = 'PaymentReceived'
+              AND status = 'success'
+            LIMIT 1
+            """,
+            (trigger_source,),
+        ).fetchone()
+        if row is not None:
+            logger = __import__("logging").getLogger("automations")
+            logger.info("Skipping duplicate payment: %s", trigger_source)
+            return True
+        return False
 
     # ── Context builder ───────────────────────────────────────────────────────
 
