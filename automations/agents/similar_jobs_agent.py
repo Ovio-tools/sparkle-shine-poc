@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 
 import anthropic
 
@@ -136,8 +137,6 @@ def _build_lead_ctx(contact: dict) -> dict:
 
 def _score_candidate(lead_ctx: dict, row: dict) -> int:
     """Score a DB row against the lead context. Returns int 0-100."""
-    from datetime import date
-
     score = 0
 
     # ── Service match (40 pts) ─────────────────────────────────────────────
@@ -348,10 +347,10 @@ def find_similar_jobs(contact: dict) -> dict:
             conn.close()
     except Exception as exc:
         logger.error("similar_jobs SQL query failed: %s", exc)
-        return _NO_RESULTS
+        return {**_NO_RESULTS, "matches": []}
 
     if not rows:
-        return _NO_RESULTS
+        return {**_NO_RESULTS, "matches": []}
 
     # ------------------------------------------------------------------
     # Step 2: Python re-rank — score each row and take top 2
