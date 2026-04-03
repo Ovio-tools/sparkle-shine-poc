@@ -256,3 +256,121 @@ def test_score_both_commercial_different_subtype():
     score = _score_candidate(ctx, row)
     # Service exact 40 + both commercial diff subtype 10 + zip prefix 12 + recency 15 = 77
     assert score == 77
+
+import os
+import pytest
+from unittest.mock import patch, MagicMock
+from automations.agents.similar_jobs_agent import find_similar_jobs
+
+# ── find_similar_jobs integration (mocked DB + mocked Sonnet) ────────────────
+
+def _make_db_rows():
+    """Simulate psycopg2 rows returned by the new SQL query."""
+    from datetime import date, timedelta
+    recent = (date.today() - timedelta(days=15)).isoformat()
+    older  = (date.today() - timedelta(days=100)).isoformat()
+    return [
+        {
+            "job_id": "SS-JOB-0001",
+            "service_type_id": "recurring-biweekly",
+            "scheduled_date": recent,
+            "status": "completed",
+            "job_address": "2401 Westlake Dr",
+            "neighborhood": "Westlake",
+            "client_type": "residential",
+            "company_name": None,
+            "client_address": "2401 Westlake Dr Austin TX 78746",
+            "crew_zone": "West Austin",
+            "job_total": 150.0,
+        },
+        {
+            "job_id": "SS-JOB-0002",
+            "service_type_id": "std-residential",
+            "scheduled_date": older,
+            "status": "scheduled",
+            "job_address": "800 South Lamar",
+            "neighborhood": "South Austin",
+            "client_type": "residential",
+            "company_name": None,
+            "client_address": "800 South Lamar Austin TX 78704",
+            "crew_zone": "South Austin",
+            "job_total": 135.0,
+        },
+    ]
+
+
+def _make_sonnet_response(rows):
+    mock_resp = MagicMock()
+    mock_content = MagicMock()
+    mock_content.type = "text"
+    import json
+    mock_content.text = json.dumps([
+        {"job_id": r["job_id"], "description": f"A clean home in {r['neighborhood']}."}
+        for r in rows
+    ])
+    mock_resp.content = [mock_content]
+    return mock_resp
+
+
+@patch("automations.agents.similar_jobs_agent.get_connection")
+@patch("automations.agents.similar_jobs_agent.anthropic.Anthropic")
+def test_find_similar_jobs_returns_matches(mock_anthropic_cls, mock_get_conn):
+    rows = _make_db_rows()
+
+    # Mock DB
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = rows
+    mock_cursor.description = [(k,) for k in rows[0].keys()]
+    mock_conn.execute.return_value = mock_cursor
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_get_conn.return_value = mock_conn
+
+    # Mock Sonnet
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = _make_sonnet_response(rows)
+    mock_anthropic_cls.return_value = mock_client
+
+    contact = {
+        "contact_type": "residential",
+        "service_interest": "recurring-biweekly",
+        "neighborhood": "Westlake",
+        "address": "2401 Westlake Dr Austin TX 78746",
+        "zip": "78746",
+        "company": None,
+    }
+    result = find_similar_jobs(contact)
+
+    assert len(result["matches"]) <= 2
+    assert len(result["matches"]) >= 1
+    assert result["match_confidence"] in ("high", "medium", "low")
+    assert result["matches"][0]["description"] != ""
+    # Top match should be the Westlake biweekly job (highest score)
+    assert result["matches"][0]["job_id"] == "SS-JOB-0001"
+
+
+@patch("automations.agents.similar_jobs_agent.get_connection")
+@patch("automations.agents.similar_jobs_agent.anthropic.Anthropic")
+def test_find_similar_jobs_empty_db_returns_no_results(mock_anthropic_cls, mock_get_conn):
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.description = []
+    mock_conn.execute.return_value = mock_cursor
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_get_conn.return_value = mock_conn
+
+    contact = {
+        "contact_type": "residential",
+        "service_interest": "recurring-biweekly",
+        "neighborhood": "Westlake",
+        "address": "",
+        "zip": "",
+        "company": None,
+    }
+    result = find_similar_jobs(contact)
+    assert result["matches"] == []
+    assert result["match_confidence"] == "low"
+    assert result["estimated_annual_value"] is None

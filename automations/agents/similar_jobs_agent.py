@@ -211,32 +211,14 @@ SELECT
     j.id                AS job_id,
     j.service_type_id,
     j.scheduled_date,
+    j.status,
+    j.address           AS job_address,
     c.neighborhood,
     c.client_type,
+    c.company_name,
+    c.address           AS client_address,
     cr.zone             AS crew_zone,
-    inv.amount          AS job_total,
-    (
-        -- Service type alignment (50 pts)
-        CASE
-            WHEN j.service_type_id = %s AND c.client_type = %s THEN 50
-            WHEN c.client_type = %s THEN 25
-            ELSE 0
-        END
-        +
-        -- Geographic proximity (30 pts)
-        CASE
-            WHEN c.neighborhood = %s THEN 30
-            WHEN cr.zone = %s THEN 15
-            ELSE 5
-        END
-        +
-        -- Recency bonus (20 pts)
-        CASE
-            WHEN j.scheduled_date::date >= CURRENT_DATE - INTERVAL '30 days' THEN 20
-            WHEN j.scheduled_date::date >= CURRENT_DATE - INTERVAL '90 days' THEN 10
-            ELSE 0
-        END
-    ) AS similarity_score
+    inv.amount          AS job_total
 FROM jobs j
 JOIN  clients c  ON c.id = j.client_id
 LEFT JOIN crews  cr ON cr.id = j.crew_id
@@ -245,9 +227,9 @@ LEFT JOIN (
     FROM   invoices
     GROUP  BY job_id
 ) inv ON inv.job_id = j.id
-WHERE j.status = 'completed'
-ORDER BY similarity_score DESC
-LIMIT 2
+WHERE j.status IN ('scheduled', 'completed')
+ORDER BY j.scheduled_date DESC
+LIMIT 10
 """
 
 # ---------------------------------------------------------------------------
@@ -342,40 +324,28 @@ def _fallback_description(row: dict) -> str:
 
 def find_similar_jobs(contact: dict) -> dict:
     """
-    Find completed jobs most similar to a new lead and format them.
+    Find jobs most similar to a new lead and format them with Sonnet.
 
     Args:
-        contact: dict with keys: contact_type, service_interest,
-                 address, city, neighborhood (any may be empty/None)
+        contact: dict with keys: contact_type, service_interest, address,
+                 city, neighborhood, zip, company (any may be empty/None)
 
     Returns:
-        dict with keys: matches (list of job dicts), match_confidence,
-                       estimated_annual_value (float or None)
+        dict with keys: matches (list), match_confidence (str),
+                        estimated_annual_value (float | None)
     """
-    requested_service = contact.get("service_interest") or ""
-    contact_type = contact.get("contact_type") or ""
-    neighborhood = contact.get("neighborhood") or ""
-    address = contact.get("address") or ""
-
-    crew_zone = _derive_crew_zone(neighborhood, address)
-
-    params = (
-        requested_service,
-        contact_type,
-        contact_type,
-        neighborhood,
-        crew_zone,
-    )
+    lead_ctx = _build_lead_ctx(contact)
 
     # ------------------------------------------------------------------
-    # Step 1: SQL similarity query
+    # Step 1: SQL fetch — top 10 non-cancelled jobs, ordered by recency
     # ------------------------------------------------------------------
     rows: list[dict] = []
     try:
         conn = get_connection()
         try:
-            cursor = conn.execute(_SIMILARITY_SQL, params)
-            rows = [dict(r) for r in cursor.fetchall()]
+            cursor = conn.execute(_SIMILARITY_SQL)
+            cols = [d[0] for d in cursor.description]
+            rows = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in cursor.fetchall()]
         finally:
             conn.close()
     except Exception as exc:
@@ -385,12 +355,22 @@ def find_similar_jobs(contact: dict) -> dict:
     if not rows:
         return _NO_RESULTS
 
-    top_score = rows[0].get("similarity_score")
+    # ------------------------------------------------------------------
+    # Step 2: Python re-rank — score each row and take top 2
+    # ------------------------------------------------------------------
+    scored = sorted(
+        rows,
+        key=lambda r: _score_candidate(lead_ctx, r),
+        reverse=True,
+    )
+    top_rows = scored[:2]
+
+    top_score = _score_candidate(lead_ctx, top_rows[0])
     confidence = _confidence_from_score(top_score)
-    annual_value = _estimate_annual_value(rows[0], confidence)
+    annual_value = _estimate_annual_value(top_rows[0], confidence)
 
     # ------------------------------------------------------------------
-    # Step 2: Format matches with Claude Sonnet
+    # Step 3: Format matches with Claude Sonnet
     # ------------------------------------------------------------------
     formatted_rows: list[dict] = []
     try:
@@ -405,14 +385,19 @@ def find_similar_jobs(contact: dict) -> dict:
                     "content": json.dumps(
                         [
                             {
-                                "job_id": r["job_id"],
+                                "job_id":        r["job_id"],
                                 "service_type_id": r.get("service_type_id"),
-                                "neighborhood": r.get("neighborhood"),
-                                "crew_zone": r.get("crew_zone"),
+                                "property_type": _infer_property_type(
+                                    r.get("client_type") or "",
+                                    r.get("company_name"),
+                                ),
+                                "neighborhood":  r.get("neighborhood"),
+                                "crew_zone":     r.get("crew_zone"),
                                 "scheduled_date": r.get("scheduled_date"),
-                                "similarity_score": r.get("similarity_score"),
+                                "job_status":    r.get("status"),
+                                "similarity_score": _score_candidate(lead_ctx, r),
                             }
-                            for r in rows
+                            for r in top_rows
                         ],
                         default=str,
                     ),
@@ -424,7 +409,7 @@ def find_similar_jobs(contact: dict) -> dict:
         )
         descriptions: list[dict] = json.loads(text)
         desc_by_id = {d["job_id"]: d["description"] for d in descriptions}
-        for row in rows:
+        for row in top_rows:
             formatted_rows.append(
                 {**row, "description": desc_by_id.get(row["job_id"], "")}
             )
@@ -432,7 +417,7 @@ def find_similar_jobs(contact: dict) -> dict:
         logger.error(
             "similar_jobs Sonnet formatting failed, using fallback: %s", exc
         )
-        for row in rows:
+        for row in top_rows:
             formatted_rows.append(
                 {**row, "description": _fallback_description(row)}
             )
