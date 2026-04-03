@@ -1,11 +1,13 @@
 """
 tests/test_automations/test_similar_jobs_agent.py
 
-Unit tests for similar_jobs_agent helpers.
-No DB, no API calls — pure logic.
+Unit and integration tests for similar_jobs_agent helpers and find_similar_jobs.
+DB and API calls are mocked where needed.
 """
 import os
 import sys
+from datetime import date, timedelta
+from unittest.mock import patch, MagicMock
 
 _PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +19,10 @@ import pytest
 from automations.agents.similar_jobs_agent import (
     _infer_property_type,
     _extract_zip_prefix,
+    _build_lead_ctx,
+    _score_candidate,
+    find_similar_jobs,
+    _SYSTEM_PROMPT,
 )
 
 
@@ -78,14 +84,6 @@ def test_extract_zip_prefix_empty_string():
 
 def test_extract_zip_prefix_none_treated_as_empty():
     assert _extract_zip_prefix(None) == ""
-
-from datetime import date, timedelta
-from automations.agents.similar_jobs_agent import (
-    _infer_property_type,
-    _extract_zip_prefix,
-    _build_lead_ctx,
-    _score_candidate,
-)
 
 
 # ── _build_lead_ctx ───────────────────────────────────────────────────────────
@@ -257,8 +255,6 @@ def test_score_both_commercial_different_subtype():
     # Service exact 40 + both commercial diff subtype 10 + zip prefix 12 + recency 15 = 77
     assert score == 77
 
-from unittest.mock import patch, MagicMock
-from automations.agents.similar_jobs_agent import find_similar_jobs
 
 # ── find_similar_jobs integration (mocked DB + mocked Sonnet) ────────────────
 
@@ -373,10 +369,12 @@ def test_find_similar_jobs_empty_db_returns_no_results(mock_anthropic_cls, mock_
     assert result["match_confidence"] == "low"
     assert result["estimated_annual_value"] is None
 
-from automations.agents.similar_jobs_agent import _SYSTEM_PROMPT
-
 def test_system_prompt_mentions_property_type():
-    assert "property_type" in _SYSTEM_PROMPT.lower() or "property type" in _SYSTEM_PROMPT.lower()
+    assert "property_type" in _SYSTEM_PROMPT.lower()
+    assert "dental office" in _SYSTEM_PROMPT.lower()
+    assert "family home" in _SYSTEM_PROMPT.lower()
 
 def test_system_prompt_mentions_job_status():
-    assert "job_status" in _SYSTEM_PROMPT.lower() or "ongoing" in _SYSTEM_PROMPT.lower()
+    assert "job_status" in _SYSTEM_PROMPT.lower()
+    assert "scheduled" in _SYSTEM_PROMPT.lower()
+    assert "completed" in _SYSTEM_PROMPT.lower()
