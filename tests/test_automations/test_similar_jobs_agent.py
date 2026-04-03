@@ -372,3 +372,11 @@ def test_find_similar_jobs_empty_db_returns_no_results(mock_anthropic_cls, mock_
     assert result["matches"] == []
     assert result["match_confidence"] == "low"
     assert result["estimated_annual_value"] is None
+
+from automations.agents.similar_jobs_agent import _SYSTEM_PROMPT
+
+def test_system_prompt_mentions_property_type():
+    assert "property_type" in _SYSTEM_PROMPT.lower() or "property type" in _SYSTEM_PROMPT.lower()
+
+def test_system_prompt_mentions_job_status():
+    assert "job_status" in _SYSTEM_PROMPT.lower() or "ongoing" in _SYSTEM_PROMPT.lower()
