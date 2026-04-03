@@ -257,8 +257,6 @@ def test_score_both_commercial_different_subtype():
     # Service exact 40 + both commercial diff subtype 10 + zip prefix 12 + recency 15 = 77
     assert score == 77
 
-import os
-import pytest
 from unittest.mock import patch, MagicMock
 from automations.agents.similar_jobs_agent import find_similar_jobs
 

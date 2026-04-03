@@ -3,13 +3,14 @@ automations/agents/similar_jobs_agent.py
 
 Agent 2: Similar Job Matching
 
-Given a new lead (contact dict), find completed jobs that are similar
-based on service type, geography, and recency. Format the results with
-Claude Sonnet for human-readable output.
+Given a new lead (contact dict), find similar past or active jobs and
+format the results with Claude Sonnet for human-readable output.
 
 Steps:
-  1. SQL similarity query against the jobs/clients/crews/invoices tables.
-  2. Format raw rows with claude-sonnet-4-6 into natural-language descriptions.
+  1. Build lead context (property type, ZIP prefix, neighborhood, crew zone).
+  2. SQL fetch: top 10 non-cancelled jobs ordered by recency (no SQL scoring).
+  3. Python re-rank: score each row via _score_candidate (max 100 pts).
+  4. Format top 2 with claude-sonnet-4-6, including property_type + job_status.
 """
 
 from __future__ import annotations
@@ -199,11 +200,8 @@ def _score_candidate(lead_ctx: dict, row: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
-# SQL similarity query
-# Three scoring dimensions, max possible score = 50 + 30 + 20 = 100.
-#
-# Parameter tuple: (requested_service, contact_type, contact_type,
-#                   lead_neighborhood, lead_crew_zone)
+# SQL fetch — returns up to 10 recent non-cancelled jobs.
+# No scoring in SQL; Python re-ranking via _score_candidate handles that.
 # ---------------------------------------------------------------------------
 
 _SIMILARITY_SQL = """
