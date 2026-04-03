@@ -92,7 +92,7 @@ def _infer_property_type(client_type: str, company_name: str | None) -> str:
 _ZIP_RE = re.compile(r"\b(\d{5})\b")
 
 
-def _extract_zip_prefix(text: str) -> str:
+def _extract_zip_prefix(text: str | None) -> str:
     """Extract first 5-digit ZIP code from a string and return its 3-digit prefix.
 
     Returns '' if no 5-digit sequence is found.
