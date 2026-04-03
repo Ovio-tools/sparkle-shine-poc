@@ -57,16 +57,15 @@ def _derive_crew_zone(neighborhood: str | None, address: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 _MEDICAL_KEYWORDS  = ("dental", "dentist", "orthodontic", "medical", "clinic",
-                      "health", "therapy", "wellness", "hospital", "chiropractic")
+                      "health", "therapy", "wellness", "hospital")
 _RESTAURANT_KEYWORDS = ("restaurant", "cafe", "bar", "kitchen", "grill",
-                        "eatery", "diner", "bistro", "brewery")
-_RETAIL_KEYWORDS   = ("boutique", "salon", "spa", "shop", "store", "market",
-                      "barber", "nail")
+                        "eatery", "diner")
+_RETAIL_KEYWORDS   = ("boutique", "salon", "spa", "shop", "store", "market")
 _OFFICE_KEYWORDS   = ("office", "consulting", "law", "accounting", "financial",
-                      "realty", "insurance", "advisory", "associates", "group")
+                      "realty", "insurance")
 
 
-def _infer_property_type(client_type: str, company_name) -> str:
+def _infer_property_type(client_type: str, company_name: str | None) -> str:
     """Infer property subtype from client_type and company_name keywords.
 
     Returns one of: 'home', 'medical', 'restaurant', 'retail', 'office',

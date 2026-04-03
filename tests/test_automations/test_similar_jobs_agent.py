@@ -77,4 +77,4 @@ def test_extract_zip_prefix_empty_string():
     assert _extract_zip_prefix("") == ""
 
 def test_extract_zip_prefix_none_treated_as_empty():
-    assert _extract_zip_prefix("") == ""
+    assert _extract_zip_prefix(None) == ""
