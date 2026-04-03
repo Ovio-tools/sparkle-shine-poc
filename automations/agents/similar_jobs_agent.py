@@ -175,10 +175,7 @@ def _score_candidate(lead_ctx: dict, row: dict) -> int:
             row.get("client_address") or row.get("job_address") or ""
         )
         if row_zip and row_zip == lead_ctx["zip_prefix"]:
-            # Give 15 pts when the lead had a geo signal (neighborhood or
-            # crew_zone) that didn't match -- both parties are "in Austin"
-            # but different zones.  Give 12 when no geo signal was present.
-            score += 15 if (lead_neighborhood or lead_crew_zone) else 12
+            score += 12
 
     # ── Recency (15 pts) ──────────────────────────────────────────────────
     raw_date = row.get("scheduled_date")

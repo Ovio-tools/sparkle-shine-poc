@@ -254,5 +254,5 @@ def test_score_both_commercial_different_subtype():
         crew_zone="East Austin",
     )
     score = _score_candidate(ctx, row)
-    # Service exact 40 + both commercial diff subtype 10 + crew_zone 15 + recency 15 = 80
-    assert score == 80
+    # Service exact 40 + both commercial diff subtype 10 + zip prefix 12 + recency 15 = 77
+    assert score == 77
