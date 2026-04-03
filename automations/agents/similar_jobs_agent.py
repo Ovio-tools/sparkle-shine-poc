@@ -102,6 +102,106 @@ def _extract_zip_prefix(text: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Lead context builder (assembled once per find_similar_jobs call)
+# ---------------------------------------------------------------------------
+
+def _build_lead_ctx(contact: dict) -> dict:
+    """Build a normalised context dict for the incoming lead.
+
+    Keys: service_interest, contact_type, property_type, neighborhood,
+          crew_zone, zip_prefix.
+    """
+    contact_type = (contact.get("contact_type") or "").lower()
+    neighborhood  = contact.get("neighborhood") or ""
+    address       = contact.get("address") or ""
+    company       = contact.get("company") or contact.get("company_name") or ""
+    zip_val       = contact.get("zip") or ""
+    zip_prefix    = _extract_zip_prefix(zip_val) or _extract_zip_prefix(address)
+
+    return {
+        "service_interest": contact.get("service_interest") or "",
+        "contact_type":     contact_type,
+        "property_type":    _infer_property_type(contact_type, company),
+        "neighborhood":     neighborhood,
+        "crew_zone":        _derive_crew_zone(neighborhood, address),
+        "zip_prefix":       zip_prefix,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Python scorer (replaces SQL CASE scoring)
+# Max 100 pts: service 40 + property 20 + geography 25 + recency 15
+# ---------------------------------------------------------------------------
+
+def _score_candidate(lead_ctx: dict, row: dict) -> int:
+    """Score a DB row against the lead context. Returns int 0-100."""
+    from datetime import date
+
+    score = 0
+
+    # ── Service match (40 pts) ─────────────────────────────────────────────
+    svc_match   = row.get("service_type_id", "") == lead_ctx["service_interest"]
+    type_match  = (row.get("client_type") or "").lower() == lead_ctx["contact_type"]
+    if svc_match and type_match:
+        score += 40
+    elif type_match:
+        score += 20
+
+    # ── Property type (20 pts) ─────────────────────────────────────────────
+    row_prop = _infer_property_type(
+        row.get("client_type") or "",
+        row.get("company_name"),
+    )
+    lead_prop = lead_ctx["property_type"]
+    if row_prop == lead_prop:
+        score += 20
+    elif row_prop != "home" and lead_prop != "home":
+        # both commercial, different subtype
+        score += 10
+
+    # ── Geography (25 pts) ────────────────────────────────────────────────
+    lead_neighborhood = lead_ctx["neighborhood"]
+    lead_crew_zone    = lead_ctx["crew_zone"]
+    if lead_neighborhood and (
+        (row.get("neighborhood") or "").lower() == lead_neighborhood.lower()
+    ):
+        score += 25
+    elif lead_crew_zone and (
+        (row.get("crew_zone") or "").lower() == lead_crew_zone.lower()
+    ):
+        score += 15
+    else:
+        row_zip = _extract_zip_prefix(
+            row.get("client_address") or row.get("job_address") or ""
+        )
+        if row_zip and row_zip == lead_ctx["zip_prefix"]:
+            # Give 15 pts when the lead had a geo signal (neighborhood or
+            # crew_zone) that didn't match -- both parties are "in Austin"
+            # but different zones.  Give 12 when no geo signal was present.
+            score += 15 if (lead_neighborhood or lead_crew_zone) else 12
+
+    # ── Recency (15 pts) ──────────────────────────────────────────────────
+    raw_date = row.get("scheduled_date")
+    if raw_date:
+        try:
+            if isinstance(raw_date, str):
+                job_date = date.fromisoformat(raw_date[:10])
+            else:
+                job_date = raw_date  # already a date object from psycopg2
+            days_ago = (date.today() - job_date).days
+            if days_ago <= 30:
+                score += 15
+            elif days_ago <= 90:
+                score += 10
+            elif days_ago <= 180:
+                score += 5
+        except (ValueError, TypeError):
+            pass
+
+    return score
+
+
+# ---------------------------------------------------------------------------
 # SQL similarity query
 # Three scoring dimensions, max possible score = 50 + 30 + 20 = 100.
 #
