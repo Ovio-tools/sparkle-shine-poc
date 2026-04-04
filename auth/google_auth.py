@@ -27,11 +27,16 @@ from auth import token_store
 logger = logging.getLogger(__name__)
 
 _SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive",
+    # gmail.compose is required for creating drafts via users.drafts.create
+    # (Automation #7: Sales Research & Outreach Agent Chain).
+    # Adding this scope invalidates the existing token.json on next run;
+    # the browser consent flow will re-trigger automatically.
+    "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
 ]
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -188,5 +193,27 @@ def get_calendar_service():
 
 
 def get_gmail_service():
-    """Return a Gmail v1 service (metadata scope only)."""
+    """Return a Gmail v1 service."""
     return build("gmail", "v1", credentials=get_google_credentials())
+
+
+def get_google_service(service_name: str = "drive", version: str | None = None):
+    """Return an arbitrary Google API service object.
+
+    Defaults match the most common services. Callers can request any
+    service supported by googleapiclient.discovery.build().
+
+    Examples:
+        get_google_service("gmail", "v1")
+        get_google_service("drive", "v3")
+    """
+    _DEFAULT_VERSIONS = {
+        "drive": "v3",
+        "docs": "v1",
+        "sheets": "v4",
+        "calendar": "v3",
+        "gmail": "v1",
+    }
+    if version is None:
+        version = _DEFAULT_VERSIONS.get(service_name, "v1")
+    return build(service_name, version, credentials=get_google_credentials())

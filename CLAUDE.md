@@ -21,7 +21,8 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 | Service | Type | Schedule (UTC) | Start Command |
 |---------|------|---------------|---------------|
 | simulation-engine | Long-lived | — | `python -m simulation.engine` |
-| automation-runner | Cron | `*/5 * * * *` | `python -m automations.runner --poll` |
+| automation-runner | Cron | `*/5 * * * *` | `python -m automations.runner --all` |
+| sales-outreach | Cron | `*/5 * * * *` | `python -m automations.automation_07_sales_outreach --live` |
 | intelligence-daily | Cron | `0 11 * * 1-5` (6 AM CDT) | `python -m intelligence.runner --report-type daily` |
 | intelligence-weekly | Cron | `0 13 * * 0` (8 AM CDT Sun) | `python -m intelligence.runner --report-type weekly` |
 - **Local dev:** macOS, Postgres.app

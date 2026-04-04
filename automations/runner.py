@@ -21,6 +21,12 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+except ImportError:
+    pass
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging setup
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,6 +103,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     from automations.job_completion_flow import JobCompletionFlow
     from automations.payment_received import PaymentReceived
     from automations.negative_review import NegativeReviewResponse
+    from automations.hubspot_qualified_sync import HubSpotQualifiedSync
 
     results = {"processed": 0, "succeeded": 0, "failed": 0}
 
@@ -180,6 +187,16 @@ def run_poll(clients, db, dry_run: bool) -> dict:
             )
         time.sleep(0.5)
 
+    # 5. HubSpot SQLs -> Pipedrive deals (HubSpotQualifiedSync)
+    logger.info("Running HubSpot Qualified Lead Sync...")
+    results["processed"] += 1
+    try:
+        HubSpotQualifiedSync(clients, db, dry_run).run()
+        results["succeeded"] += 1
+    except Exception as e:
+        results["failed"] += 1
+        logger.error("HubSpot qualified sync failed: %s", e)
+
     return results
 
 
@@ -218,21 +235,8 @@ def _mark_overdue_invoice_ran() -> None:
 def run_scheduled(clients, db, dry_run: bool) -> dict:
     from automations.lead_leak_detection import LeadLeakDetection
     from automations.overdue_invoice import OverdueInvoiceEscalation
-    from automations.hubspot_qualified_sync import HubSpotQualifiedSync
 
     results = {"processed": 0, "succeeded": 0, "failed": 0}
-
-    # HubSpot Qualified Lead → Pipedrive sync -- runs every invocation (every 5 min)
-    logger.info("Running HubSpot Qualified Lead Sync...")
-    results["processed"] += 1
-    try:
-        HubSpotQualifiedSync(clients, db, dry_run).run()
-        results["succeeded"] += 1
-    except Exception as e:
-        results["failed"] += 1
-        logger.error("HubSpot qualified sync failed: %s", e)
-
-    time.sleep(0.5)
 
     # Lead Leak Detection -- at most once per 24 hours
     if _should_run_lead_leak():
@@ -465,7 +469,7 @@ def _run_health_check() -> None:
         ("automations.negative_review",         "NegativeReviewResponse"),
         ("automations.lead_leak_detection",     "LeadLeakDetection"),
         ("automations.overdue_invoice",         "OverdueInvoiceEscalation"),
-        ("automations.hubspot_qualified_sync",  "HubSpotQualifiedSync"),
+        ("automations.hubspot_qualified_sync",       "HubSpotQualifiedSync"),
     ]
     for module_path, class_name in _AUTOMATION_IMPORTS:
         try:

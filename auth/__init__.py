@@ -7,6 +7,8 @@ Usage:
     client  = get_client("hubspot")
     service = get_client("google_drive")
 """
+from __future__ import annotations
+
 from typing import Any
 
 _TOOL_NAMES = [
@@ -17,6 +19,7 @@ _TOOL_NAMES = [
     "hubspot",
     "mailchimp",
     "slack",
+    "google",
     "google_drive",
     "google_docs",
     "google_sheets",
@@ -25,13 +28,17 @@ _TOOL_NAMES = [
 ]
 
 
-def get_client(tool_name: str) -> Any:
+def get_client(tool_name: str, *, service_name: str | None = None, version: str | None = None) -> Any:
     """
     Return the authenticated client/session/service for the given tool.
 
     Supported tool names:
         pipedrive, jobber, quickbooks, asana, hubspot, mailchimp, slack,
-        google_drive, google_docs, google_sheets, google_calendar, google_gmail
+        google, google_drive, google_docs, google_sheets, google_calendar,
+        google_gmail
+
+    For "google", pass service_name and version to select the API:
+        get_client("google", service_name="gmail", version="v1")
     """
     name = tool_name.lower().strip()
 
@@ -62,6 +69,10 @@ def get_client(tool_name: str) -> Any:
     if name == "slack":
         from auth.simple_clients import get_slack_client
         return get_slack_client()
+
+    if name == "google":
+        from auth.google_auth import get_google_service
+        return get_google_service(service_name=service_name or "drive", version=version)
 
     if name == "google_drive":
         from auth.google_auth import get_drive_service
