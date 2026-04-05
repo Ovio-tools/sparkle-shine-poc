@@ -100,13 +100,24 @@ def get_jobber_token() -> str:
             _save_tokens(new_tokens)
             return new_tokens["access_token"]
         except requests.HTTPError as exc:
-            logger.warning(
-                "[jobber] Token refresh failed: HTTP %s — %s",
-                exc.response.status_code if exc.response is not None else "?",
-                exc.response.text[:300] if exc.response is not None else str(exc),
+            msg = (
+                f"Token refresh failed: HTTP "
+                f"{exc.response.status_code if exc.response is not None else '?'} — "
+                f"{exc.response.text[:300] if exc.response is not None else str(exc)}"
             )
+            logger.warning("[jobber] %s", msg)
+            try:
+                from simulation.error_reporter import report_error
+                report_error(exc, tool_name="Jobber", context=msg + " — run: python -m auth.jobber_auth")
+            except Exception:
+                pass
         except Exception as exc:
             logger.warning("[jobber] Token refresh failed: %s", exc)
+            try:
+                from simulation.error_reporter import report_error
+                report_error(exc, tool_name="Jobber", context=f"Token refresh failed: {exc} — run: python -m auth.jobber_auth")
+            except Exception:
+                pass
 
     # Last resort: stale access token from env var
     stale_token = os.getenv("JOBBER_ACCESS_TOKEN")

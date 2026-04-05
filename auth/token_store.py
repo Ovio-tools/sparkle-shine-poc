@@ -33,7 +33,8 @@ ON CONFLICT (tool_name) DO UPDATE SET
 """
 
 
-def _load_from_db(tool_name: str) -> dict | None:
+def _load_from_db(tool_name: str) -> tuple[dict | None, bool]:
+    """Returns (token_dict_or_None, db_was_reachable)."""
     try:
         from database.connection import get_connection
         with get_connection() as conn:
@@ -41,10 +42,11 @@ def _load_from_db(tool_name: str) -> dict | None:
             row = cursor.fetchone()
             if row:
                 data = row["token_data"]
-                return data if isinstance(data, dict) else json.loads(data)
+                return (data if isinstance(data, dict) else json.loads(data)), True
+            return None, True  # DB reachable, no row yet — bootstrap allowed
     except Exception as exc:
-        logger.debug("[token_store] DB load failed for %s: %s", tool_name, exc)
-    return None
+        logger.warning("[token_store] DB load failed for %s: %s", tool_name, exc)
+        return None, False  # DB unreachable — do NOT fall through to stale env var
 
 
 def _save_to_db(tool_name: str, token_data: dict) -> None:
@@ -77,21 +79,35 @@ def _load_from_env(tool_name: str) -> dict | None:
 
 
 def load_tokens(tool_name: str, json_path: str | None = None) -> dict:
-    """Load tokens using four-tier fallback: DB -> JSON file -> env vars -> empty dict."""
-    data = _load_from_db(tool_name)
+    """Load tokens using four-tier fallback: DB -> JSON file -> env vars -> empty dict.
+
+    Env var fallback is skipped when the DB is reachable but has no row for this
+    tool, because in that case the DB row simply hasn't been written yet (first
+    bootstrap). When the DB is *unreachable*, we also skip env vars to avoid
+    silently using a stale refresh token that was long ago rotated out.
+    """
+    data, db_reachable = _load_from_db(tool_name)
     if data:
         return data
 
-    if json_path and os.path.exists(json_path):
-        try:
-            with open(json_path) as f:
-                return json.load(f)
-        except Exception as exc:
-            logger.debug("[token_store] JSON load failed for %s: %s", json_path, exc)
+    if db_reachable:
+        # DB is healthy but no token stored yet — allow bootstrap from JSON/env
+        if json_path and os.path.exists(json_path):
+            try:
+                with open(json_path) as f:
+                    return json.load(f)
+            except Exception as exc:
+                logger.debug("[token_store] JSON load failed for %s: %s", json_path, exc)
 
-    data = _load_from_env(tool_name)
-    if data:
-        return data
+        env_data = _load_from_env(tool_name)
+        if env_data:
+            return env_data
+    else:
+        logger.warning(
+            "[token_store] DB unreachable for %s — skipping env var fallback to avoid "
+            "using a stale refresh token. Fix the DB connection.",
+            tool_name,
+        )
 
     return {}
 

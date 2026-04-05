@@ -158,7 +158,7 @@ def compute(db, briefing_date: str) -> dict:
         avg_var = round(sum(variances) / len(variances), 1) if variances else 0.0
         crew_performance_7day[crew_name] = {
             "avg_duration_variance": avg_var,
-            "avg_rating": round(row["avg_rating"], 2) if row["avg_rating"] is not None else None,
+            "avg_rating": round(float(row["avg_rating"]), 2) if row["avg_rating"] is not None else None,
             "jobs": row["job_count"],
         }
 
