@@ -208,3 +208,7 @@ def run_initial_auth() -> None:
     data["expires_at"] = time.time() + data.get("expires_in", 3600)
     _save_tokens(data)
     print(f"Jobber tokens saved to {_TOKEN_FILE}")
+
+
+if __name__ == "__main__":
+    run_initial_auth()
