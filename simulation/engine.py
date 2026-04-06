@@ -179,14 +179,16 @@ class SimulationEngine:
             plan.append(GeneratorCall("contacts", {}))
 
         # ── Deal progressions ────────────────────────────────────────────────
-        # Estimate active pipeline: ~30 deals at any given time.
-        # Derived from: sqls/month (~42) × avg cycle (~33 days / 30 days) ≈ 46;
-        # using conservative 30 to avoid over-generating events on slow days.
-        # The deals generator queries the database for actual open deals.
-        deal_config = vol["deal_progression"]
-        for _ in range(30):
-            if should_event_happen(deal_config["stage_advance_probability"], target_date):
-                plan.append(GeneratorCall("deals", {}))
+        # Fixed number of deal events per day. The deals generator's
+        # _advance_deal() already applies stage_advance_probability
+        # internally, so gating here with should_event_happen() was a
+        # double probability filter (0.15 × 0.15 = 2.25% effective).
+        # With ~100 open deals in the pipeline, 20 picks/day gives each
+        # deal ~0.2 picks/day × 15% advance = ~3% daily advance rate,
+        # yielding ~33 days per stage (~5–6 stages ≈ reasonable cycle).
+        n_deal_events = get_adjusted_volume(15, 25, target_date)
+        for _ in range(n_deal_events):
+            plan.append(GeneratorCall("deals", {}))
 
         # ── Residential churn checks ─────────────────────────────────────────
         # ~180 active residential clients per CLAUDE.md data volumes.

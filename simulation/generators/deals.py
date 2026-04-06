@@ -154,7 +154,12 @@ class DealGenerator:
         return self._advance_deal(deal, dry_run=dry_run)
 
     def _pick_deal(self) -> Optional[dict]:
-        """Fetch open deals from Pipedrive and return one at random (uniform)."""
+        """Fetch open deals from Pipedrive and return one at random (uniform).
+
+        Filters out deals already at the Closed Won stage — these are
+        zombie deals whose Pipedrive status was not correctly set to 'won'.
+        Without this filter they waste execution slots (picked but no-op).
+        """
         time.sleep(0.15)
         client = get_client("pipedrive")
         resp = client.get(
@@ -163,6 +168,8 @@ class DealGenerator:
         )
         resp.raise_for_status()
         deals = resp.json().get("data") or []
+        # Exclude deals already at Closed Won / Closed Lost stages
+        deals = [d for d in deals if d.get("stage_id") not in (self._won_stage_id, self._lost_stage_id)]
         if not deals:
             return None
         return random.choices(deals, k=1)[0]
