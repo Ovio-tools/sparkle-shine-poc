@@ -435,7 +435,21 @@ CREATE_TABLES = [
     """,
 
     # ------------------------------------------------------------------ #
-    # 24. oauth_tokens — DB-backed storage for OAuth refresh/access tokens
+    # 24. sync_skip_list — circuit breaker for permanently failing syncs
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS sync_skip_list (
+        tool_name           TEXT NOT NULL,
+        tool_specific_id    TEXT NOT NULL,
+        reason              TEXT NOT NULL,
+        detail              TEXT,
+        skipped_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (tool_name, tool_specific_id)
+    )
+    """,
+
+    # ------------------------------------------------------------------ #
+    # 25. oauth_tokens — DB-backed storage for OAuth refresh/access tokens
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -454,7 +468,7 @@ _TABLE_NAMES = [
     "calendar_events", "documents", "cross_tool_mapping",
     "daily_metrics_snapshot", "document_index",
     "poll_state", "automation_log", "pending_actions",
-    "won_deals", "gmail_metadata", "oauth_tokens",
+    "won_deals", "gmail_metadata", "sync_skip_list", "oauth_tokens",
 ]
 
 
