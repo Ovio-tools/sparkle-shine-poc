@@ -25,6 +25,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 | sales-outreach | Cron | `*/5 * * * *` | `python -m automations.automation_07_sales_outreach --live` |
 | intelligence-daily | Cron | `0 11 * * 1-5` (6 AM CDT) | `python -m intelligence.runner --report-type daily` |
 | intelligence-weekly | Cron | `0 13 * * 0` (8 AM CDT Sun) | `python -m intelligence.runner --report-type weekly` |
+| token-keeper | Worker (always-on) | — | `python -m services.token_keeper` |
 - **Local dev:** macOS, Postgres.app
 
 ## Tool Stack
@@ -40,7 +41,9 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 | Slack | Internal comms and briefings | Bot User OAuth Token (Bearer) |
 | Google Workspace | Docs, Sheets, Calendar, Gmail, Drive | OAuth 2.0 |
 
-OAuth tokens are stored via `auth/token_store.py` (three-tier: PostgreSQL DB -> JSON file fallback -> empty dict). JSON fallback files: `.jobber_tokens.json`, `.quickbooks_tokens.json`, `token.json` (Google).
+OAuth tokens are stored via `auth/token_store.py` (four-tier: PostgreSQL DB -> JSON file fallback -> env vars -> empty dict). JSON fallback files: `.jobber_tokens.json`, `.quickbooks_tokens.json`, `token.json` (Google).
+
+**Jobber Token Keeper:** Jobber uses single-use rotating refresh tokens. The `token-keeper` Railway service (`services/token_keeper.py`) is the sole owner of Jobber token refresh. All other services are read-only consumers. Set `JOBBER_TOKEN_KEEPER_ENABLED=1` on all Railway services except token-keeper itself. Local dev uses legacy self-refresh (env var unset).
 
 Pipedrive and HubSpot overlap intentionally. Pipedrive owns the active sales process (deals, proposals). HubSpot owns marketing and the full contact database. The overlap mirrors real SMB operations and is a feature for the intelligence layer to exploit.
 
@@ -108,6 +111,7 @@ sparkle-shine-poc/
 ├── intelligence/    # syncers/, metrics/ (6 modules), context_builder, briefing_generator, weekly_report,
 │                    #   slack_publisher, runner.py, documents/doc_search.py
 ├── seeding/         # generators/ (data into SQLite) + pushers/ (SQLite to APIs) + utils/
+├── services/        # token_keeper.py (Jobber OAuth refresh — sole owner of rotating refresh tokens)
 ├── setup/           # configure_tools.py, populate_workspace.py (one-time tool provisioning)
 ├── demo/            # audit/, fixes/, hardening/, scenarios/, tuning/, walkthrough/, smoke_test.py
 ├── scripts/         # migrate_to_postgres.py, extract_railway_env.py, backfill_pipedrive_orgs.py, etc.

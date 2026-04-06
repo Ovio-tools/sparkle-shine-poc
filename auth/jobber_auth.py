@@ -2,12 +2,19 @@
 Jobber authentication.
 
 Token precedence (via token_store four-tier fallback):
-  1. PostgreSQL DB (primary, written after successful refresh)
+  1. PostgreSQL DB (primary, written by the Token Keeper service)
   2. .jobber_tokens.json (local dev fallback)
   3. JOBBER_REFRESH_TOKEN env var (Railway bootstrap)
   4. JOBBER_ACCESS_TOKEN env var (stale last resort after refresh failure)
 
-Auto-refresh fires when the stored token is within 5 minutes of expiry.
+IMPORTANT: In production (Railway), get_jobber_token() is READ-ONLY.
+It reads tokens from the DB but never refreshes them. The dedicated
+Token Keeper service (services/token_keeper.py) is the sole owner of
+the refresh flow, preventing race conditions when multiple Railway
+services share the same rotating refresh token.
+
+Local dev: set JOBBER_TOKEN_KEEPER_ENABLED=0 (or leave unset) to keep
+the legacy self-refresh behaviour for convenience.
 """
 import json
 import logging
@@ -81,43 +88,88 @@ def _refresh_token(refresh_token: str) -> dict:
 # Public API
 # ------------------------------------------------------------------ #
 
+def _is_token_keeper_mode() -> bool:
+    """Check if the Token Keeper service owns refresh (production mode).
+
+    Returns True when JOBBER_TOKEN_KEEPER_ENABLED is set to a truthy value.
+    On Railway this should always be '1'. Local dev defaults to False so
+    the legacy self-refresh behaviour works out of the box.
+    """
+    return os.getenv("JOBBER_TOKEN_KEEPER_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+
 def get_jobber_token() -> str:
     """
     Return a valid Jobber access token.
-    Order: DB/file/env (via token_store) → auto-refresh → stale env-var fallback.
+
+    Two modes:
+      - Token Keeper mode (JOBBER_TOKEN_KEEPER_ENABLED=1): read-only. Reads
+        from DB and trusts the Token Keeper service to keep tokens fresh.
+        Never calls the refresh endpoint.
+      - Legacy mode (default / local dev): self-refreshes when the stored
+        token is about to expire.
     """
     tokens = _load_tokens()
 
+    # ── Check if current token is still valid ──
     if tokens.get("access_token"):
         expires_at = tokens.get("expires_at", 0)
         if time.time() < expires_at - _EXPIRY_BUFFER:
             return tokens["access_token"]
 
-    # Try to refresh if we have a refresh token
-    if tokens.get("refresh_token"):
-        try:
-            new_tokens = _refresh_token(tokens["refresh_token"])
-            _save_tokens(new_tokens)
-            return new_tokens["access_token"]
-        except requests.HTTPError as exc:
-            msg = (
-                f"Token refresh failed: HTTP "
-                f"{exc.response.status_code if exc.response is not None else '?'} — "
-                f"{exc.response.text[:300] if exc.response is not None else str(exc)}"
+    # ── Token Keeper mode: read-only, never refresh here ──
+    if _is_token_keeper_mode():
+        # The token in DB is expired or missing. The Token Keeper should
+        # have refreshed it. Return it anyway (may be slightly stale but
+        # still within the server-side grace window) or fall through.
+        if tokens.get("access_token"):
+            logger.warning(
+                "[jobber] Token appears expired but Token Keeper mode is active. "
+                "Returning current token (Token Keeper may be mid-refresh)."
             )
-            logger.warning("[jobber] %s", msg)
+            return tokens["access_token"]
+
+        # No access token at all — fall through to env var / error
+        logger.error(
+            "[jobber] No access token in DB and Token Keeper mode is active. "
+            "Check that the token-keeper service is running."
+        )
+        try:
+            from simulation.error_reporter import report_error
+            report_error(
+                RuntimeError("No Jobber access token in DB"),
+                tool_name="Jobber",
+                context="Token Keeper mode is active but no token found in DB. "
+                        "Is the token-keeper service running?",
+            )
+        except Exception:
+            pass
+    else:
+        # ── Legacy mode: self-refresh ──
+        if tokens.get("refresh_token"):
             try:
-                from simulation.error_reporter import report_error
-                report_error(exc, tool_name="Jobber", context=msg + " — run: python -m auth.jobber_auth")
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.warning("[jobber] Token refresh failed: %s", exc)
-            try:
-                from simulation.error_reporter import report_error
-                report_error(exc, tool_name="Jobber", context=f"Token refresh failed: {exc} — run: python -m auth.jobber_auth")
-            except Exception:
-                pass
+                new_tokens = _refresh_token(tokens["refresh_token"])
+                _save_tokens(new_tokens)
+                return new_tokens["access_token"]
+            except requests.HTTPError as exc:
+                msg = (
+                    f"Token refresh failed: HTTP "
+                    f"{exc.response.status_code if exc.response is not None else '?'} — "
+                    f"{exc.response.text[:300] if exc.response is not None else str(exc)}"
+                )
+                logger.warning("[jobber] %s", msg)
+                try:
+                    from simulation.error_reporter import report_error
+                    report_error(exc, tool_name="Jobber", context=msg + " — run: python -m auth.jobber_auth")
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.warning("[jobber] Token refresh failed: %s", exc)
+                try:
+                    from simulation.error_reporter import report_error
+                    report_error(exc, tool_name="Jobber", context=f"Token refresh failed: {exc} — run: python -m auth.jobber_auth")
+                except Exception:
+                    pass
 
     # Last resort: stale access token from env var
     stale_token = os.getenv("JOBBER_ACCESS_TOKEN")
@@ -129,9 +181,9 @@ def get_jobber_token() -> str:
 
     raise RuntimeError(
         "No valid Jobber token available. "
-        "Set JOBBER_REFRESH_TOKEN (plus JOBBER_CLIENT_ID and JOBBER_CLIENT_SECRET) "
-        "in environment variables to enable token refresh. "
-        "Or provide JOBBER_ACCESS_TOKEN as a temporary fallback."
+        "If Token Keeper mode is active, ensure the token-keeper service is running. "
+        "Otherwise, set JOBBER_REFRESH_TOKEN (plus JOBBER_CLIENT_ID and JOBBER_CLIENT_SECRET) "
+        "or provide JOBBER_ACCESS_TOKEN as a temporary fallback."
     )
 
 
