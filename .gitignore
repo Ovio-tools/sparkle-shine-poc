@@ -13,3 +13,7 @@ logs/
 .worktrees/
 .env.railway
 .claude/
+
+# Runtime state files
+simulation/checkpoint.json
+weekly_reports/insight_history.json
