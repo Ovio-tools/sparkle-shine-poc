@@ -949,6 +949,115 @@ class JobSchedulingGenerator:
                     logger.exception("Commercial scheduling failed for %s", client.get("company_name"))
                     results.append(("failed", client.get("id"), str(e)))
 
+            # ── Pass 1c: catch-up — complete past-due scheduled jobs ────────
+            # If the engine was down or restarted, jobs from prior days may
+            # still be in 'scheduled' status.  Their timed completion events
+            # were lost when the process stopped.  Complete them now using the
+            # same outcome probabilities as JobCompletionGenerator so the
+            # statistical distribution stays realistic.
+            overdue_jobs = conn.execute("""
+                SELECT * FROM jobs
+                WHERE status = 'scheduled'
+                  AND scheduled_date::date < %s
+                ORDER BY scheduled_date, crew_id
+            """, (today.isoformat(),)).fetchall()
+            overdue_jobs = [dict(j) for j in overdue_jobs]
+
+            if overdue_jobs:
+                logger.info(
+                    "Catch-up: %d past-due scheduled jobs found, completing now",
+                    len(overdue_jobs),
+                )
+                catchup_session = session  # reuse the Jobber session
+                cfg_jc = DAILY_VOLUMES["job_completion"]
+                for oj in overdue_jobs:
+                    sp_name = f"catchup_{oj['id'].replace('-', '_')}"
+                    try:
+                        conn.execute(f"SAVEPOINT {sp_name}")
+
+                        roll = random.random()
+                        if roll < cfg_jc["on_time_rate"]:
+                            outcome = "completed"
+                        elif roll < cfg_jc["on_time_rate"] + cfg_jc["cancellation_rate"]:
+                            outcome = "cancelled"
+                        elif roll < (cfg_jc["on_time_rate"] + cfg_jc["cancellation_rate"]
+                                     + cfg_jc["no_show_rate"]):
+                            outcome = "no-show"
+                        else:
+                            # Rescheduled: for catch-up, just mark cancelled
+                            # (the reschedule window has passed)
+                            outcome = "cancelled"
+
+                        if outcome == "completed":
+                            service_type_id = oj.get("service_type_id", "std-residential")
+                            expected = _expected_duration(service_type_id, "regular")
+                            actual = int(expected * random.uniform(0.85, 1.15))
+                            # Use a plausible completion time on the original date
+                            completed_at = f"{oj['scheduled_date']}T{random.randint(10,17):02d}:{random.randint(0,59):02d}:00"
+
+                            # Close in Jobber if we have a mapping and a session
+                            if not dry_run:
+                                jobber_job_id = get_tool_id(oj["id"], "jobber", db_path=self.db_path)
+                                if jobber_job_id and catchup_session:
+                                    try:
+                                        _gql(catchup_session, _JOB_CLOSE, {
+                                            "jobId": jobber_job_id,
+                                            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
+                                        })
+                                    except Exception as e:
+                                        logger.warning("Catch-up Jobber close failed for %s: %s", oj["id"], e)
+
+                            conn.execute("""
+                                UPDATE jobs
+                                SET status = 'completed', duration_minutes_actual = %s,
+                                    completed_at = %s
+                                WHERE id = %s
+                            """, (actual, completed_at, oj["id"]))
+
+                            # Insert a review — derive ID from job ID to avoid
+                            # collisions with generate_id's separate connection.
+                            crew_id_r = oj.get("crew_id") or ""
+                            crew_name_r = crew_id_r.replace("crew-", "Crew ").title()
+                            sched_date = date.fromisoformat(oj["scheduled_date"])
+                            dist = _adjusted_rating_distribution(crew_name_r, sched_date.weekday())
+                            ratings = [r for r, _ in dist]
+                            weights = [w for _, w in dist]
+                            rating = random.choices(ratings, weights=weights, k=1)[0]
+                            # Use job number to derive review ID (SS-JOB-4481 → SS-REV-C4481)
+                            job_num = oj["id"].split("-")[-1]
+                            review_id = f"SS-REV-C{job_num}"
+                            conn.execute("""
+                                INSERT INTO reviews (id, client_id, job_id, rating, platform, review_date)
+                                VALUES (%s, %s, %s, %s, 'internal', %s)
+                                ON CONFLICT (id) DO NOTHING
+                            """, (review_id, oj["client_id"], oj["id"], rating, oj["scheduled_date"]))
+                        else:
+                            # cancelled or no-show
+                            if not dry_run:
+                                jobber_job_id = get_tool_id(oj["id"], "jobber", db_path=self.db_path)
+                                if jobber_job_id and catchup_session:
+                                    try:
+                                        _gql(catchup_session, _JOB_CLOSE, {
+                                            "jobId": jobber_job_id,
+                                            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
+                                        })
+                                    except Exception as e:
+                                        logger.warning("Catch-up Jobber close failed for %s: %s", oj["id"], e)
+                            conn.execute(
+                                "UPDATE jobs SET status = %s WHERE id = %s",
+                                (outcome, oj["id"]),
+                            )
+
+                        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                        results.append(("ok_catchup", oj["id"]))
+                    except Exception as e:
+                        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                        logger.exception("Catch-up failed for job %s", oj["id"])
+                        results.append(("failed", oj["id"], str(e)))
+
+                logger.info("Catch-up complete: %d jobs processed", len(overdue_jobs))
+
             # ── Pass 2: already-scheduled jobs (rescheduled + one-time) ──────
             already_scheduled = conn.execute("""
                 SELECT * FROM jobs
@@ -1140,9 +1249,12 @@ class JobSchedulingGenerator:
             if not dry_run:
                 conn.commit()
             succeeded = sum(1 for r in results if r[0] in ("ok", "ok_existing", "ok_fill"))
+            catchup_count = sum(1 for r in results if r[0] == "ok_catchup")
             fill_count = sum(1 for r in results if r[0] == "ok_fill")
             failed = sum(1 for r in results if r[0] == "failed")
             msg = f"scheduled {succeeded} jobs"
+            if catchup_count:
+                msg += f" ({catchup_count} catch-up)"
             if fill_count:
                 msg += f" ({fill_count} fill-in)"
             if failed:
