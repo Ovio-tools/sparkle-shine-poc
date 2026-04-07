@@ -14,18 +14,20 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 - **Database:** PostgreSQL via psycopg2 (production/simulation/automations/intelligence), SQLite (seeding, setup, tests)
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
-- **Deployment:** Railway (`railway.toml` in repo root, 4 services — start commands configured per-service on dashboard)
+- **Deployment:** Railway (`railway.toml` in repo root, 6 services — start commands configured per-service on dashboard via wrapper scripts)
 
 ### Railway Services
 
-| Service | Type | Schedule (UTC) | Start Command |
-|---------|------|---------------|---------------|
+| Service | Type | Schedule (UTC) | Start Command (Dashboard) |
+|---------|------|---------------|---------------------------|
 | simulation-engine | Long-lived | — | `python -m simulation.engine` |
 | automation-runner | Cron | `*/5 * * * *` | `python -m automations.runner --all` |
-| sales-outreach | Cron | `*/5 * * * *` | `python -m automations.automation_07_sales_outreach --live` |
+| sales-outreach | Cron | `*/5 * * * *` | `bash scripts/start_sales_outreach.sh` |
 | intelligence-daily | Cron | `0 11 * * 1-5` (6 AM CDT) | `python -m intelligence.runner --report-type daily` |
 | intelligence-weekly | Cron | `0 13 * * 0` (8 AM CDT Sun) | `python -m intelligence.runner --report-type weekly` |
-| token-keeper | Worker (always-on) | — | `python -m services.token_keeper` |
+| token-keeper | Worker (always-on) | — | `bash scripts/start_token_keeper.sh` |
+
+**Nixpacks 1.38.0 workaround:** If a Railway service build fails with `Found argument '-m'`, use a wrapper script (`scripts/start_*.sh`) as the dashboard start command instead of `python -m ...` directly. Do NOT set `NIXPACKS_START_CMD` env var alongside a dashboard start command — the combination causes build failures.
 - **Local dev:** macOS, Postgres.app
 
 ## Tool Stack
