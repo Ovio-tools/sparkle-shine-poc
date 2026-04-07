@@ -95,6 +95,20 @@ _MIGRATIONS = [
     )
     """,
 
+    # ------------------------------------------------------------------ #
+    # sync_skip_list — circuit breaker for permanently failing syncs
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS sync_skip_list (
+        tool_name           TEXT NOT NULL,
+        tool_specific_id    TEXT NOT NULL,
+        reason              TEXT NOT NULL,
+        detail              TEXT,
+        skipped_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (tool_name, tool_specific_id)
+    )
+    """,
+
     # Indexes for common query patterns
     "CREATE INDEX IF NOT EXISTS idx_automation_log_run_id   ON automation_log(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_automation_log_status   ON automation_log(status)",
@@ -114,7 +128,7 @@ def run_migration(db_path: str = None) -> None:
     finally:
         conn.close()
     print("Migration complete.")
-    print("Tables ensured: poll_state, automation_log, pending_actions, outreach_drafts")
+    print("Tables ensured: poll_state, automation_log, pending_actions, outreach_drafts, sync_skip_list")
 
 
 if __name__ == "__main__":
