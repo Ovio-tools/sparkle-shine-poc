@@ -22,11 +22,11 @@ query ListClients($cursor: String) {
       id
       firstName
       lastName
-      emails { address isPrimary }
-      phones { number isPrimary }
+      emails { address primary }
+      phones { number primary }
       createdAt
       updatedAt
-      notes
+      notes { nodes { note } }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -177,12 +177,12 @@ class JobberSyncer(BaseSyncer):
 
         emails = node.get("emails") or []
         primary_email = next(
-            (e["address"] for e in emails if e.get("isPrimary")), None
+            (e["address"] for e in emails if e.get("primary")), None
         ) or next((e["address"] for e in emails), None)
 
         phones = node.get("phones") or []
         primary_phone = next(
-            (p["number"] for p in phones if p.get("isPrimary")), None
+            (p["number"] for p in phones if p.get("primary")), None
         ) or next((p["number"] for p in phones), None)
 
         first_name = node.get("firstName") or ""
@@ -219,6 +219,12 @@ class JobberSyncer(BaseSyncer):
 
             register_mapping(canonical_id, "jobber", jobber_id, db_path=self.db_path)
 
+        # Extract notes from the connection type
+        notes_nodes = (node.get("notes") or {}).get("nodes") or []
+        notes_text = "; ".join(
+            n["note"] for n in notes_nodes if n.get("note")
+        ) or None
+
         # Keep names and phone current
         with self.db:
             self.db.execute(
@@ -230,7 +236,7 @@ class JobberSyncer(BaseSyncer):
                     notes      = COALESCE(%s, notes)
                 WHERE id = %s
                 """,
-                (first_name, last_name, primary_phone, node.get("notes"), canonical_id),
+                (first_name, last_name, primary_phone, notes_text, canonical_id),
             )
 
     # ------------------------------------------------------------------ #
@@ -433,7 +439,7 @@ if __name__ == "__main__":
                 json={
                     "query": """
                         query { clients(first: 3) {
-                            nodes { id firstName lastName emails { address isPrimary } updatedAt }
+                            nodes { id firstName lastName emails { address primary } updatedAt }
                         } }
                     """
                 },
@@ -443,7 +449,7 @@ if __name__ == "__main__":
             nodes = resp.json().get("data", {}).get("clients", {}).get("nodes", [])
             for node in nodes:
                 email = next(
-                    (e["address"] for e in (node.get("emails") or []) if e.get("isPrimary")),
+                    (e["address"] for e in (node.get("emails") or []) if e.get("primary")),
                     "—",
                 )
                 print(f"  [{node['id']}] {node.get('firstName')} {node.get('lastName')} <{email}> (updated {(node.get('updatedAt') or '')[:10]})")
