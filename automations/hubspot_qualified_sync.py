@@ -256,7 +256,7 @@ class HubSpotQualifiedSync(BaseAutomation):
             except Exception as exc:
                 failed.append(contact)
                 self.log_action(
-                    run_id, action_name, contact["hubspot_id"], "error",
+                    run_id, action_name, contact["hubspot_id"], "failed",
                     error_message=str(exc),
                     trigger_source=trigger_source,
                     trigger_detail={
@@ -610,6 +610,9 @@ class HubSpotQualifiedSync(BaseAutomation):
         Return an existing open deal_id for this person in the Qualified stage,
         creating a new deal only when none exists.  Prevents duplicate deals on
         retry runs for the same reason as _get_or_create_person.
+
+        Skips deals already mapped to a different canonical entity (e.g. an
+        SS-PROP commercial proposal) to avoid mapping collisions.
         """
         sr = session.get(
             f"{base}/persons/{person_id}/deals",
@@ -621,7 +624,16 @@ class HubSpotQualifiedSync(BaseAutomation):
                 deal.get("pipeline_id") == _PIPELINE_ID
                 and deal.get("stage_id") == _STAGE_ID
             ):
-                return str(deal["id"])
+                # Don't reuse a deal already owned by a different canonical entity
+                deal_id = str(deal["id"])
+                owner = self.db.execute(
+                    "SELECT canonical_id FROM cross_tool_mapping "
+                    "WHERE tool_name = 'pipedrive' AND tool_specific_id = %s",
+                    (deal_id,),
+                ).fetchone()
+                if owner is None:
+                    return deal_id  # unclaimed — safe to reuse
+                # Already owned — skip and keep looking
 
         dr = session.post(f"{base}/deals", json=payload, timeout=30)
         dr.raise_for_status()
