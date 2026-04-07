@@ -25,7 +25,12 @@ _ENTITY_META = {
 # ------------------------------------------------------------------ #
 
 def generate_id(entity_type: str, db_path: str = "sparkle_shine.db") -> str:
-    """Return the next available SS-TYPE-NNNN string for the given entity type."""
+    """Return the next available SS-TYPE-NNNN string for the given entity type.
+
+    Checks BOTH the entity's own table AND cross_tool_mapping to avoid
+    collisions with IDs allocated by automations (which may write to
+    cross_tool_mapping without inserting into the entity table).
+    """
     entity_type = entity_type.upper()
     if entity_type not in _ENTITY_META:
         raise ValueError(f"Unknown entity_type '{entity_type}'. Valid: {list(_ENTITY_META)}")
@@ -33,14 +38,22 @@ def generate_id(entity_type: str, db_path: str = "sparkle_shine.db") -> str:
     prefix, table = _ENTITY_META[entity_type]
     conn = get_connection(db_path)
     try:
+        # Max ID from the entity's own table
         cursor = conn.execute(f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1")
         row = cursor.fetchone()
-        if row is None:
-            next_n = 1
-        else:
-            last_id = row["id"]          # e.g. "SS-CLIENT-0042"
-            last_n = int(last_id.split("-")[-1])
-            next_n = last_n + 1
+        table_max = int(row["id"].split("-")[-1]) if row else 0
+
+        # Max ID from cross_tool_mapping (automations may allocate IDs here
+        # without writing to the entity table)
+        cursor2 = conn.execute(
+            "SELECT canonical_id FROM cross_tool_mapping "
+            "WHERE entity_type = %s ORDER BY canonical_id DESC LIMIT 1",
+            (entity_type,),
+        )
+        row2 = cursor2.fetchone()
+        mapping_max = int(row2["canonical_id"].split("-")[-1]) if row2 else 0
+
+        next_n = max(table_max, mapping_max) + 1
     finally:
         conn.close()
 
