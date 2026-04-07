@@ -353,6 +353,12 @@ def find_similar_jobs(contact: dict) -> dict:
             conn.close()
     except Exception as exc:
         logger.error("similar_jobs SQL query failed: %s", exc)
+        try:
+            from simulation.error_reporter import report_error
+            report_error(exc, tool_name="database",
+                         context="SQL query for similar jobs in sales outreach agent")
+        except Exception:
+            pass
         return {**_NO_RESULTS, "matches": []}
 
     if not rows:

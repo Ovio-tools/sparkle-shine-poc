@@ -441,6 +441,13 @@ class SimulationEngine:
                 pass
             except Exception as e:
                 logger.error(f"Daily reconciliation failed: {e}")
+                try:
+                    from simulation.error_reporter import report_error
+                    report_error(e, tool_name="reconciliation",
+                                 context="Daily reconciliation sweep",
+                                 dry_run=self.dry_run)
+                except Exception:
+                    pass
 
             if not self.running:
                 break

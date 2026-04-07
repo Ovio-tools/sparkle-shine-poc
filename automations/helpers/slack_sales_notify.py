@@ -340,8 +340,14 @@ def notify_sales_channel(
         else:
             logger.error("Slack API returned ok=False: %s", response.get("error"))
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to post sales notification to #%s", _CHANNEL)
+        try:
+            from simulation.error_reporter import report_error
+            report_error(exc, tool_name="slack",
+                         context=f"Posting sales notification to #{_CHANNEL}")
+        except Exception:
+            pass
 
     # Also DM the 'tools' user with the same notification
     dm_channel_id = _resolve_dm_channel(_DM_USER)
@@ -358,7 +364,13 @@ def notify_sales_channel(
                     _DM_USER,
                     dm_response.get("error"),
                 )
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to DM '%s' on Slack", _DM_USER)
+            try:
+                from simulation.error_reporter import report_error
+                report_error(exc, tool_name="slack",
+                             context=f"Posting sales DM to {_DM_USER}")
+            except Exception:
+                pass
 
     return primary_ts

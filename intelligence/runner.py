@@ -280,6 +280,15 @@ def _run_syncers(db_path: str, skip_set: set[str] | None = None) -> tuple[int, l
             f"Sync complete: {succeeded}/{total} tools synced, "
             f"{len(errors)} error ({''.join(errors[:1])})"
         )
+        try:
+            from simulation.error_reporter import report_error
+            report_error(
+                f"Sync failures: {', '.join(errors)}",
+                tool_name="intelligence",
+                context=f"Intelligence sync stage — {len(errors)}/{total} tool(s) failed",
+            )
+        except Exception:
+            pass
     else:
         print(f"Sync complete: {succeeded}/{total} tools synced, 0 errors")
 

@@ -287,8 +287,15 @@ class LeadLeakDetection(BaseAutomation):
             if not self.dry_run and email:
                 try:
                     has_deal = self._pipedrive_has_deal_for_email(email)
-                except Exception:
-                    pass  # Fallback failure is non-fatal; treat as no deal found
+                except Exception as exc:
+                    # Fallback failure is non-fatal; treat as no deal found
+                    try:
+                        from simulation.error_reporter import report_error
+                        report_error(exc, tool_name="pipedrive",
+                                     context=f"Pipedrive fallback deal search for {email}",
+                                     dry_run=self.dry_run)
+                    except Exception:
+                        pass
 
             if has_deal:
                 continue

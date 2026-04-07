@@ -489,6 +489,12 @@ class SalesOutreachAutomation(BaseAutomation):
                 )
             except Exception as exc:
                 logger.error("Similar jobs agent failed for %s: %s", name, exc)
+                try:
+                    report_error(exc, tool_name="sales-outreach",
+                                 context=f"Similar jobs agent for {name}",
+                                 dry_run=self.dry_run)
+                except Exception:
+                    pass
 
         # ── c. Create Gmail draft ─────────────────────────────────────────────
         if error_message is None and email_result is not None:
@@ -555,6 +561,12 @@ class SalesOutreachAutomation(BaseAutomation):
                 )
         except Exception as exc:
             logger.error("Slack notification failed for %s: %s", name, exc)
+            try:
+                report_error(exc, tool_name="slack",
+                             context=f"Posting sales notification for {name}",
+                             dry_run=self.dry_run)
+            except Exception:
+                pass
 
         # ── e. Write outreach_drafts DB record ────────────────────────────────
         total_tokens, estimated_cost = _estimate_tokens_and_cost()

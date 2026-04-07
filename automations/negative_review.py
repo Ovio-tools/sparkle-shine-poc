@@ -292,6 +292,16 @@ class NegativeReviewResponse(BaseAutomation):
 
         if not search_result.results:
             print(f"[WARN] HubSpot contact not found for {client_email}")
+            try:
+                from simulation.error_reporter import report_error
+                report_error(
+                    f"HubSpot contact not found for {client_email}",
+                    tool_name="hubspot",
+                    context="Negative review response — could not find contact to flag",
+                    dry_run=self.dry_run,
+                )
+            except Exception:
+                pass
             return "skipped"
 
         contact_id = search_result.results[0].id
