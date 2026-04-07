@@ -511,6 +511,11 @@ class SalesOutreachAutomation(BaseAutomation):
                     if gmail_result is None:
                         error_message = "Gmail draft creation failed."
                         logger.warning("%s — contact: %s", error_message, name)
+                        self.log_action(
+                            run_id, "create_gmail_draft", None, "failed",
+                            error_message=error_message,
+                            trigger_source=trigger_source,
+                        )
                     else:
                         self.log_action(
                             run_id, "create_gmail_draft",
@@ -524,6 +529,11 @@ class SalesOutreachAutomation(BaseAutomation):
                 except Exception as exc:
                     error_message = f"Gmail draft raised: {exc}"
                     logger.error("Gmail draft failed for %s: %s", name, exc)
+                    self.log_action(
+                        run_id, "create_gmail_draft", None, "failed",
+                        error_message=str(exc),
+                        trigger_source=trigger_source,
+                    )
 
         # ── d. Slack notification ─────────────────────────────────────────────
         template_info = email_result or {}

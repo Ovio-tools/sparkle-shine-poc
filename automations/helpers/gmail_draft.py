@@ -53,6 +53,15 @@ def create_gmail_draft(to_email: str, subject: str, body_text: str) -> dict | No
         logger.info("Created Gmail draft %s for %s", draft_id, to_email)
         return {"draft_id": draft_id, "gmail_link": gmail_link}
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to create Gmail draft for %s (subject: %r)", to_email, subject)
+        try:
+            from simulation.error_reporter import report_error
+            report_error(
+                exc,
+                tool_name="google_gmail",
+                context=f"Creating Gmail draft for {to_email}",
+            )
+        except Exception:
+            pass  # Don't let error reporting break the automation
         return None
