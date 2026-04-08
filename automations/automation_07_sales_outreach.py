@@ -92,6 +92,7 @@ class SalesOutreachAutomation(BaseAutomation):
     def run(self) -> None:
         run_id         = self.generate_run_id()
         trigger_source = "poll:hubspot_new_contacts"
+        self.last_run_id = run_id
 
         # ── Step 1: Read watermark ────────────────────────────────────────────
         cutoff_ms = self._read_watermark()
@@ -876,6 +877,7 @@ if __name__ == "__main__":
         db=db,
         dry_run=dry_run,
     )
+    run_started_at = datetime.now(timezone.utc)
     try:
         automation.run()
     except Exception as _exc:
@@ -886,26 +888,44 @@ if __name__ == "__main__":
         )
         db.close()
         _sys.exit(1)
+    run_finished_at = datetime.now(timezone.utc)
+    run_id = getattr(automation, "last_run_id", None)
+    elapsed_seconds = max(0.0, (run_finished_at - run_started_at).total_seconds())
 
     print()
     print("─" * 65)
     print("automation_log entries for this run:")
     print("─" * 65)
-    rows = db.execute(
-        """
-        SELECT action_name, action_target, status, error_message
-        FROM automation_log
-        WHERE automation_name = 'SalesOutreachAutomation'
-        ORDER BY id DESC
-        LIMIT 20
-        """
-    ).fetchall()
-    for row in reversed(rows):
-        r      = dict(row)
-        marker = "OK " if r["status"] == "success" else "ERR"
-        print(f"  [{marker}] {r['action_name']:<50} → {r['action_target'] or 'n/a'}")
-        if r["error_message"]:
-            print(f"         note: {r['error_message']}")
+    print(f"Run ID:   {run_id or 'unknown'}")
+    print(f"Started:  {run_started_at.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Finished: {run_finished_at.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Duration: {elapsed_seconds:.1f}s")
+
+    rows = []
+    if run_id:
+        rows = db.execute(
+            """
+            SELECT action_name, action_target, status, error_message, created_at
+            FROM automation_log
+            WHERE automation_name = 'SalesOutreachAutomation'
+              AND run_id = %s
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+
+    if not rows:
+        print("  No automation_log rows were written for this run.")
+    else:
+        for row in rows:
+            r      = dict(row)
+            marker = "OK " if r["status"] == "success" else "ERR"
+            print(
+                f"  [{marker}] {str(r['created_at']):<19} "
+                f"{r['action_name']:<50} → {r['action_target'] or 'n/a'}"
+            )
+            if r["error_message"]:
+                print(f"         note: {r['error_message']}")
 
     print()
     print("Dry-run complete." if dry_run else "Live run complete.")
