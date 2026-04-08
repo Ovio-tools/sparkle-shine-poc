@@ -23,6 +23,8 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from tests.sqlite_compat import open_sqlite_compat, sqlite_get_column_names
+
 
 def _bare_gen(db_path=":memory:"):
     """Return a DealGenerator with __init__ bypassed; only db_path set."""
@@ -110,7 +112,8 @@ class TestEnsureSchema(unittest.TestCase):
             "CREATE TABLE commercial_proposals "
             "(id TEXT PRIMARY KEY, title TEXT, status TEXT DEFAULT 'draft')"
         )
-        gen._ensure_schema(conn)
+        with patch("simulation.generators.deals.get_column_names", side_effect=sqlite_get_column_names):
+            gen._ensure_schema(conn)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(commercial_proposals)")}
         self.assertIn("start_date", cols)
         self.assertIn("crew_assignment", cols)
@@ -126,25 +129,61 @@ class TestEnsureSchema(unittest.TestCase):
             "CREATE TABLE commercial_proposals "
             "(id TEXT PRIMARY KEY, title TEXT, status TEXT DEFAULT 'draft')"
         )
-        gen._ensure_schema(conn)
-        gen._ensure_schema(conn)  # second call — should not raise
+        with patch("simulation.generators.deals.get_column_names", side_effect=sqlite_get_column_names):
+            gen._ensure_schema(conn)
+            gen._ensure_schema(conn)  # second call — should not raise
         conn.close()
 
 
-class TestInit(unittest.TestCase):
+class _DealSqliteCompatCase(unittest.TestCase):
 
     def setUp(self):
         self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
         from database.schema import init_db_sqlite as init_db
         init_db(self._db_path)
+        self._conn_patcher = patch(
+            "simulation.generators.deals.get_connection",
+            side_effect=lambda: open_sqlite_compat(self._db_path),
+        )
+        self._cols_patcher = patch(
+            "simulation.generators.deals.get_column_names",
+            side_effect=sqlite_get_column_names,
+        )
+        self._canonical_patcher = patch(
+            "simulation.generators.deals.get_canonical_id",
+            side_effect=self._get_canonical_id,
+        )
+        self._conn_patcher.start()
+        self._cols_patcher.start()
+        self._canonical_patcher.start()
 
     def tearDown(self):
+        self._canonical_patcher.stop()
+        self._cols_patcher.stop()
+        self._conn_patcher.stop()
         os.close(self._fd)
         os.unlink(self._db_path)
 
+    def _get_canonical_id(self, tool_name: str, tool_specific_id: str):
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT canonical_id
+            FROM cross_tool_mapping
+            WHERE tool_name = ? AND tool_specific_id = ?
+            """,
+            (tool_name, str(tool_specific_id)),
+        ).fetchone()
+        conn.close()
+        return row["canonical_id"] if row else None
+
+
+class TestInit(_DealSqliteCompatCase):
+
     def test_loads_stage_ids_from_tool_ids_json(self):
         from simulation.generators.deals import DealGenerator
-        gen = DealGenerator(db_path=self._db_path)
+        gen = DealGenerator()
         # Values from config/tool_ids.json
         self.assertEqual(gen._won_stage_id, 12)
         self.assertEqual(gen._lost_stage_id, 13)
@@ -155,7 +194,7 @@ class TestInit(unittest.TestCase):
 
     def test_schema_columns_added_on_init(self):
         from simulation.generators.deals import DealGenerator
-        DealGenerator(db_path=self._db_path)
+        DealGenerator()
         conn = sqlite3.connect(self._db_path)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(commercial_proposals)")}
         conn.close()
@@ -164,18 +203,12 @@ class TestInit(unittest.TestCase):
         self.assertIn("stage_change_time", cols)
 
 
-class TestPickDeal(unittest.TestCase):
+class TestPickDeal(_DealSqliteCompatCase):
 
     def setUp(self):
-        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db_sqlite as init_db
-        init_db(self._db_path)
+        super().setUp()
         from simulation.generators.deals import DealGenerator
-        self.gen = DealGenerator(db_path=self._db_path)
-
-    def tearDown(self):
-        os.close(self._fd)
-        os.unlink(self._db_path)
+        self.gen = DealGenerator()
 
     def test_returns_none_when_no_open_deals(self):
         with patch("simulation.generators.deals.get_client", return_value=_mock_pipedrive(None)):
@@ -205,18 +238,12 @@ class TestPickDeal(unittest.TestCase):
             self.assertLess(count, 150, f"deal {deal_id} picked {count} times (too often)")
 
 
-class TestLogActivity(unittest.TestCase):
+class TestLogActivity(_DealSqliteCompatCase):
 
     def setUp(self):
-        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db_sqlite as init_db
-        init_db(self._db_path)
+        super().setUp()
         from simulation.generators.deals import DealGenerator
-        self.gen = DealGenerator(db_path=self._db_path)
-
-    def tearDown(self):
-        os.close(self._fd)
-        os.unlink(self._db_path)
+        self.gen = DealGenerator()
 
     def test_posts_note_activity_to_pipedrive(self):
         mc = MagicMock()
@@ -242,23 +269,17 @@ class TestLogActivity(unittest.TestCase):
         mc.post.assert_not_called()
 
 
-class TestAdvanceDeal(unittest.TestCase):
+class TestAdvanceDeal(_DealSqliteCompatCase):
     """Seed random, mock Pipedrive PUT. No SQLite fixture needed for these cases."""
 
     def setUp(self):
-        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db_sqlite as init_db
-        init_db(self._db_path)
+        super().setUp()
         from simulation.generators.deals import DealGenerator
-        self.gen = DealGenerator(db_path=self._db_path)
+        self.gen = DealGenerator()
         # Deal in Qualified (stage_id=8), 5 days in stage
         now = datetime.utcnow()
         sct = (now - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
         self.deal = {"id": 100, "stage_id": 8, "stage_change_time": sct, "update_time": sct}
-
-    def tearDown(self):
-        os.close(self._fd)
-        os.unlink(self._db_path)
 
     def _mock_client(self, put_status=200, post_status=201):
         mc = MagicMock()
@@ -361,16 +382,13 @@ class TestAdvanceDeal(unittest.TestCase):
         self.assertEqual(result.message, "no change")
 
 
-class TestCompleteWonDeal(unittest.TestCase):
+class TestCompleteWonDeal(_DealSqliteCompatCase):
     """Mock Pipedrive PUT+POST, real SQLite in a temp file."""
 
     def setUp(self):
-        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db_sqlite as init_db
-        from database.mappings import register_mapping
-        init_db(self._db_path)
+        super().setUp()
         from simulation.generators.deals import DealGenerator
-        self.gen = DealGenerator(db_path=self._db_path)
+        self.gen = DealGenerator()
 
         # Insert SS-PROP-0001 in commercial_proposals (status column allows 'negotiating')
         conn = sqlite3.connect(self._db_path)
@@ -380,8 +398,18 @@ class TestCompleteWonDeal(unittest.TestCase):
         )
         conn.commit()
         conn.close()
-        # Register pipedrive deal 90200 → SS-PROP-0001 (high IDs to avoid conftest collisions)
-        register_mapping("SS-PROP-0001", "pipedrive", "90200", db_path=self._db_path)
+        # Register pipedrive deal 90200 → SS-PROP-0001 in the SQLite test DB.
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            """
+            INSERT INTO cross_tool_mapping
+                (canonical_id, entity_type, tool_name, tool_specific_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("SS-PROP-0001", "PROP", "pipedrive", "90200"),
+        )
+        conn.commit()
+        conn.close()
 
         # Insert SS-LEAD-0001 in leads and register deal 90201
         conn = sqlite3.connect(self._db_path)
@@ -391,7 +419,17 @@ class TestCompleteWonDeal(unittest.TestCase):
         )
         conn.commit()
         conn.close()
-        register_mapping("SS-LEAD-0001", "pipedrive", "90201", db_path=self._db_path)
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            """
+            INSERT INTO cross_tool_mapping
+                (canonical_id, entity_type, tool_name, tool_specific_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("SS-LEAD-0001", "LEAD", "pipedrive", "90201"),
+        )
+        conn.commit()
+        conn.close()
 
         self.contract = {
             "contract_type":     "commercial",
@@ -400,22 +438,6 @@ class TestCompleteWonDeal(unittest.TestCase):
             "start_date":        date(2026, 4, 10),
             "crew_assignment":   "Crew A",
         }
-
-    def tearDown(self):
-        os.close(self._fd)
-        os.unlink(self._db_path)
-        # Clean up PostgreSQL cross_tool_mapping entries registered by setUp
-        try:
-            from database.connection import get_connection as _pg
-            conn = _pg()
-            with conn:
-                conn.execute(
-                    "DELETE FROM cross_tool_mapping WHERE canonical_id IN (%s, %s)",
-                    ("SS-PROP-0001", "SS-LEAD-0001"),
-                )
-            conn.close()
-        except Exception:
-            pass  # best-effort cleanup
 
     def _mc(self, put_status=200):
         mc = MagicMock()
@@ -496,19 +518,13 @@ class TestCompleteWonDeal(unittest.TestCase):
         self.assertNotEqual(row[0], "won")
 
 
-class TestServiceFrequencyBranching(unittest.TestCase):
+class TestServiceFrequencyBranching(_DealSqliteCompatCase):
     """3 cases × 20 iterations — assert no crossover between pools."""
 
     def setUp(self):
-        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db_sqlite as init_db
-        init_db(self._db_path)
+        super().setUp()
         from simulation.generators.deals import DealGenerator
-        self.gen = DealGenerator(db_path=self._db_path)
-
-    def tearDown(self):
-        os.close(self._fd)
-        os.unlink(self._db_path)
+        self.gen = DealGenerator()
 
     def test_residential_recurring_pool_when_emv_positive(self):
         """Client Type=residential, EMV > 0 → only weekly/biweekly/monthly."""
@@ -538,19 +554,13 @@ class TestServiceFrequencyBranching(unittest.TestCase):
                 f"Iteration {i}: got '{result}' for commercial, expected pool={pool}")
 
 
-class TestExecute(unittest.TestCase):
+class TestExecute(_DealSqliteCompatCase):
 
     def setUp(self):
-        self._fd, self._db_path = tempfile.mkstemp(suffix=".db")
-        from database.schema import init_db_sqlite as init_db
-        init_db(self._db_path)
+        super().setUp()
         from simulation.generators.deals import DealGenerator, GeneratorResult
-        self.gen = DealGenerator(db_path=self._db_path)
+        self.gen = DealGenerator()
         self.GeneratorResult = GeneratorResult
-
-    def tearDown(self):
-        os.close(self._fd)
-        os.unlink(self._db_path)
 
     def test_returns_failure_when_no_open_deals(self):
         with patch("simulation.generators.deals.get_client", return_value=_mock_pipedrive(None)):

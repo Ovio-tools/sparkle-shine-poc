@@ -10,9 +10,24 @@ import random
 import sqlite3
 import unittest
 from collections import namedtuple
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
+
+from tests.sqlite_compat import sqlite_get_column_names, wrap_sqlite_connection
+
+
+@contextmanager
+def _patched_ops_db(conn):
+    with patch(
+        "simulation.generators.operations.get_connection",
+        return_value=wrap_sqlite_connection(conn),
+    ), patch(
+        "simulation.generators.operations.get_column_names",
+        side_effect=sqlite_get_column_names,
+    ):
+        yield
 
 # ── Engine tests ──────────────────────────────────────────────────────────────
 
@@ -397,8 +412,7 @@ class TestNewClientSetupGeneratorRecurring(unittest.TestCase):
             def __getattr__(self, name):
                 return getattr(self._real, name)
 
-        proxy = _NoCloseConn(conn)
-        with patch("sqlite3.connect", return_value=proxy):
+        with _patched_ops_db(conn):
             result = gen.execute(dry_run=False)
 
         self.assertTrue(result.success)
@@ -513,7 +527,7 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
             def close(self): pass
             def __getattr__(self, name): return getattr(self._c, name)
 
-        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+        with _patched_ops_db(conn):
             result = gen.execute(dry_run=False)
 
         # 2 succeeded, 1 failed → success=False with summary message
@@ -555,6 +569,11 @@ class TestJobSchedulingGeneratorQueueFn(unittest.TestCase):
                 crew_id TEXT, frequency TEXT, price_per_visit REAL,
                 start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
                 day_of_week TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT, company_name TEXT,
+                notes TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                last_service_date TEXT
             );
             CREATE TABLE jobs (
                 id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
@@ -602,7 +621,7 @@ class TestJobSchedulingGeneratorQueueFn(unittest.TestCase):
             def close(self): pass
             def __getattr__(self, name): return getattr(self._c, name)
 
-        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+        with _patched_ops_db(conn):
             with patch("simulation.generators.operations.date") as mock_date:
                 mock_date.today.return_value = today
                 mock_date.fromisoformat.side_effect = date.fromisoformat
@@ -635,6 +654,11 @@ class TestJobSchedulingGeneratorPass2(unittest.TestCase):
                 crew_id TEXT, frequency TEXT, price_per_visit REAL,
                 start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
                 day_of_week TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT, company_name TEXT,
+                notes TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                last_service_date TEXT
             );
             CREATE TABLE jobs (
                 id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
@@ -669,7 +693,7 @@ class TestJobSchedulingGeneratorPass2(unittest.TestCase):
             def close(self): pass
             def __getattr__(self, name): return getattr(self._c, name)
 
-        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+        with _patched_ops_db(conn):
             with patch("simulation.generators.operations.date") as mock_date:
                 mock_date.today.return_value = today
                 mock_date.fromisoformat.side_effect = date.fromisoformat
@@ -760,7 +784,7 @@ class TestJobCompletionGeneratorCompleted(unittest.TestCase):
             def close(self): pass
             def __getattr__(self, name): return getattr(self._c, name)
 
-        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+        with _patched_ops_db(conn):
             with patch("random.random", return_value=0.01):  # force 'completed' outcome
                 result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
 
@@ -776,6 +800,24 @@ class TestJobCompletionGeneratorCompleted(unittest.TestCase):
         self.assertEqual(dict(review)["platform"], "internal")
         self.assertIn(dict(review)["rating"], (1, 2, 3, 4, 5))
 
+    def test_next_review_id_ignores_malformed_legacy_ids(self):
+        from simulation.generators.operations import _next_review_id
+
+        class _FakeCursor:
+            def fetchall(self):
+                return [
+                    {"id": "SS-REV-C4726"},
+                    {"id": "SS-REV-0007"},
+                    {"id": "not-a-review-id"},
+                ]
+
+        class _FakeConn:
+            def execute(self, sql):
+                self.last_sql = sql
+                return _FakeCursor()
+
+        self.assertEqual(_next_review_id(_FakeConn()), "SS-REV-0008")
+
     def test_completed_skips_review_in_dry_run(self):
         from simulation.generators.operations import JobCompletionGenerator
         conn = self._make_db_with_job()
@@ -787,7 +829,7 @@ class TestJobCompletionGeneratorCompleted(unittest.TestCase):
             def close(self): pass
             def __getattr__(self, name): return getattr(self._c, name)
 
-        with patch("sqlite3.connect", return_value=_NoCloseConn(conn)):
+        with _patched_ops_db(conn):
             result = gen.execute(dry_run=True, job_id="SS-JOB-0001")
 
         # dry_run: no API calls, no writes, no review
@@ -866,7 +908,7 @@ class TestJobCompletionGeneratorOutcomes(unittest.TestCase):
             "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
         }
         gen = JobCompletionGenerator(db_path=":memory:")
-        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+        with _patched_ops_db(conn):
             # roll lands in cancelled window: 0.92 <= x < 0.95
             with patch("random.random", return_value=0.93):
                 result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
@@ -885,7 +927,7 @@ class TestJobCompletionGeneratorOutcomes(unittest.TestCase):
             "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
         }
         gen = JobCompletionGenerator(db_path=":memory:")
-        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+        with _patched_ops_db(conn):
             # no-show window: 0.95 <= x < 0.97
             with patch("random.random", return_value=0.96):
                 result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
@@ -912,7 +954,7 @@ class TestJobCompletionGeneratorOutcomes(unittest.TestCase):
             {"data": {"jobCreate": {"job": {"id": "GQL-JOB-9999"}, "userErrors": []}}},
         ]
         gen = JobCompletionGenerator(db_path=":memory:")
-        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+        with _patched_ops_db(conn):
             # rescheduled window: x >= 0.97
             with patch("random.random", return_value=0.98):
                 result = gen.execute(dry_run=False, job_id="SS-JOB-0001")
@@ -950,7 +992,7 @@ class TestJobCompletionGeneratorOutcomes(unittest.TestCase):
             "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
         }
         gen = JobCompletionGenerator(db_path=":memory:")
-        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+        with _patched_ops_db(conn):
             with patch("random.random", return_value=0.93):  # cancelled
                 gen.execute(dry_run=False, job_id="SS-JOB-0001")
 
@@ -979,7 +1021,7 @@ class TestJobCompletionGeneratorOutcomes(unittest.TestCase):
             "data": {"jobClose": {"job": {"id": "GQL-JOB-0001"}, "userErrors": []}}
         }
         gen = JobCompletionGenerator(db_path=":memory:")
-        with patch("sqlite3.connect", return_value=self._no_close(conn)):
+        with _patched_ops_db(conn):
             with patch("random.random", return_value=0.93):  # cancelled
                 gen.execute(dry_run=False, job_id="SS-JOB-0001")
 

@@ -10,7 +10,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 
 ## Tech Stack
 
-- **Language:** Python 3
+- **Language:** Python 3.11+ (Railway/Nixpacks default is 3.11; avoid macOS system Python 3.9 for local dev)
 - **Database:** PostgreSQL via psycopg2 (production/simulation/automations/intelligence), SQLite (seeding, setup, tests)
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
@@ -28,7 +28,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 | token-keeper | Worker (always-on) | — | `bash scripts/start_token_keeper.sh` |
 
 **Nixpacks 1.38.0 workaround:** If a Railway service build fails with `Found argument '-m'`, use a wrapper script (`scripts/start_*.sh`) as the dashboard start command instead of `python -m ...` directly. Do NOT set `NIXPACKS_START_CMD` env var alongside a dashboard start command — the combination causes build failures.
-- **Local dev:** macOS, Postgres.app
+- **Local dev:** macOS, Postgres.app, Python 3.11+ recommended. The macOS system `python3` (3.9 + LibreSSL) works for basic scripts but emits Google client EOL warnings and `urllib3` LibreSSL warnings during tests.
 
 ## Tool Stack
 

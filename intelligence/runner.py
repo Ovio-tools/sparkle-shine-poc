@@ -254,6 +254,7 @@ def _run_syncers(db_path: str, skip_set: set[str] | None = None) -> tuple[int, l
             if sync_result.errors:
                 for err in sync_result.errors:
                     logger.warning("Non-fatal error in %s syncer: %s", tool_name, err)
+                    errors.append(f"{tool_name}: {err}")
             succeeded += 1
         except FuturesTimeoutError:
             logger.error(

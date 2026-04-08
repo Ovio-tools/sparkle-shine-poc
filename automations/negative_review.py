@@ -20,13 +20,14 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from automations.base import BaseAutomation
+from automations.utils.assignees import get_assignee_email
 from automations.utils.asana_tasks import create_tasks
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_OFFICE_MANAGER_EMAIL = "maria.gonzalez@oviodigital.com"
+_OFFICE_MANAGER_EMAIL = get_assignee_email("office_manager")
 
 # HubSpot note-to-contact association type (HUBSPOT_DEFINED category, id 202)
 _HS_NOTE_TO_CONTACT_TYPE_ID = 202

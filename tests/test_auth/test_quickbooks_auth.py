@@ -3,10 +3,6 @@ import os
 import unittest
 from unittest.mock import patch, MagicMock
 
-import sys
-sys.modules.setdefault("database", MagicMock())
-sys.modules.setdefault("database.connection", MagicMock())
-
 from auth import quickbooks_auth
 
 

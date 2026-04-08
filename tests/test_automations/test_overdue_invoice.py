@@ -98,7 +98,7 @@ def test_asana_tasks_created_for_tier2_plus(mock_db, mock_clients):
 
 
 def test_assignee_bookkeeper_for_tier2(mock_db, mock_clients):
-    """Tier 2 invoices (31-60 days) are assigned to the bookkeeper."""
+    """Tier 2 invoices (31-60 days) route to Tools for bookkeeping follow-up."""
     invoices = [_overdue_invoice("I-2", "1002", 500.0, 35)]
 
     mock_tasks_api = MagicMock()
@@ -115,13 +115,13 @@ def test_assignee_bookkeeper_for_tier2(mock_db, mock_clients):
 
     mock_tasks_api.create_task.assert_called_once()
     task_body = mock_tasks_api.create_task.call_args[0][0]
-    assert task_body["data"]["assignee"] == "sandra.flores@oviodigital.com", (
-        "Tier 2 tasks must be assigned to the bookkeeper (sandra.flores)"
+    assert task_body["data"]["assignee"] == "tools@oviodigital.com", (
+        "Tier 2 tasks must be assigned to Tools"
     )
 
 
 def test_assignee_office_manager_for_tier3_plus(mock_db, mock_clients):
-    """Tier 3+ invoices (61+ days) are assigned to the office manager."""
+    """Tier 3+ invoices (61+ days) route to Tools for operational follow-up."""
     invoices = [
         _overdue_invoice("I-3", "1003", 275.0, 65),   # Tier 3
         _overdue_invoice("I-4", "1004", 800.0, 95),   # Tier 4
@@ -142,8 +142,8 @@ def test_assignee_office_manager_for_tier3_plus(mock_db, mock_clients):
     assert mock_tasks_api.create_task.call_count == 2
     for c in mock_tasks_api.create_task.call_args_list:
         assignee = c[0][0]["data"]["assignee"]
-        assert assignee == "patricia.nguyen@oviodigital.com", (
-            f"Tier 3/4 tasks must be assigned to office manager, got {assignee!r}"
+        assert assignee == "tools@oviodigital.com", (
+            f"Tier 3/4 tasks must be assigned to Tools, got {assignee!r}"
         )
 
 

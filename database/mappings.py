@@ -150,16 +150,24 @@ def get_tool_url(
 def get_canonical_id(
     tool_name: str,
     tool_specific_id: str,
+    entity_type: Optional[str] = None,
     db_path: str = "sparkle_shine.db",
 ) -> Optional[str]:
     """Reverse lookup: given a tool's ID, return the canonical SS-ID or None."""
     conn = get_connection(db_path)
     try:
-        cursor = conn.execute(
-            "SELECT canonical_id FROM cross_tool_mapping "
-            "WHERE tool_name = %s AND tool_specific_id = %s",
-            (tool_name, tool_specific_id),
-        )
+        if entity_type:
+            cursor = conn.execute(
+                "SELECT canonical_id FROM cross_tool_mapping "
+                "WHERE tool_name = %s AND tool_specific_id = %s AND entity_type = %s",
+                (tool_name, tool_specific_id, entity_type.upper()),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT canonical_id FROM cross_tool_mapping "
+                "WHERE tool_name = %s AND tool_specific_id = %s",
+                (tool_name, tool_specific_id),
+            )
         row = cursor.fetchone()
         return row["canonical_id"] if row else None
     finally:

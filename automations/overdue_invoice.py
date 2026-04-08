@@ -28,6 +28,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from automations.base import BaseAutomation
+from automations.utils.assignees import MARIA_EMAIL, get_assignee_email
 from automations.utils.id_resolver import MappingNotFoundError
 import asana
 
@@ -36,8 +37,9 @@ import asana
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BOOKKEEPER_EMAIL     = "maria.gonzalez@oviodigital.com"
-_OFFICE_MANAGER_EMAIL = "maria.gonzalez@oviodigital.com"
+_BOOKKEEPER_EMAIL     = get_assignee_email("bookkeeper")
+_OFFICE_MANAGER_EMAIL = get_assignee_email("office_manager")
+_OWNER_EMAIL          = MARIA_EMAIL
 
 _ASANA_PROJECT = "Admin & Operations"
 _ASANA_SECTION = "To Do"

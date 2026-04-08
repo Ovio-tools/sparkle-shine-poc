@@ -26,19 +26,20 @@ from automations.runner import run_poll, run_scheduled, run_pending
        return_value=[{"job_id": "j1", "client_id": "301"}])
 @patch("automations.triggers.poll_pipedrive_won_deals",
        return_value=[{"deal_id": "d1", "contact_name": "Test User"}])
+@patch("automations.hubspot_qualified_sync.HubSpotQualifiedSync")
 @patch("automations.new_client_onboarding.NewClientOnboarding")
 @patch("automations.job_completion_flow.JobCompletionFlow")
 @patch("automations.payment_received.PaymentReceived")
 @patch("automations.negative_review.NegativeReviewResponse")
 def test_poll_mode_fires_all_4_event_automations(
-    mock_nr_cls, mock_pr_cls, mock_jcf_cls, mock_nco_cls,
+    mock_nr_cls, mock_pr_cls, mock_jcf_cls, mock_nco_cls, mock_hs_cls,
     mock_pipedrive, mock_jobber, mock_qbo, mock_sheets,
     mock_sleep,
     mock_db, mock_clients,
 ):
     """
-    In poll mode, all 4 event-driven automations are instantiated and their
-    run() methods are called once per trigger event found.
+    In poll mode, the 4 event-driven automations fire once per trigger event,
+    and HubSpotQualifiedSync runs once per poll cycle.
     """
     result = run_poll(mock_clients, mock_db, dry_run=False)
 
@@ -54,9 +55,10 @@ def test_poll_mode_fires_all_4_event_automations(
     mock_nr_cls.return_value.run.assert_called_once_with(
         {"row_index": 1, "rating": 1, "review_text": "bad"}
     )
+    mock_hs_cls.return_value.run.assert_called_once_with()
 
-    assert result["processed"] == 4
-    assert result["succeeded"] == 4
+    assert result["processed"] == 5
+    assert result["succeeded"] == 5
     assert result["failed"] == 0
 
 
@@ -193,12 +195,13 @@ def test_pending_mode_skips_future_actions(
        return_value=[{"job_id": "j1"}])
 @patch("automations.triggers.poll_pipedrive_won_deals",
        return_value=[{"deal_id": "d1"}])
+@patch("automations.hubspot_qualified_sync.HubSpotQualifiedSync")
 @patch("automations.new_client_onboarding.NewClientOnboarding")
 @patch("automations.job_completion_flow.JobCompletionFlow")
 @patch("automations.payment_received.PaymentReceived")
 @patch("automations.negative_review.NegativeReviewResponse")
 def test_error_isolation_one_failure_does_not_block_others(
-    mock_nr_cls, mock_pr_cls, mock_jcf_cls, mock_nco_cls,
+    mock_nr_cls, mock_pr_cls, mock_jcf_cls, mock_nco_cls, mock_hs_cls,
     mock_pipedrive, mock_jobber, mock_qbo, mock_sheets,
     mock_sleep,
     mock_db, mock_clients,
@@ -212,12 +215,13 @@ def test_error_isolation_one_failure_does_not_block_others(
 
     result = run_poll(mock_clients, mock_db, dry_run=False)
 
-    # Onboarding failed but all 4 were attempted
-    assert result["processed"] == 4
+    # Onboarding failed but the remaining four automations still ran
+    assert result["processed"] == 5
     assert result["failed"] == 1
-    assert result["succeeded"] == 3
+    assert result["succeeded"] == 4
 
-    # The other 3 automations still ran
+    # The other automations still ran
     mock_jcf_cls.return_value.run.assert_called_once()
     mock_pr_cls.return_value.run.assert_called_once()
     mock_nr_cls.return_value.run.assert_called_once()
+    mock_hs_cls.return_value.run.assert_called_once_with()

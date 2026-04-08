@@ -217,6 +217,35 @@ def test_cross_tool_mapping_updated(
     assert qbo_row is not None, "QuickBooks mapping was not registered"
     assert qbo_row["tool_specific_id"] == "qbo-new-cust"
 
+    hubspot_row = mock_db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name = 'hubspot'",
+        (canonical_id,),
+    ).fetchone()
+    assert hubspot_row is not None, "HubSpot mapping was not registered"
+    assert hubspot_row["tool_specific_id"] == "hs-created-123"
+
+
+@patch("automations.new_client_onboarding.requests.post")
+@patch("automations.new_client_onboarding.create_tasks", return_value=["gid-1"])
+def test_existing_hubspot_contact_is_reused(
+    _mock_tasks, mock_requests, auto, mock_db, mock_clients, sample_triggers
+):
+    """Onboarding should reuse an existing HubSpot contact when the email already exists."""
+    mock_requests.return_value = _make_qbo_post_mock()
+
+    auto.run(sample_triggers["won_deal"])
+
+    mock_clients.hubspot.crm.contacts.basic_api.update.assert_called()
+    mock_clients.hubspot.crm.contacts.basic_api.create.assert_not_called()
+
+    row = mock_db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = 'SS-CLIENT-0001' AND tool_name = 'hubspot'"
+    ).fetchone()
+    assert row is not None
+    assert row["tool_specific_id"] == "501"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Error isolation

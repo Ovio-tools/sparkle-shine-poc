@@ -78,9 +78,9 @@ class TestPhase1Integration:
     # 1. Environment
     # ---------------------------------------------------------------- #
     def test_env_credentials_complete(self):
-        """All 12 required environment variables are present and non-empty."""
-        from credentials import REQUIRED_KEYS
-        missing = [k for k in REQUIRED_KEYS if not os.getenv(k)]
+        """All required credentials are present, including one valid Google auth mode."""
+        from credentials import missing_required_credentials
+        missing = missing_required_credentials()
         assert not missing, f"Missing credentials: {missing}"
 
     # ---------------------------------------------------------------- #
@@ -119,7 +119,7 @@ class TestPhase1Integration:
             f"Unexpected ID format: {canonical_id}"
 
         fake_tool = "test_tool"
-        fake_tool_id = "FAKE-XYZ-9999"
+        fake_tool_id = f"FAKE-{canonical_id}"
         fake_url = "https://example.com/test/FAKE-XYZ-9999"
 
         register_mapping(canonical_id, fake_tool, fake_tool_id, fake_url,

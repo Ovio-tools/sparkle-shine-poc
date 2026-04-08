@@ -26,6 +26,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from automations.base import BaseAutomation
+from automations.utils.assignees import get_assignee_email
 from automations.utils.asana_tasks import create_tasks
 from automations.utils.id_resolver import MappingNotFoundError
 
@@ -33,7 +34,7 @@ from automations.utils.id_resolver import MappingNotFoundError
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SALES_ESTIMATOR_EMAIL = "maria.gonzalez@oviodigital.com"
+_SALES_ESTIMATOR_EMAIL = get_assignee_email("sales_estimator")
 
 _ASANA_PROJECT  = "Sales Pipeline Tasks"
 _ASANA_SECTION  = "Follow-Up"

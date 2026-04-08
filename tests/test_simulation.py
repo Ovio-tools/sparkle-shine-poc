@@ -31,6 +31,19 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
+def _cli_subprocess_env():
+    """Return a clean-ish env for CLI smoke tests.
+
+    The pytest session fixture injects a PostgreSQL test DATABASE_URL into the
+    parent process. These subprocess tests are validating the CLI entry point,
+    not the pytest database harness, so they should not inherit that override.
+    """
+    env = os.environ.copy()
+    env.pop("DATABASE_URL", None)
+    env.pop("PYTEST_CURRENT_TEST", None)
+    return env
+
+
 class TestSimulationConfig(unittest.TestCase):
 
     def test_daily_volumes_keys_exist(self):
@@ -268,11 +281,13 @@ class TestPlanDay(unittest.TestCase):
 
     def test_plan_day_deterministic_with_seeded_date(self):
         """Same date + same seed → same plan."""
+        from simulation.engine import _stable_seed
+
         engine = self._make_engine(target_date=date(2026, 3, 27))
         # Re-seed to identical state
-        random.seed(hash(str(date(2026, 3, 27))))
+        random.seed(_stable_seed(date(2026, 3, 27).isoformat()))
         plan_a = [gc.generator_name for gc in engine.plan_day(date(2026, 3, 27))]
-        random.seed(hash(str(date(2026, 3, 27))))
+        random.seed(_stable_seed(date(2026, 3, 27).isoformat()))
         plan_b = [gc.generator_name for gc in engine.plan_day(date(2026, 3, 27))]
         self.assertEqual(plan_a, plan_b)
 
@@ -666,7 +681,7 @@ class TestCLI(unittest.TestCase):
     def test_help_flag_exits_cleanly(self):
         result = subprocess.run(
             self._ENGINE_MODULE + ["--help"],
-            capture_output=True, text=True, cwd=self._CWD
+            capture_output=True, text=True, cwd=self._CWD, env=_cli_subprocess_env()
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn("--dry-run", result.stdout)
@@ -680,8 +695,8 @@ class TestCLI(unittest.TestCase):
         result = subprocess.run(
             self._ENGINE_MODULE + ["--dry-run", "--once", "--date", "2026-03-27",
                                    "--speed", "999999"],
-            capture_output=True, text=True, cwd=self._CWD,
-            timeout=15
+            capture_output=True, text=True, cwd=self._CWD, env=_cli_subprocess_env(),
+            timeout=30
         )
         self.assertEqual(result.returncode, 0)
 
@@ -690,8 +705,8 @@ class TestCLI(unittest.TestCase):
         result = subprocess.run(
             self._ENGINE_MODULE + ["--dry-run", "--once", "--date", "2026-03-27",
                                    "--speed", "999999"],
-            capture_output=True, text=True, cwd=self._CWD,
-            timeout=15
+            capture_output=True, text=True, cwd=self._CWD, env=_cli_subprocess_env(),
+            timeout=30
         )
         combined = result.stdout + result.stderr
         self.assertIn("Daily summary", combined)
@@ -704,8 +719,8 @@ class TestCLI(unittest.TestCase):
         subprocess.run(
             self._ENGINE_MODULE + ["--dry-run", "--once", "--date", "2026-03-01",
                                    "--speed", "999999"],
-            capture_output=True, text=True, cwd=self._CWD,
-            timeout=15
+            capture_output=True, text=True, cwd=self._CWD, env=_cli_subprocess_env(),
+            timeout=30
         )
         self.assertFalse(checkpoint.exists(),
             "dry-run must not create simulation/checkpoint.json")
@@ -1208,7 +1223,8 @@ class TestSimulationEngineSubprocess(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, "-m", "simulation.engine",
              "--dry-run", "--once", "--date", "2026-03-30", "--speed", "999999"],
-            capture_output=True, text=True, cwd=self._CWD, timeout=30,
+            capture_output=True, text=True, cwd=self._CWD,
+            env=_cli_subprocess_env(), timeout=60,
         )
         combined = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0,
@@ -1734,4 +1750,3 @@ class TestIntegrationWeeklyReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

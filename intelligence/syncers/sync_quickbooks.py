@@ -105,7 +105,9 @@ class QuickBooksSyncer(BaseSyncer):
         for inv in rows:
             try:
                 qbo_id = str(inv["Id"])
-                canonical_id = get_canonical_id("quickbooks", qbo_id, self.db_path)
+                canonical_id = get_canonical_id(
+                    "quickbooks", qbo_id, entity_type="INV", db_path=self.db_path
+                )
 
                 amount = float(inv.get("TotalAmt", 0))
                 balance = float(inv.get("Balance", 0))
@@ -134,7 +136,9 @@ class QuickBooksSyncer(BaseSyncer):
                 if canonical_id is None:
                     client_ref = str((inv.get("CustomerRef") or {}).get("value", ""))
                     client_canonical = (
-                        get_canonical_id("quickbooks", client_ref, self.db_path)
+                        get_canonical_id(
+                            "quickbooks", client_ref, entity_type="CLIENT", db_path=self.db_path
+                        )
                         if client_ref else None
                     )
                     if client_canonical is None:
@@ -196,7 +200,9 @@ class QuickBooksSyncer(BaseSyncer):
             try:
                 qbo_id = str(pay["Id"])
                 # Skip if already mapped
-                if get_canonical_id("quickbooks", qbo_id, self.db_path) is not None:
+                if get_canonical_id(
+                    "quickbooks", qbo_id, entity_type="PAY", db_path=self.db_path
+                ) is not None:
                     continue
 
                 amount = float(pay.get("TotalAmt", 0))
@@ -214,7 +220,9 @@ class QuickBooksSyncer(BaseSyncer):
                         break
 
                 inv_canonical = (
-                    get_canonical_id("quickbooks", inv_qbo_id, self.db_path)
+                    get_canonical_id(
+                        "quickbooks", inv_qbo_id, entity_type="INV", db_path=self.db_path
+                    )
                     if inv_qbo_id else None
                 )
                 if inv_canonical is None:

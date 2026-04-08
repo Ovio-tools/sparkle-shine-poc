@@ -1,11 +1,7 @@
 """Tests for Google auth refresh condition and Railway fallback."""
-import os
+import tempfile
 import unittest
-from unittest.mock import patch, MagicMock, PropertyMock
-
-import sys
-sys.modules.setdefault("database", MagicMock())
-sys.modules.setdefault("database.connection", MagicMock())
+from unittest.mock import patch, MagicMock
 
 from google.oauth2.credentials import Credentials
 
@@ -29,9 +25,12 @@ class TestRefreshCondition(unittest.TestCase):
         mock_creds.expired = False  # No token to be expired
         mock_creds.refresh_token = "rt_env"
 
-        with patch.object(google_auth, "_build_creds_from_dict", return_value=mock_creds):
-            with patch.object(mock_creds, "to_json", return_value='{"token": "new", "refresh_token": "rt_env"}'):
-                google_auth.get_google_credentials()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_path = f"{tmpdir}/token.json"
+            with patch.object(google_auth, "_token_file", return_value=token_path):
+                with patch.object(google_auth, "_build_creds_from_dict", return_value=mock_creds):
+                    with patch.object(mock_creds, "to_json", return_value='{"token": "new", "refresh_token": "rt_env"}'):
+                        google_auth.get_google_credentials()
 
         # Should have called refresh, not the browser flow
         mock_creds.refresh.assert_called_once()
@@ -48,8 +47,11 @@ class TestRefreshCondition(unittest.TestCase):
         mock_creds.expired = False
         mock_creds.refresh_token = "rt"
 
-        with patch.object(google_auth, "_build_creds_from_dict", return_value=mock_creds):
-            result = google_auth.get_google_credentials()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_path = f"{tmpdir}/token.json"
+            with patch.object(google_auth, "_token_file", return_value=token_path):
+                with patch.object(google_auth, "_build_creds_from_dict", return_value=mock_creds):
+                    result = google_auth.get_google_credentials()
 
         mock_creds.refresh.assert_not_called()
         self.assertEqual(result, mock_creds)
@@ -64,10 +66,14 @@ class TestMissingCredentialsJson(unittest.TestCase):
         """No credentials.json, no env vars -> RuntimeError with guidance."""
         mock_store.load_tokens.return_value = {}
 
-        with patch.object(google_auth, "_build_creds_from_dict", return_value=None):
-            with self.assertRaises(RuntimeError) as ctx:
-                google_auth.get_google_credentials()
-            self.assertIn("GOOGLE_REFRESH_TOKEN", str(ctx.exception))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_path = f"{tmpdir}/token.json"
+            with patch.object(google_auth, "_token_file", return_value=token_path):
+                with patch.object(google_auth, "_build_creds_from_dict", return_value=None):
+                    with patch.object(google_auth, "_credentials_file", side_effect=FileNotFoundError):
+                        with self.assertRaises(RuntimeError) as ctx:
+                            google_auth.get_google_credentials()
+                        self.assertIn("GOOGLE_REFRESH_TOKEN", str(ctx.exception))
 
 
 if __name__ == "__main__":

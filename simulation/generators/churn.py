@@ -232,7 +232,7 @@ class ChurnGenerator:
             errors: list[str] = []
 
             if dry_run:
-                self.logger.info(
+                self.logger.debug(
                     f"[dry-run] Would churn {client_name} ({client['id']}): {reason}"
                 )
                 return GeneratorResult(

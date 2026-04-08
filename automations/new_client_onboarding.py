@@ -26,6 +26,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from automations.base import BaseAutomation
+from automations.utils.assignees import get_assignee_email
 from automations.utils.asana_tasks import create_tasks
 from automations.utils.id_resolver import MappingNotFoundError, register_mapping
 
@@ -35,8 +36,8 @@ from automations.utils.id_resolver import MappingNotFoundError, register_mapping
 
 _JOBBER_GQL_URL = "https://api.getjobber.com/api/graphql"
 
-_OFFICE_MANAGER_EMAIL = "maria.gonzalez@oviodigital.com"
-_CREW_LEAD_EMAIL      = "maria.gonzalez@oviodigital.com"
+_OFFICE_MANAGER_EMAIL = get_assignee_email("office_manager")
+_CREW_LEAD_EMAIL      = get_assignee_email("crew_lead")
 
 # QBO sandbox Net 30 term ID (standard in all QBO sandboxes)
 _QBO_NET30_TERM_ID = "3"
@@ -261,7 +262,24 @@ class NewClientOnboarding(BaseAutomation):
                 error_message=str(exc), trigger_source=trigger_source,
             )
 
-        # ── Action 4: Mailchimp ───────────────────────────────────────────────
+        # ── Action 4: HubSpot ─────────────────────────────────────────────────
+        try:
+            hubspot_contact_id = self._action_hubspot_contact(ctx)
+            if not self.dry_run and hubspot_contact_id:
+                register_mapping(self.db, ctx["canonical_id"], "hubspot", hubspot_contact_id)
+            self.log_action(
+                run_id, "upsert_hubspot_contact",
+                f"hubspot:contact:{hubspot_contact_id or 'skipped'}",
+                "success",
+                trigger_source=trigger_source,
+            )
+        except Exception as exc:
+            self.log_action(
+                run_id, "upsert_hubspot_contact", None, "failed",
+                error_message=str(exc), trigger_source=trigger_source,
+            )
+
+        # ── Action 5: Mailchimp ───────────────────────────────────────────────
         try:
             self._action_mailchimp(ctx, tool_ids)
             self.log_action(
@@ -276,7 +294,7 @@ class NewClientOnboarding(BaseAutomation):
                 error_message=str(exc), trigger_source=trigger_source,
             )
 
-        # ── Action 5: Slack ───────────────────────────────────────────────────
+        # ── Action 6: Slack ───────────────────────────────────────────────────
         try:
             self._action_slack(ctx, task_count)
             self.log_action(
@@ -291,7 +309,7 @@ class NewClientOnboarding(BaseAutomation):
                 error_message=str(exc), trigger_source=trigger_source,
             )
 
-        # ── Action 6: Cross-tool mapping verification ─────────────────────────
+        # ── Action 7: Cross-tool mapping verification ─────────────────────────
         self._action_verify_mappings(run_id, ctx, trigger_source)
 
     # ── Context builder ───────────────────────────────────────────────────────
@@ -488,13 +506,14 @@ class NewClientOnboarding(BaseAutomation):
             )
             # Re-point only the Pipedrive deal mapping (and pipedrive_person if
             # it shares the same tool_specific_id) from the lead ID to the new
-            # client ID.  Other lead mappings (e.g. HubSpot) are left untouched.
+            # client ID. HubSpot is promoted too so downstream client automations
+            # resolve the same CRM contact after conversion.
             self.db.execute(
                 """
                 UPDATE cross_tool_mapping
                    SET canonical_id = %s, entity_type = 'CLIENT', synced_at = CURRENT_TIMESTAMP
                  WHERE canonical_id = %s
-                   AND tool_name IN ('pipedrive', 'pipedrive_person')
+                   AND tool_name IN ('hubspot', 'pipedrive', 'pipedrive_person')
                 """,
                 (client_id, lead_id),
             )
@@ -729,7 +748,78 @@ class NewClientOnboarding(BaseAutomation):
 
         return str(customer.get("Id", ""))
 
-    # ── Action 4: Mailchimp ───────────────────────────────────────────────────
+    # ── Action 4: HubSpot ─────────────────────────────────────────────────────
+
+    def _action_hubspot_contact(self, ctx: dict) -> Optional[str]:
+        """Find or create the HubSpot contact for this client."""
+        email = (ctx.get("email") or "").strip().lower()
+        if not email:
+            print(f"[WARN] No email for {ctx['canonical_id']} — HubSpot contact skipped")
+            return None
+
+        if self.dry_run:
+            print(
+                f"[DRY RUN] Would search or create HubSpot contact: "
+                f"{ctx['display_name']} <{email}>"
+            )
+            return "dry-run-hubspot-id"
+
+        hs_client = self.clients("hubspot")
+        from hubspot.crm.contacts import (
+            PublicObjectSearchRequest,
+            SimplePublicObjectInput,
+            SimplePublicObjectInputForCreate,
+        )
+
+        search_request = PublicObjectSearchRequest(
+            filter_groups=[{
+                "filters": [{
+                    "propertyName": "email",
+                    "operator": "EQ",
+                    "value": email,
+                }]
+            }],
+            properties=["email", "firstname", "lastname", "lifecyclestage"],
+            limit=1,
+        )
+        search_result = hs_client.crm.contacts.search_api.do_search(
+            search_request,
+            _request_timeout=30,
+        )
+
+        properties = {
+            "email": email,
+            "lifecyclestage": "customer",
+        }
+        if ctx.get("first_name"):
+            properties["firstname"] = ctx["first_name"]
+        if ctx.get("last_name"):
+            properties["lastname"] = ctx["last_name"]
+        if ctx.get("phone"):
+            properties["phone"] = ctx["phone"]
+
+        if search_result.results:
+            contact = search_result.results[0]
+            found_email = (
+                (getattr(contact, "properties", {}) or {}).get("email", "")
+                .strip()
+                .lower()
+            )
+            if found_email == email:
+                hs_client.crm.contacts.basic_api.update(
+                    str(contact.id),
+                    SimplePublicObjectInput(properties=properties),
+                    _request_timeout=30,
+                )
+                return str(contact.id)
+
+        response = hs_client.crm.contacts.basic_api.create(
+            SimplePublicObjectInputForCreate(properties=properties),
+            _request_timeout=30,
+        )
+        return str(response.id)
+
+    # ── Action 5: Mailchimp ───────────────────────────────────────────────────
 
     def _action_mailchimp(self, ctx: dict, tool_ids: dict) -> None:
         """Upsert the subscriber in Mailchimp and apply onboarding tags."""
@@ -822,6 +912,8 @@ class NewClientOnboarding(BaseAutomation):
         self, run_id: str, ctx: dict, trigger_source: str
     ) -> None:
         required_tools = ["pipedrive", "jobber", "quickbooks_customer", "mailchimp"]
+        if ctx.get("email"):
+            required_tools.append("hubspot")
         canonical_id = ctx["canonical_id"]
 
         cursor = self.db.execute(

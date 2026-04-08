@@ -3,11 +3,28 @@ pytest configuration for Sparkle & Shine tests.
 """
 import os
 import sys
+import warnings
 import pytest
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"You are using a Python version 3\.9 past its end of life.*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"You are using a non-supported Python version \(3\.9\.6\).*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 v2 only supports OpenSSL 1\.1\.1\+.*",
+    category=Warning,
+)
 
 # Load .env so TEST_DATABASE_URL is available
 try:
@@ -16,33 +33,31 @@ try:
 except ImportError:
     pass
 
+from credentials import google_noninteractive_credentials_available
+
 _TEST_DB_URL = os.getenv(
     "TEST_DATABASE_URL",
     "postgresql://localhost/sparkle_shine_test",
 )
 
-# Legacy SQLite path kept for simulation tests that still use SQLite
+# Legacy SQLite path kept only for the shrinking set of tests that still
+# explicitly exercise SQLite-only helpers.
 _TEST_DB_SQLITE = os.path.join(_PROJECT_ROOT, "sparkle_shine_test.db")
 
 
-def _google_token_exists() -> bool:
-    parent = os.path.dirname(_PROJECT_ROOT)
-    return os.path.exists(os.path.join(_PROJECT_ROOT, "token.json")) or \
-           os.path.exists(os.path.join(parent, "token.json"))
-
-
 requires_google = pytest.mark.skipif(
-    not _google_token_exists(),
+    not google_noninteractive_credentials_available(),
     reason=(
-        "Google token.json not found — complete the OAuth flow first: "
-        "python -m auth --verify"
+        "Google auth is not configured for non-interactive use. "
+        "Set GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN, "
+        "or provide GOOGLE_CREDENTIALS_FILE/GOOGLE_TOKEN_FILE with a refresh token."
     ),
 )
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _init_test_db():
-    """Point DATABASE_URL at the test instance and create the schema once per session.
+    """Point DATABASE_URL at the PostgreSQL test instance once per session.
 
     Autouse so every test file (including simulation tests that call
     database.mappings functions) always hits the test DB, never production.
@@ -54,7 +69,7 @@ def _init_test_db():
 
 @pytest.fixture(scope="session")
 def test_db_path():
-    """Yield the SQLite path for simulation/legacy tests that still use SQLite."""
+    """Yield the legacy SQLite path for the few tests that still opt into SQLite."""
     yield _TEST_DB_SQLITE
 
 
