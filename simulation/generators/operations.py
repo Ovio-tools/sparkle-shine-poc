@@ -81,6 +81,19 @@ _ONE_TIME_FREQS = {
     "one_time_move_in_out", "one_time_project",
 }
 
+
+def _next_review_id(conn) -> str:
+    """Return the next numeric review ID, ignoring malformed legacy values."""
+    max_review_num = 0
+    for row in conn.execute("SELECT id FROM reviews").fetchall():
+        review_id = str(row["id"] or "")
+        if not review_id.startswith("SS-REV-"):
+            continue
+        suffix = review_id.split("-")[-1]
+        if suffix.isdigit():
+            max_review_num = max(max_review_num, int(suffix))
+    return f"SS-REV-{max_review_num + 1:04d}"
+
 # ── GraphQL mutation strings ──────────────────────────────────────────────────
 
 _CLIENT_CREATE = """
@@ -964,10 +977,16 @@ class JobSchedulingGenerator:
             overdue_jobs = [dict(j) for j in overdue_jobs]
 
             if overdue_jobs:
-                logger.info(
-                    "Catch-up: %d past-due scheduled jobs found, completing now",
-                    len(overdue_jobs),
-                )
+                if dry_run:
+                    logger.debug(
+                        "Catch-up: %d past-due scheduled jobs found, completing now",
+                        len(overdue_jobs),
+                    )
+                else:
+                    logger.info(
+                        "Catch-up: %d past-due scheduled jobs found, completing now",
+                        len(overdue_jobs),
+                    )
                 catchup_session = session  # reuse the Jobber session
                 cfg_jc = DAILY_VOLUMES["job_completion"]
                 for oj in overdue_jobs:
@@ -1014,8 +1033,8 @@ class JobSchedulingGenerator:
                                 WHERE id = %s
                             """, (actual, completed_at, oj["id"]))
 
-                            # Insert a review — derive ID from job ID to avoid
-                            # collisions with generate_id's separate connection.
+                            # Insert a review using the same numeric ID format as
+                            # the normal completion path.
                             crew_id_r = oj.get("crew_id") or ""
                             crew_name_r = crew_id_r.replace("crew-", "Crew ").title()
                             sched_date = date.fromisoformat(oj["scheduled_date"])
@@ -1023,9 +1042,7 @@ class JobSchedulingGenerator:
                             ratings = [r for r, _ in dist]
                             weights = [w for _, w in dist]
                             rating = random.choices(ratings, weights=weights, k=1)[0]
-                            # Use job number to derive review ID (SS-JOB-4481 → SS-REV-C4481)
-                            job_num = oj["id"].split("-")[-1]
-                            review_id = f"SS-REV-C{job_num}"
+                            review_id = _next_review_id(conn)
                             conn.execute("""
                                 INSERT INTO reviews (id, client_id, job_id, rating, platform, review_date)
                                 VALUES (%s, %s, %s, %s, 'internal', %s)
@@ -1056,7 +1073,10 @@ class JobSchedulingGenerator:
                         logger.exception("Catch-up failed for job %s", oj["id"])
                         results.append(("failed", oj["id"], str(e)))
 
-                logger.info("Catch-up complete: %d jobs processed", len(overdue_jobs))
+                if dry_run:
+                    logger.debug("Catch-up complete: %d jobs processed", len(overdue_jobs))
+                else:
+                    logger.info("Catch-up complete: %d jobs processed", len(overdue_jobs))
 
             # ── Pass 2: already-scheduled jobs (rescheduled + one-time) ──────
             already_scheduled = conn.execute("""
@@ -1225,10 +1245,16 @@ class JobSchedulingGenerator:
                         gap_minutes -= duration
                         job_count += 1
                         results.append(("ok_fill", fill_job_id))
-                        logger.info(
-                            "Fill-in: %s deep clean for %s (%s), %d min gap remaining",
-                            crew_id, candidate["client_id"], zone, gap_minutes,
-                        )
+                        if dry_run:
+                            logger.debug(
+                                "Fill-in: %s deep clean for %s (%s), %d min gap remaining",
+                                crew_id, candidate["client_id"], zone, gap_minutes,
+                            )
+                        else:
+                            logger.info(
+                                "Fill-in: %s deep clean for %s (%s), %d min gap remaining",
+                                crew_id, candidate["client_id"], zone, gap_minutes,
+                            )
 
                     except Exception as e:
                         logger.exception(
@@ -1241,10 +1267,16 @@ class JobSchedulingGenerator:
                 prior = prior_jobs_by_crew.get(crew_id, [])
                 total_min = sum(j["expected_duration"] for j in prior)
                 util_pct = total_min / CREW_CAPACITY["daily_minutes"] * 100
-                logger.info(
-                    "%s: %d jobs, %d min scheduled, %.0f%% utilization",
-                    crew_id, len(prior), total_min, util_pct,
-                )
+                if dry_run:
+                    logger.debug(
+                        "%s: %d jobs, %d min scheduled, %.0f%% utilization",
+                        crew_id, len(prior), total_min, util_pct,
+                    )
+                else:
+                    logger.info(
+                        "%s: %d jobs, %d min scheduled, %.0f%% utilization",
+                        crew_id, len(prior), total_min, util_pct,
+                    )
 
             if not dry_run:
                 conn.commit()
@@ -1374,7 +1406,7 @@ class JobCompletionGenerator:
         weights = [w for _, w in dist]
         rating = random.choices(ratings, weights=weights, k=1)[0]
 
-        review_id = generate_id("REV", db_path=self.db_path)
+        review_id = _next_review_id(conn)
         conn.execute("""
             INSERT INTO reviews (id, client_id, job_id, rating, platform, review_date)
             VALUES (%s, %s, %s, %s, 'internal', %s)

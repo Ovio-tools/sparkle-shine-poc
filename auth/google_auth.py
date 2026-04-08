@@ -73,6 +73,23 @@ def _token_file() -> str:
     return os.path.join(_PROJECT_ROOT, fname)
 
 
+def _client_credentials() -> tuple[str | None, str | None]:
+    """Return Google OAuth client credentials from env vars or credentials.json."""
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    if client_id and client_secret:
+        return client_id, client_secret
+
+    try:
+        with open(_credentials_file()) as f:
+            payload = json.load(f)
+    except Exception:
+        return None, None
+
+    client_block = payload.get("installed") or payload.get("web") or {}
+    return client_block.get("client_id"), client_block.get("client_secret")
+
+
 # ------------------------------------------------------------------ #
 # Core credential loader
 # ------------------------------------------------------------------ #
@@ -80,12 +97,13 @@ def _token_file() -> str:
 def _build_creds_from_dict(data: dict) -> Credentials | None:
     """Construct a Credentials object from a token dict (e.g. from DB or env vars)."""
     try:
+        client_id, client_secret = _client_credentials()
         return Credentials(
             token=data.get("token"),
             refresh_token=data.get("refresh_token"),
             token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=data.get("client_id") or os.getenv("GOOGLE_CLIENT_ID") or get_credential("GOOGLE_CLIENT_ID"),
-            client_secret=data.get("client_secret") or os.getenv("GOOGLE_CLIENT_SECRET") or get_credential("GOOGLE_CLIENT_SECRET"),
+            client_id=data.get("client_id") or client_id,
+            client_secret=data.get("client_secret") or client_secret,
             scopes=data.get("scopes", _SCOPES),
         )
     except Exception as exc:

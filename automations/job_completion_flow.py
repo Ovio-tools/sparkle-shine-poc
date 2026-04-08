@@ -11,6 +11,7 @@ Actions (each in its own try/except so failures are isolated):
   4. Post a Slack summary to #operations with duration variance flagging
 """
 import json
+import logging
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -24,6 +25,8 @@ if _PROJECT_ROOT not in sys.path:
 
 from automations.base import BaseAutomation
 from automations.utils.id_resolver import MappingNotFoundError, register_mapping
+
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Service catalogue — mirrors config/business.py SERVICE_TYPES
@@ -380,11 +383,20 @@ class JobCompletionFlow(BaseAutomation):
         email via Mailchimp 48 hours after job completion.
         No Mailchimp API call is made here.
         """
+        client_email = (ctx.get("client_email") or "").strip().lower()
+
         if self.dry_run:
             print(
                 f"[DRY RUN] Would schedule 'send_review_request' for "
-                f"{ctx['client_email'] or ctx['client_name']} in 48h "
+                f"{client_email or ctx['client_name']} in 48h "
                 f"(job {ctx['job_id']})"
+            )
+            return
+
+        if not client_email:
+            logger.warning(
+                "Skipping delayed review request for job %s: missing client email",
+                ctx.get("job_id", "unknown"),
             )
             return
 
@@ -392,7 +404,7 @@ class JobCompletionFlow(BaseAutomation):
             action_name="send_review_request",
             trigger_context_dict={
                 "canonical_id":  ctx["canonical_id"],
-                "client_email":  ctx["client_email"],
+                "client_email":  client_email,
                 "client_name":   ctx["client_name"],
                 "service_type":  ctx["service_type"],
                 "job_date":      ctx["completion_date"].isoformat(),

@@ -9,6 +9,7 @@ Dry-run convention: reads always allowed; QBO API + SQLite writes skipped.
 """
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -64,6 +65,12 @@ _WRITE_OFF_DAYS = 90
 _qbo_base_url_cache: Optional[str] = None
 
 
+def _stable_seed(value: str) -> int:
+    """Return a process-stable integer seed derived from a canonical ID."""
+    digest = hashlib.sha256(value.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
 def _qbo_base() -> str:
     global _qbo_base_url_cache
     if _qbo_base_url_cache is None:
@@ -82,7 +89,7 @@ def _assign_profile(client_id: str, client_type: str) -> str:
     simulation ticks without storing the profile in SQLite.
     """
     weights = _PROFILE_WEIGHTS.get(client_type, _PROFILE_WEIGHTS["residential"])
-    rng = random.Random(hash(client_id) & 0xFFFFFFFF)
+    rng = random.Random(_stable_seed(client_id))
     return rng.choices(_PROFILES, weights=weights, k=1)[0]
 
 

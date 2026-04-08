@@ -282,7 +282,8 @@ class DealGenerator:
         # canonical ID lookup always performed — reads are permitted in dry_run (Type 2 generator)
         canonical_id = get_canonical_id("pipedrive", str(deal_id))
         if canonical_id is None:
-            logger.warning(
+            log_fn = logger.debug if dry_run else logger.warning
+            log_fn(
                 "Won deal %s has no canonical ID mapping — skipping DB update", deal_id
             )
         elif canonical_id.startswith("SS-PROP-"):

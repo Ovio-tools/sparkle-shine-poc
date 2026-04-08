@@ -119,6 +119,28 @@ def test_review_request_delayed_48h(mock_post, auto, mock_clients, mock_db, samp
     mock_clients.mailchimp.lists.set_list_member.assert_not_called()
 
 
+def test_review_request_skipped_when_client_email_missing(auto, mock_db):
+    """
+    Jobs without a client email must not enqueue a broken pending action.
+    """
+    auto._action_schedule_review_request(
+        {
+            "canonical_id": "SS-CLIENT-0001",
+            "client_email": "",
+            "client_name": "No Email Client",
+            "service_type": "Standard Residential Clean",
+            "completion_date": date(2026, 3, 15),
+            "job_id": "SS-JOB-0999",
+        }
+    )
+
+    row = mock_db.execute(
+        "SELECT action_name FROM pending_actions "
+        "WHERE action_name = 'send_review_request' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is None, "Missing-email jobs should not create pending review requests"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HubSpot engagement
 # ─────────────────────────────────────────────────────────────────────────────

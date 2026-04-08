@@ -26,7 +26,6 @@ query ListClients($cursor: String) {
       phones { number primary }
       createdAt
       updatedAt
-      notes { nodes { note } }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -43,8 +42,6 @@ query ListJobs($cursor: String) {
       endAt
       jobStatus
       client { id }
-      lineItems { name unitPrice }
-      jobNotes { note }
       updatedAt
     }
     pageInfo { hasNextPage endCursor }
@@ -54,13 +51,17 @@ query ListJobs($cursor: String) {
 
 _RECURRING_QUERY = """
 query ListRecurring($cursor: String) {
-  quotes(first: 100, after: $cursor, filter: { jobType: RECURRING }) {
+  quotes(first: 100, after: $cursor) {
     nodes {
       id
       title
       client { id }
       amounts { subtotal }
-      jobType
+      jobs(first: 5) {
+        nodes {
+          jobType
+        }
+      }
       updatedAt
     }
     pageInfo { hasNextPage endCursor }
@@ -76,6 +77,11 @@ _JOBBER_STATUS_MAP = {
     "LATE": "scheduled",
     "UNSCHEDULED": "scheduled",
 }
+
+
+def _quote_is_recurring(node: dict) -> bool:
+    jobs = (node.get("jobs") or {}).get("nodes") or []
+    return any(job.get("jobType") == "RECURRING" for job in jobs)
 
 
 class JobberSyncer(BaseSyncer):
@@ -219,12 +225,6 @@ class JobberSyncer(BaseSyncer):
 
             register_mapping(canonical_id, "jobber", jobber_id, db_path=self.db_path)
 
-        # Extract notes from the connection type
-        notes_nodes = (node.get("notes") or {}).get("nodes") or []
-        notes_text = "; ".join(
-            n["note"] for n in notes_nodes if n.get("note")
-        ) or None
-
         # Keep names and phone current
         with self.db:
             self.db.execute(
@@ -232,11 +232,10 @@ class JobberSyncer(BaseSyncer):
                 UPDATE clients
                 SET first_name = %s,
                     last_name  = %s,
-                    phone      = COALESCE(%s, phone),
-                    notes      = COALESCE(%s, notes)
+                    phone      = COALESCE(%s, phone)
                 WHERE id = %s
                 """,
-                (first_name, last_name, primary_phone, notes_text, canonical_id),
+                (first_name, last_name, primary_phone, canonical_id),
             )
 
     # ------------------------------------------------------------------ #
@@ -283,9 +282,6 @@ class JobberSyncer(BaseSyncer):
             return  # Skip jobs whose client we haven't synced yet
 
         status = _JOBBER_STATUS_MAP.get(node.get("jobStatus", "ACTIVE"), "scheduled")
-        notes = "; ".join(
-            n["note"] for n in (node.get("jobNotes") or []) if n.get("note")
-        )
         scheduled_date = (node.get("startAt") or "")[:10] or None
         scheduled_time = (node.get("startAt") or "")[11:16] or None
         end_at = node.get("endAt")
@@ -297,8 +293,8 @@ class JobberSyncer(BaseSyncer):
                     """
                     INSERT INTO jobs
                         (id, client_id, service_type_id, scheduled_date,
-                         scheduled_time, status, notes, completed_at)
-                    VALUES (%s, %s, 'residential-clean', %s, %s, %s, %s, %s)
+                         scheduled_time, status, completed_at)
+                    VALUES (%s, %s, 'residential-clean', %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
                     (
@@ -307,7 +303,6 @@ class JobberSyncer(BaseSyncer):
                         scheduled_date,
                         scheduled_time,
                         status,
-                        notes or None,
                         end_at if status == "completed" else None,
                     ),
                 )
@@ -318,13 +313,12 @@ class JobberSyncer(BaseSyncer):
                     """
                     UPDATE jobs
                     SET status       = %s,
-                        notes        = COALESCE(%s, notes),
                         completed_at = CASE WHEN %s = 'completed'
                                            THEN COALESCE(%s, completed_at)
                                            ELSE completed_at END
                     WHERE id = %s
                     """,
-                    (status, notes or None, status, end_at, canonical_id),
+                    (status, status, end_at, canonical_id),
                 )
 
     # ------------------------------------------------------------------ #
@@ -343,6 +337,8 @@ class JobberSyncer(BaseSyncer):
 
             for node in data["nodes"]:
                 if since_iso and (node.get("updatedAt") or "") < since_iso:
+                    continue
+                if not _quote_is_recurring(node):
                     continue
                 try:
                     self._upsert_recurring(node)

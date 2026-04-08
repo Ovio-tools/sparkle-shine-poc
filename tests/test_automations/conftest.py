@@ -285,6 +285,10 @@ def _make_hubspot_mock() -> MagicMock:
     mock_result.results = [mock_found]
     hs.crm.contacts.search_api.do_search.return_value = mock_result
 
+    created = MagicMock()
+    created.id = "hs-created-123"
+    hs.crm.contacts.basic_api.create.return_value = created
+
     return hs
 
 

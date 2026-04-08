@@ -3,12 +3,6 @@ import os
 import unittest
 from unittest.mock import patch, MagicMock
 
-# Patch database.connection before importing token_store
-# to avoid requiring a live PostgreSQL connection
-import sys
-sys.modules.setdefault("database", MagicMock())
-sys.modules.setdefault("database.connection", MagicMock())
-
 from auth import token_store
 
 
@@ -62,21 +56,21 @@ class TestLoadFromEnv(unittest.TestCase):
 class TestLoadTokensEnvFallback(unittest.TestCase):
     """Test that load_tokens falls through to env vars when DB and JSON fail."""
 
-    @patch.object(token_store, "_load_from_db", return_value=None)
+    @patch.object(token_store, "_load_from_db", return_value=(None, True))
     def test_env_var_fallback_when_db_and_json_missing(self, mock_db):
         """No DB, no JSON file -> falls through to env var."""
         with patch.dict(os.environ, {"JOBBER_REFRESH_TOKEN": "rt_fallback"}, clear=True):
             result = token_store.load_tokens("jobber", "/nonexistent/path.json")
             self.assertEqual(result, {"refresh_token": "rt_fallback"})
 
-    @patch.object(token_store, "_load_from_db", return_value={"refresh_token": "rt_from_db"})
+    @patch.object(token_store, "_load_from_db", return_value=({"refresh_token": "rt_from_db"}, True))
     def test_db_takes_priority_over_env(self, mock_db):
         """DB has tokens -> env vars are NOT consulted."""
         with patch.dict(os.environ, {"JOBBER_REFRESH_TOKEN": "rt_env"}, clear=True):
             result = token_store.load_tokens("jobber")
             self.assertEqual(result["refresh_token"], "rt_from_db")
 
-    @patch.object(token_store, "_load_from_db", return_value=None)
+    @patch.object(token_store, "_load_from_db", return_value=(None, True))
     def test_returns_empty_dict_when_nothing_available(self, mock_db):
         """No DB, no JSON, no env vars -> returns empty dict."""
         with patch.dict(os.environ, {}, clear=True):

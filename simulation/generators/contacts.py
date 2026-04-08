@@ -164,7 +164,7 @@ class ContactGenerator:
             canonical_id = generate_id("LEAD", self.db_path)
 
             if dry_run:
-                self.logger.info(
+                self.logger.debug(
                     "[DRY RUN] Would create contact %s %s (%s, %s)",
                     profile["first_name"], profile["last_name"],
                     lifecycle_stage, profile["client_type"],
