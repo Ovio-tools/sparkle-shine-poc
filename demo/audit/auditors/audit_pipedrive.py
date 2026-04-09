@@ -355,7 +355,7 @@ class PipedriveAuditor:
             deal_title = deal.get("title", "")
 
             # Resolve to canonical ID
-            canonical_id = get_canonical_id("pipedrive", deal_id, self.db_path)
+            canonical_id = get_canonical_id("pipedrive", deal_id, db_path=self.db_path)
             if not canonical_id:
                 # Orphan: won deal with no canonical mapping
                 findings.append(AuditFinding(

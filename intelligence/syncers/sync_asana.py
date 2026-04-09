@@ -134,7 +134,7 @@ class AsanaSyncer(BaseSyncer):
 
     def _upsert_task(self, task: dict, project_name: str) -> None:
         asana_gid = task.get("gid") or task.get("id") or ""
-        canonical_id = get_canonical_id("asana", asana_gid, self.db_path)
+        canonical_id = get_canonical_id("asana", asana_gid, db_path=self.db_path)
 
         title = task.get("name") or "Untitled"
         description = task.get("notes") or None

@@ -47,3 +47,22 @@ def test_get_canonical_id_without_entity_type_keeps_legacy_lookup(monkeypatch):
     assert "entity_type = %s" not in fake_conn.sql
     assert fake_conn.params == ("quickbooks", "456")
     assert fake_conn.closed is True
+
+
+def test_get_canonical_id_treats_legacy_positional_db_path_as_db_path(monkeypatch):
+    fake_conn = _FakeConn({"canonical_id": "SS-INV-0009"})
+    seen = {}
+
+    def _fake_get_connection(db_path="sparkle_shine.db"):
+        seen["db_path"] = db_path
+        return fake_conn
+
+    monkeypatch.setattr("database.mappings.get_connection", _fake_get_connection)
+
+    result = get_canonical_id("quickbooks", "456", "/tmp/test.db")
+
+    assert result == "SS-INV-0009"
+    assert seen["db_path"] == "/tmp/test.db"
+    assert "entity_type = %s" not in fake_conn.sql
+    assert fake_conn.params == ("quickbooks", "456")
+    assert fake_conn.closed is True

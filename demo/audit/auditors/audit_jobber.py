@@ -243,7 +243,10 @@ class JobberAuditor:
             expected_client = j.get("client_id", "")
             actual_client = ""
             if jobber_client_id:
-                actual_client = get_canonical_id("jobber", jobber_client_id, self.db_path) or jobber_client_id
+                actual_client = (
+                    get_canonical_id("jobber", jobber_client_id, db_path=self.db_path)
+                    or jobber_client_id
+                )
             findings.append(_compare(
                 "job", j["id"], jobber_id, "client_id", expected_client, actual_client,
             ))

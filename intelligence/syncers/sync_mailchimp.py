@@ -127,7 +127,7 @@ class MailchimpSyncer(BaseSyncer):
 
     def _upsert_campaign(self, report: dict) -> None:
         mc_id = report.get("id") or ""
-        canonical_id = get_canonical_id("mailchimp", mc_id, self.db_path)
+        canonical_id = get_canonical_id("mailchimp", mc_id, db_path=self.db_path)
 
         name = report.get("campaign_title") or report.get("subject_line") or "Untitled"
         send_date = (report.get("send_time") or "")[:10] or None

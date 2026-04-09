@@ -349,6 +349,21 @@ class TestBuildErrorBlocks(unittest.TestCase):
         assert header_block["text"]["type"] == "plain_text"
         assert header_block["text"].get("emoji") is True
 
+    def test_long_section_text_is_truncated_to_slack_limit(self):
+        from simulation.error_reporter import _build_error_blocks
+
+        blocks = _build_error_blocks(
+            what_happened="x" * 5000,
+            what_was_affected="ctx",
+            what_to_do="do",
+            severity="warning",
+            tool_name="jobber",
+        )
+
+        section_texts = [b["text"]["text"] for b in blocks if b["type"] == "section"]
+        assert max(len(text) for text in section_texts) <= 3000
+        assert any("[truncated]" in text for text in section_texts)
+
 
 class TestReportError(unittest.TestCase):
     def setUp(self):
@@ -442,6 +457,22 @@ class TestReportError(unittest.TestCase):
             Exception("HTTP 500"), tool_name="jobber", context="ctx", dry_run=True
         )
         assert result is True
+
+    @patch("simulation.error_reporter.get_client")
+    def test_report_error_truncates_oversized_slack_payloads(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+
+        report_error("x" * 5000, tool_name="intelligence", context="ctx")
+
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert len(call_kwargs["text"]) <= 3000
+        assert max(
+            len(block["text"]["text"])
+            for block in call_kwargs["blocks"]
+            if block.get("type") == "section"
+        ) <= 3000
 
 
 class TestEscalation(unittest.TestCase):

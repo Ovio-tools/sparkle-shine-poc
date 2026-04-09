@@ -180,6 +180,10 @@ _SEVERITY_EMOJIS: dict[str, str] = {
     "critical": ":rotating_light: ",
 }
 
+_SLACK_SECTION_TEXT_LIMIT = 3000
+_SLACK_TOP_LEVEL_TEXT_LIMIT = 3000
+_SLACK_TRUNCATION_SUFFIX = " ...[truncated]"
+
 
 def _resolve_translation(
     tool_name: str,
@@ -206,6 +210,23 @@ def _resolve_translation(
     entry["what_to_do"] = entry["what_to_do"].replace("{tool}", tool_title)
 
     return entry
+
+
+def _truncate_slack_text(text: str, limit: int) -> str:
+    """Trim oversized Slack mrkdwn/plain-text payloads without raising."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(_SLACK_TRUNCATION_SUFFIX)].rstrip() + _SLACK_TRUNCATION_SUFFIX
+
+
+def _build_slack_section(label: str, body: str) -> dict:
+    return {
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": _truncate_slack_text(f"*{label}:* {body}", _SLACK_SECTION_TEXT_LIMIT),
+        },
+    }
 
 
 def _classify(exc: Union[Exception, str]) -> str:
@@ -267,18 +288,9 @@ def _build_error_blocks(
             },
         },
         {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*What happened:* {what_happened}"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*What was affected:* {what_was_affected}"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*What to do:* {what_to_do}"},
-        },
+        _build_slack_section("What happened", what_happened),
+        _build_slack_section("What was affected", what_was_affected),
+        _build_slack_section("What to do", what_to_do),
         {"type": "divider"},
         {
             "type": "context",
@@ -327,25 +339,21 @@ def _build_reconciliation_blocks(
             },
         },
         {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*What happened:* {what_happened}"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*What was affected:* {what_was_affected}"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*What to do:* {what_to_do}"},
-        },
+        _build_slack_section("What happened", what_happened),
+        _build_slack_section("What was affected", what_was_affected),
+        _build_slack_section("What to do", what_to_do),
     ]
 
     if details:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": details},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": _truncate_slack_text(details, _SLACK_SECTION_TEXT_LIMIT),
+                },
+            }
+        )
 
     blocks.extend([
         {"type": "divider"},
@@ -513,9 +521,13 @@ def report_error(
             return True
 
         client = get_client("slack")
+        top_level_text = _truncate_slack_text(
+            f"{header_text} — {what_happened}",
+            _SLACK_TOP_LEVEL_TEXT_LIMIT,
+        )
         response = client.chat_postMessage(
             channel=channel_id,
-            text=f"{header_text} — {what_happened}",
+            text=top_level_text,
             blocks=blocks,
             attachments=[{"color": _SEVERITY_COLORS[final_severity], "blocks": []}],
         )
@@ -581,9 +593,13 @@ def report_reconciliation_issue(
             return True
 
         client = get_client("slack")
+        top_level_text = _truncate_slack_text(
+            f"Data Mismatch Detected — {what_happened}",
+            _SLACK_TOP_LEVEL_TEXT_LIMIT,
+        )
         response = client.chat_postMessage(
             channel=channel_id,
-            text=f"Data Mismatch Detected — {what_happened}",
+            text=top_level_text,
             blocks=blocks,
             attachments=[{"color": _SEVERITY_COLORS[severity], "blocks": []}],
         )
