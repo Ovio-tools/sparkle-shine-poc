@@ -326,8 +326,10 @@ class SalesOutreachAutomation(BaseAutomation):
         Checks in priority order:
         1. No email address — nothing to send to
         2. DRAFT mapping exists — already processed successfully
-        3. outreach_drafts record exists — already attempted (even if failed),
-           prevents retry-spam when agents hit rate limits
+        3. Non-failed outreach_drafts record exists — already drafted (or
+           in-flight). Rows with status='failed' are intentionally NOT
+           skipped so the next cron tick retries transient Anthropic/Gmail
+           errors (e.g. HTTP 529 overloaded_error on the synthesis agent).
         4. entity_type=CLIENT in cross_tool_mapping — this person is an
            existing customer; sending a prospect email is a trust violation
         5. Active record in clients table by email — belt-and-suspenders
@@ -353,9 +355,14 @@ class SalesOutreachAutomation(BaseAutomation):
         if row:
             return True, "DRAFT mapping already exists"
 
-        # 3. Any previous outreach attempt (including failed ones)
+        # 3. Non-failed outreach attempt on record (failed rows are retryable)
         row = self.db.execute(
-            "SELECT 1 FROM outreach_drafts WHERE hubspot_contact_id = %s LIMIT 1",
+            """
+            SELECT 1 FROM outreach_drafts
+            WHERE hubspot_contact_id = %s
+              AND (status IS NULL OR status != 'failed')
+            LIMIT 1
+            """,
             (hubspot_id,),
         ).fetchone()
         if row:

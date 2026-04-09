@@ -388,6 +388,24 @@ def synthesize_email(contact: dict) -> dict | None:
                     contact.get("firstname"), contact.get("lastname"), exc,
                 )
                 return None
+        except anthropic.InternalServerError as exc:
+            # Covers 5xx responses including 529 overloaded_error. These are
+            # transient — Anthropic's own SDK retries them by default when
+            # max_retries > 0. We run with max_retries=0 so we handle it here.
+            status_code = getattr(exc, "status_code", None)
+            if attempt == 0:
+                backoff = 10
+                logger.warning(
+                    "Agent 3 got %s from Anthropic for contact %r %r — waiting %ds before retry: %s",
+                    status_code, contact.get("firstname"), contact.get("lastname"), backoff, exc,
+                )
+                time.sleep(backoff)
+            else:
+                logger.error(
+                    "Agent 3 server error (retry exhausted) for contact %r %r: %s %s",
+                    contact.get("firstname"), contact.get("lastname"), status_code, exc,
+                )
+                return None
         except Exception as exc:
             logger.error(
                 "Anthropic API call failed for contact %r %r: %s",
