@@ -381,14 +381,32 @@ def _build_reconciliation_blocks(
 
 _topic_warning_logged = False
 
+_DESIRED_TOPIC = "Simulation and automation errors — plain language only, no stack traces"
+# The topic we want #automation-failure to carry. Exported for tests.
+# Slack emits a `channel_topic` system message on every setTopic call regardless
+# of whether the value changed, so we compare against this before calling the API
+# to avoid spamming the channel on every fresh-process startup.
 
-def _try_set_topic(client, channel_id: str) -> None:
-    """Attempt to set the #automation-failure topic. Log once on scope failure."""
+
+def _try_set_topic(client, channel_id: str, current_topic: Optional[str] = None) -> None:
+    """Attempt to set the #automation-failure topic. Log once on scope failure.
+
+    If ``current_topic`` already matches ``_DESIRED_TOPIC``, skip the API call —
+    Slack posts a ``channel_topic`` system message on every ``conversations.setTopic``
+    call, so re-setting an identical topic creates noise in the channel.
+    """
     global _topic_warning_logged
+
+    if current_topic == _DESIRED_TOPIC:
+        logger.debug(
+            "Topic on #automation-failure already set correctly, skipping setTopic call"
+        )
+        return
+
     try:
         client.conversations_setTopic(
             channel=channel_id,
-            topic="Simulation and automation errors — plain language only, no stack traces",
+            topic=_DESIRED_TOPIC,
         )
     except Exception as topic_exc:
         if not _topic_warning_logged:
@@ -429,8 +447,11 @@ def setup_channel(dry_run: bool = False) -> Optional[str]:
             if ch["name"] == "automation-failure":
                 candidate_id = ch["id"]
                 client.conversations_join(channel=candidate_id)
-                # setTopic requires channels:write.topic scope — non-fatal if absent
-                _try_set_topic(client, candidate_id)
+                # setTopic requires channels:write.topic scope — non-fatal if absent.
+                # Pass the existing topic so we can skip the API call when it already
+                # matches _DESIRED_TOPIC (avoids `channel_topic` sys-msg spam).
+                current_topic = ch.get("topic", {}).get("value", "")
+                _try_set_topic(client, candidate_id, current_topic=current_topic)
                 _channel_id = candidate_id
                 return _channel_id
 

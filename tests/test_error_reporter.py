@@ -213,8 +213,50 @@ class TestSetupChannel(unittest.TestCase):
         mock_get_client.return_value = _make_slack_mock()
         from simulation.error_reporter import setup_channel
         setup_channel()
-        # Should also set topic when channel already exists
+        # Default mock returns channel with no topic → setTopic is called to set it.
         mock_get_client.return_value.conversations_setTopic.assert_called_once()
+
+    @patch("simulation.error_reporter.get_client")
+    def test_skips_set_topic_when_existing_topic_matches(self, mock_get_client):
+        """Regression: Slack emits a channel_topic sys-msg on every setTopic call even
+        when the value is unchanged. If the existing channel already has the desired
+        topic, we must NOT call setTopic — otherwise every fresh-process startup
+        spams the channel with redundant topic-set messages.
+        """
+        from simulation.error_reporter import _DESIRED_TOPIC
+        mock_client = _make_slack_mock()
+        mock_client.conversations_list.return_value = {
+            "ok": True,
+            "channels": [{
+                "id": "C12345",
+                "name": "automation-failure",
+                "topic": {"value": _DESIRED_TOPIC, "creator": "U0", "last_set": 0},
+            }],
+        }
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import setup_channel
+        result = setup_channel()
+        assert result == "C12345"
+        mock_client.conversations_setTopic.assert_not_called()
+
+    @patch("simulation.error_reporter.get_client")
+    def test_sets_topic_on_existing_channel_when_topic_differs(self, mock_get_client):
+        """If the existing channel has a different topic (e.g. stale or empty),
+        setTopic is still called so the channel self-heals.
+        """
+        mock_client = _make_slack_mock()
+        mock_client.conversations_list.return_value = {
+            "ok": True,
+            "channels": [{
+                "id": "C12345",
+                "name": "automation-failure",
+                "topic": {"value": "some other topic", "creator": "U0", "last_set": 0},
+            }],
+        }
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import setup_channel
+        setup_channel()
+        mock_client.conversations_setTopic.assert_called_once()
 
     @patch("simulation.error_reporter.get_client")
     def test_returns_none_on_exception(self, mock_get_client):
