@@ -241,7 +241,7 @@ class GoogleSyncer(BaseSyncer):
 
     def _upsert_calendar_event(self, event: dict) -> None:
         google_event_id = event.get("id") or ""
-        canonical_id = get_canonical_id("google", google_event_id, self.db_path)
+        canonical_id = get_canonical_id("google", google_event_id, db_path=self.db_path)
 
         title = event.get("summary") or "Untitled Event"
         start = event.get("start") or {}

@@ -89,6 +89,8 @@ _ALERT_CHANNEL_MAP: dict[str, str] = {
 # Cost estimate: claude-sonnet-4 pricing per million tokens (approximate)
 _COST_PER_M_INPUT  = 3.00
 _COST_PER_M_OUTPUT = 15.00
+_SYNC_ERROR_SUMMARY_MAX_ITEMS = 5
+_SYNC_ERROR_SUMMARY_MAX_CHARS = 1200
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +110,27 @@ def _fmt_date_long(iso_date: str) -> str:
     """Format ISO date as 'Tuesday, March 17, 2026'."""
     d = date.fromisoformat(iso_date)
     return d.strftime("%A, %B ") + str(d.day) + d.strftime(", %Y")
+
+
+def _summarize_sync_errors(
+    errors: list[str],
+    max_items: int = _SYNC_ERROR_SUMMARY_MAX_ITEMS,
+    max_chars: int = _SYNC_ERROR_SUMMARY_MAX_CHARS,
+) -> str:
+    """Return a compact sync error summary safe for logs and Slack."""
+    if not errors:
+        return "none"
+
+    summary = "; ".join(errors[:max_items])
+    remaining = len(errors) - min(len(errors), max_items)
+    if remaining > 0:
+        summary += f"; ... and {remaining} more"
+
+    if len(summary) <= max_chars:
+        return summary
+
+    suffix = " ...[truncated]"
+    return summary[: max_chars - len(suffix)].rstrip() + suffix
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +291,7 @@ def _run_syncers(db_path: str, skip_set: set[str] | None = None) -> tuple[int, l
             errors.append(f"{tool_name}: {error_msg}")
 
     total = len(syncer_classes)
-    error_summary = ", ".join(errors) if errors else "none"
+    error_summary = _summarize_sync_errors(errors)
     logger.info(
         "Sync complete: %d/%d tools synced, %d error(s) (%s)",
         succeeded,
@@ -284,7 +307,7 @@ def _run_syncers(db_path: str, skip_set: set[str] | None = None) -> tuple[int, l
         try:
             from simulation.error_reporter import report_error
             report_error(
-                f"Sync failures: {', '.join(errors)}",
+                f"Sync failures: {error_summary}",
                 tool_name="intelligence",
                 context=f"Intelligence sync stage — {len(errors)}/{total} tool(s) failed",
             )

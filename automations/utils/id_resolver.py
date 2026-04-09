@@ -5,9 +5,23 @@ Thin wrappers around the cross_tool_mapping table for use inside automations.
 """
 from typing import Optional
 
+from database.mappings import _ENTITY_META
+
 
 class MappingNotFoundError(Exception):
     """Raised when a cross_tool_mapping lookup finds no matching row."""
+
+
+def _entity_type_from_canonical_id(canonical_id: str) -> str:
+    """Return the entity type for a canonical SS-ID or raise on malformed values."""
+    for entity_type, (prefix, _) in _ENTITY_META.items():
+        if canonical_id.startswith(f"{prefix}-"):
+            return entity_type
+
+    raise ValueError(
+        "canonical_id must use a known SS-TYPE-* prefix "
+        f"(got {canonical_id!r})"
+    )
 
 
 def resolve(db, canonical_id: str, target_tool: str) -> str:
@@ -64,6 +78,8 @@ def register_mapping(
     Raises ValueError if tool_specific_id is already mapped to a *different*
     canonical_id — this catches cross-contaminated mappings before they are written.
     """
+    entity_type = _entity_type_from_canonical_id(canonical_id)
+
     # Guard: same external ID must not point to two different canonical entities.
     existing = db.execute(
         "SELECT canonical_id FROM cross_tool_mapping "
@@ -77,19 +93,6 @@ def register_mapping(
                 f"Mapping collision: {tool_name}:{tool_specific_id} is already "
                 f"registered to {existing_cid}, cannot also register to {canonical_id}"
             )
-
-    parts = canonical_id.split("-")
-    if len(parts) >= 3:
-        entity_type = parts[1]
-    else:
-        import warnings
-        warnings.warn(
-            f"register_mapping: canonical_id '{canonical_id}' does not match "
-            f"SS-TYPE-NNNN format; entity_type will be stored as 'UNKNOWN'. "
-            f"This mapping may not be discoverable by entity-type queries.",
-            stacklevel=2,
-        )
-        entity_type = "UNKNOWN"
 
     with db:
         db.execute(

@@ -162,7 +162,7 @@ class HubSpotSyncer(BaseSyncer):
         lifetime_value = float(props.get("lifetime_value") or 0)
         last_service = props.get("last_service_date")
 
-        canonical_id = get_canonical_id("hubspot", hs_id, self.db_path)
+        canonical_id = get_canonical_id("hubspot", hs_id, db_path=self.db_path)
 
         # Determine whether this is a client or a lead
         is_client = client_type_prop in ("residential", "commercial") or lifecycle == "customer"
@@ -293,7 +293,7 @@ class HubSpotSyncer(BaseSyncer):
         close_date = props.get("closedate", "")[:10] if props.get("closedate") else None
         status = _STAGE_STATUS_MAP.get(stage, "draft")
 
-        canonical_id = get_canonical_id("hubspot", hs_id, self.db_path)
+        canonical_id = get_canonical_id("hubspot", hs_id, db_path=self.db_path)
 
         if canonical_id is None:
             canonical_id = generate_id("PROP", self.db_path)

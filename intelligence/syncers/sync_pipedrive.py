@@ -122,7 +122,7 @@ class PipedriveSyncer(BaseSyncer):
 
     def _upsert_deal(self, deal: dict) -> None:
         pd_id = str(deal["id"])
-        canonical_id = get_canonical_id("pipedrive", pd_id, self.db_path)
+        canonical_id = get_canonical_id("pipedrive", pd_id, db_path=self.db_path)
 
         title = deal.get("title") or "Untitled Deal"
         value = float(deal.get("value") or 0)
@@ -197,7 +197,7 @@ class PipedriveSyncer(BaseSyncer):
                         continue
                     activity_time = act.get("update_time") or act.get("due_date") or ""
                     canonical_id = get_canonical_id(
-                        "pipedrive", str(deal_id), self.db_path
+                        "pipedrive", str(deal_id), db_path=self.db_path
                     )
                     if canonical_id:
                         with self.db:

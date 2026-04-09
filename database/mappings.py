@@ -20,6 +20,22 @@ _ENTITY_META = {
 }
 
 
+def _looks_like_db_path(value: Optional[str]) -> bool:
+    """Best-effort guard for old positional calls that passed db_path as arg 3."""
+    if not value or not isinstance(value, str):
+        return False
+
+    lowered = value.lower()
+    return (
+        "/" in value
+        or "\\" in value
+        or lowered.endswith(".db")
+        or lowered.startswith("postgres://")
+        or lowered.startswith("postgresql://")
+        or lowered.startswith("sqlite://")
+    )
+
+
 # ------------------------------------------------------------------ #
 # ID generation
 # ------------------------------------------------------------------ #
@@ -154,6 +170,12 @@ def get_canonical_id(
     db_path: str = "sparkle_shine.db",
 ) -> Optional[str]:
     """Reverse lookup: given a tool's ID, return the canonical SS-ID or None."""
+    if entity_type and db_path == "sparkle_shine.db":
+        normalized_entity_type = entity_type.upper()
+        if normalized_entity_type not in _ENTITY_META and _looks_like_db_path(entity_type):
+            db_path = entity_type
+            entity_type = None
+
     conn = get_connection(db_path)
     try:
         if entity_type:
@@ -369,7 +391,7 @@ if __name__ == "__main__":
     print("\n[3] Reverse lookup (jobber → canonical):")
     all_ok = True
     for cid, tid in zip(ids, ["jobber-clt-aa1", "jobber-clt-bb2", "jobber-clt-cc3"]):
-        resolved = get_canonical_id("jobber", tid, db_path)
+        resolved = get_canonical_id("jobber", tid, db_path=db_path)
         status = "OK" if resolved == cid else f"FAIL (got {resolved})"
         print(f"    {tid} → {resolved}  [{status}]")
         if resolved != cid:

@@ -22,7 +22,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 |---------|------|---------------|---------------------------|
 | simulation-engine | Long-lived | — | `python -m simulation.engine` |
 | automation-runner | Cron | `*/5 * * * *` | `python -m automations.runner --all` |
-| sales-outreach | Cron | `*/5 * * * *` | `bash scripts/start_sales_outreach.sh` |
+| sales-outreach | Cron | `*/30 * * * *` | `bash scripts/start_sales_outreach.sh` |
 | intelligence-daily | Cron | `0 11 * * 1-5` (6 AM CDT) | `python -m intelligence.runner --report-type daily` |
 | intelligence-weekly | Cron | `0 13 * * 0` (8 AM CDT Sun) | `python -m intelligence.runner --report-type weekly` |
 | token-keeper | Worker (always-on) | — | `bash scripts/start_token_keeper.sh` |

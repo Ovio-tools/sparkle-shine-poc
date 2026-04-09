@@ -231,8 +231,6 @@ class NewClientOnboarding(BaseAutomation):
             jobber_client_id, jobber_job_id = self._action_jobber(ctx)
             if not self.dry_run and jobber_client_id:
                 register_mapping(self.db, ctx["canonical_id"], "jobber", jobber_client_id)
-            if not self.dry_run and jobber_job_id:
-                register_mapping(self.db, f"JOB:{ctx['canonical_id']}", "jobber", jobber_job_id)
             self.log_action(
                 run_id, "create_jobber_client",
                 f"jobber:client:{jobber_client_id}",
@@ -362,9 +360,14 @@ class NewClientOnboarding(BaseAutomation):
              - If the mapping resolves to an SS-LEAD-* ID, the lead is being
                won for the first time: promote them to a proper SS-CLIENT-*
                so all downstream actions use the correct entity type.
+             - If the mapping resolves to an SS-PROP-* ID, use the linked
+               client or promoted lead instead of reusing the proposal ID as
+               the client canonical ID.
           2. clients table (email match from prior seeding)
           3. Generate next sequential ID, insert into clients, register mapping
         """
+        allow_pipedrive_mapping_write = bool(deal_id)
+
         # 1. Already processed this deal?
         if deal_id:
             try:
@@ -382,6 +385,18 @@ class NewClientOnboarding(BaseAutomation):
                         email=email,
                         client_type=client_type,
                     )
+                if existing_id.startswith("SS-PROP-"):
+                    allow_pipedrive_mapping_write = False
+                    resolved_client_id = self._resolve_client_from_proposal(
+                        proposal_id=existing_id,
+                        deal_id=deal_id,
+                        first_name=first_name,
+                        last_name=last_name,
+                        email=email,
+                        client_type=client_type,
+                    )
+                    if resolved_client_id:
+                        return resolved_client_id
                 return existing_id
             except MappingNotFoundError:
                 pass
@@ -393,7 +408,7 @@ class NewClientOnboarding(BaseAutomation):
             ).fetchone()
             if row is not None:
                 cid = row["id"]
-                if not self.dry_run and deal_id:
+                if not self.dry_run and deal_id and allow_pipedrive_mapping_write:
                     register_mapping(self.db, cid, "pipedrive", deal_id)
                 return cid
 
@@ -441,10 +456,51 @@ class NewClientOnboarding(BaseAutomation):
                 print(f"[WARN] Could not insert client row {canonical_id}: {ins_exc}")
                 raise
 
-            if deal_id:
+            if deal_id and allow_pipedrive_mapping_write:
                 register_mapping(self.db, canonical_id, "pipedrive", deal_id)
 
         return canonical_id
+
+    def _resolve_client_from_proposal(
+        self,
+        proposal_id: str,
+        deal_id: str,
+        first_name: str,
+        last_name: str,
+        email: str,
+        client_type: str,
+    ) -> Optional[str]:
+        """
+        Resolve a won deal's proposal mapping to the client canonical ID we should use.
+
+        A Pipedrive deal should remain mapped to its proposal record for pipeline history,
+        but onboarding actions need a real SS-CLIENT-* canonical ID for downstream tools.
+        """
+        row = self.db.execute(
+            """
+            SELECT client_id, lead_id
+            FROM commercial_proposals
+            WHERE id = %s
+            """,
+            (proposal_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        if row["client_id"]:
+            return row["client_id"]
+
+        if row["lead_id"]:
+            return self._promote_lead_to_client(
+                lead_id=row["lead_id"],
+                deal_id=deal_id,
+                first_name=first_name,
+                last_name=last_name,
+                email=email,
+                client_type=client_type,
+            )
+
+        return None
 
     def _promote_lead_to_client(
         self,
