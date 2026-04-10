@@ -38,16 +38,12 @@ _channel_id_cache: dict[str, str] = {}
 # ---------------------------------------------------------------------------
 
 _DAILY_SECTION_HEADERS = [
-    "Yesterday's Operations",
-    "Today's Agenda",
-    "Top Action Items",
-    # Legacy 6-section headers (kept for backward compatibility)
-    "Yesterday's Performance",
-    "Cash Position",
-    "Today's Schedule",
-    "Sales Pipeline",
-    "Action Items",
-    "One Opportunity",
+    "Yesterday's Numbers",
+    "Today's Operations Snapshot",
+    "Cash That Needs Chasing",
+    "Deals That Need a Nudge",
+    "Overdue High-Priority Tasks",
+    "One Action Item",
 ]
 
 _WEEKLY_SECTION_HEADERS = [
@@ -147,6 +143,13 @@ def _split_briefing_into_sections(content: str, headers: list[str] = None) -> li
         return [content.strip()]
 
     sections: list[str] = []
+
+    # Preserve any content before the first matched header (e.g. date/title line)
+    if split_points[0][0] > 0:
+        preamble = "\n".join(lines[:split_points[0][0]]).strip()
+        if preamble:
+            sections.append(preamble)
+
     for idx, (start, _) in enumerate(split_points):
         end = split_points[idx + 1][0] if idx + 1 < len(split_points) else len(lines)
         section_lines = lines[start:end]
@@ -238,6 +241,37 @@ def post_briefing(briefing: Briefing, channel: str = None) -> bool:
             channel_id = resolve_channel_id(fallback)
         except ValueError:
             logger.error("Could not resolve Slack channel '%s'", channel)
+            return False
+
+    # --- Section validation gate (daily reports only) ---
+    report_type = getattr(briefing, "report_type", "daily")
+    if report_type == "daily":
+        required = _DAILY_SECTION_HEADERS
+        sections = _split_briefing_into_sections(briefing.content_slack, required)
+        found_headers: list[str] = []
+        for header in required:
+            for section in sections:
+                first_line = section.split("\n", 1)[0]
+                if header.lower() in first_line.lower():
+                    found_headers.append(header)
+                    break
+        missing = [h for h in required if h not in found_headers]
+        if missing:
+            logger.error(
+                "Daily briefing missing %d of 6 sections: %s — refusing to post",
+                len(missing),
+                ", ".join(missing),
+            )
+            post_alert(
+                f"*Daily briefing blocked* — LLM output is missing "
+                f"{len(missing)} of 6 required sections: "
+                + ", ".join(f"_{h}_" for h in missing)
+                + f"\n\nThe briefing for {briefing.date} was archived but "
+                f"*not* posted to #daily-briefing. Review the archived "
+                f"content and re-run if needed.",
+                channel="#automation-failure",
+                urgency="critical",
+            )
             return False
 
     blocks = _build_briefing_blocks(briefing)
