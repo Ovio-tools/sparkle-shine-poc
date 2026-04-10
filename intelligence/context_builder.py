@@ -150,6 +150,7 @@ def _format_context_document(
     metrics: dict,
     all_alerts: list[dict],
     recent_briefings: list[tuple[str, str]] | None = None,
+    failed_tools: list[str] | None = None,
 ) -> str:
     """Build the daily context document string from metrics data.
 
@@ -174,6 +175,30 @@ def _format_context_document(
     # ---- Header ----
     lines.append(f"# Daily Briefing Data -- {date_formatted}")
     lines.append("")
+
+    # ---- DATA GAPS (sync failures) ----
+    if failed_tools:
+        lines.append("## DATA GAPS — SYNC FAILURES")
+        lines.append(
+            "The following tools failed to sync. Their data may be stale or "
+            "incomplete. DO NOT guess or fabricate numbers for affected metrics. "
+            "Instead, explicitly state that the data is unavailable due to a "
+            "sync failure."
+        )
+        _TOOL_IMPACT = {
+            "jobber": "Job completions, crew schedules, and recurring agreements",
+            "quickbooks": "Revenue, invoices, payments, and cash position",
+            "hubspot": "Contacts, leads, and marketing metrics",
+            "pipedrive": "Sales pipeline and deal progression",
+            "asana": "Task completion and overdue tasks",
+            "mailchimp": "Email campaign metrics",
+            "google": "Google Workspace documents, calendar, and email metadata",
+            "slack": "Slack message history",
+        }
+        for tool in failed_tools:
+            impact = _TOOL_IMPACT.get(tool, "Unknown")
+            lines.append(f"- {tool}: FAILED — affected metrics: {impact}")
+        lines.append("")
 
     # ---- YESTERDAY'S NUMBERS ----
     lines.append("## YESTERDAY'S NUMBERS")
@@ -434,6 +459,7 @@ def build_briefing_context(
     include_doc_search: bool = True,
     briefings_dir: str | None = None,
     recent_briefings_count: int | None = None,
+    failed_tools: list[str] | None = None,
 ) -> BriefingContext:
     """Assemble the full briefing context for the given date.
 
@@ -445,6 +471,9 @@ def build_briefing_context(
                        Defaults to <project_root>/briefings.
         recent_briefings_count: How many past briefings to inject as context.
                                 Defaults to RECENT_BRIEFINGS_COUNT from config.
+        failed_tools: List of tool names whose syncers failed (e.g.
+                      ["jobber", "google"]).  Passed through to the context
+                      document so the LLM knows which data is unavailable.
 
     Returns:
         BriefingContext with all fields populated.
@@ -502,7 +531,8 @@ def build_briefing_context(
     # Step 5: Format the context document
     date_formatted = _fmt_date(briefing_date)
     context_document = _format_context_document(
-        date_formatted, metrics, all_alerts, recent_briefings
+        date_formatted, metrics, all_alerts, recent_briefings,
+        failed_tools=failed_tools,
     )
 
     # Step 6: Estimate tokens; warn if large

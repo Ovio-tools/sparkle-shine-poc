@@ -676,11 +676,20 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Stage 1: SYNC
     # -----------------------------------------------------------------------
+    failed_tools: list[str] = []
+
     if run_sync:
         logger.info("--- Stage 1: SYNC ---")
         succeeded, errors = _run_syncers(DB_PATH, skip_set=skip_set)
         result.sync_succeeded = succeeded
         result.sync_errors    = errors
+        # Extract unique tool names from error strings ("tool_name: message")
+        seen: set[str] = set()
+        for err in errors:
+            tool = err.split(":", 1)[0].strip().lower()
+            if tool and tool not in seen:
+                failed_tools.append(tool)
+                seen.add(tool)
     else:
         reason = "dry-run" if args.dry_run else "--skip-sync"
         logger.info("Stage 1: SYNC skipped (%s)", reason)
@@ -720,7 +729,10 @@ def main() -> None:
         context = build_weekly_context(DB_PATH, briefing_date)
         logger.info("Weekly context built: ~%d estimated tokens", context.token_estimate)
     else:
-        context = build_briefing_context(DB_PATH, briefing_date, briefings_dir=BRIEFINGS_DIR)
+        context = build_briefing_context(
+            DB_PATH, briefing_date, briefings_dir=BRIEFINGS_DIR,
+            failed_tools=failed_tools or None,
+        )
         logger.info(
             "Daily context built: ~%d estimated tokens (%d recent briefing(s) injected)",
             context.token_estimate,
