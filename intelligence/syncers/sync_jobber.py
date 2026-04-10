@@ -133,18 +133,39 @@ class JobberSyncer(BaseSyncer):
     # GraphQL helper
     # ------------------------------------------------------------------ #
 
+    _GQL_MAX_RETRIES = 4
+    _GQL_BASE_BACKOFF = 5  # seconds; Jobber docs recommend waiting before retry
+
     def _gql(self, session, query: str, variables: dict) -> dict:
-        JOBBER.wait()
-        resp = session.post(
-            _GRAPHQL_URL,
-            json={"query": query, "variables": variables},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        if "errors" in payload:
-            raise RuntimeError(payload["errors"])
-        return payload["data"]
+        for attempt in range(self._GQL_MAX_RETRIES):
+            JOBBER.wait()
+            resp = session.post(
+                _GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+
+            if "errors" not in payload:
+                return payload["data"]
+
+            # Retry on THROTTLED; fail on anything else
+            throttled = any(
+                (e.get("extensions") or {}).get("code") == "THROTTLED"
+                for e in payload["errors"]
+            )
+            if not throttled:
+                raise RuntimeError(payload["errors"])
+
+            backoff = self._GQL_BASE_BACKOFF * (2 ** attempt)
+            self.logger.warning(
+                "Jobber THROTTLED (attempt %d/%d), backing off %ds",
+                attempt + 1, self._GQL_MAX_RETRIES, backoff,
+            )
+            time.sleep(backoff)
+
+        raise RuntimeError(payload["errors"])
 
     # ------------------------------------------------------------------ #
     # Clients
