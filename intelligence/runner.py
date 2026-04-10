@@ -216,10 +216,16 @@ def _run_token_preflight() -> set[str]:
 # ---------------------------------------------------------------------------
 
 def _run_syncer_with_timeout(syncer_cls, db_path: str) -> object:
-    """Run a single syncer in a worker thread with a 120s timeout."""
+    """Run a single syncer in a worker thread with a timeout.
+
+    Uses incremental sync (since=last_sync_time) when a previous sync
+    exists, falling back to a full sync on first run.  This keeps
+    high-volume syncers like Jobber well under the wall-clock limit.
+    """
     def _do():
         with syncer_cls(db_path) as syncer:
-            return syncer.sync()
+            since = syncer.get_last_sync_time()
+            return syncer.sync(since=since)
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_do)

@@ -7,6 +7,7 @@ Calendar events go into calendar_events.
 Gmail metadata (no bodies) goes into gmail_metadata.
 """
 import json
+import socket
 import time
 from datetime import date, datetime, timezone, timedelta
 from typing import Optional
@@ -112,12 +113,20 @@ class GoogleSyncer(BaseSyncer):
                 title = meta.get("name") or doc_key
                 mime = meta.get("mimeType") or ""
 
-                # Export as plain text (works for Google Docs and Sheets)
+                # Export as plain text (works for Google Docs and Sheets).
+                # Set a per-document socket timeout to prevent hangs on
+                # large docs or slow Google API responses.
                 export_mime = "text/plain"
-                content_bytes = drive_svc.files().export(
-                    fileId=file_id,
-                    mimeType=export_mime,
-                ).execute()
+                _DOC_EXPORT_TIMEOUT = 60  # seconds
+                prev_timeout = socket.getdefaulttimeout()
+                try:
+                    socket.setdefaulttimeout(_DOC_EXPORT_TIMEOUT)
+                    content_bytes = drive_svc.files().export(
+                        fileId=file_id,
+                        mimeType=export_mime,
+                    ).execute()
+                finally:
+                    socket.setdefaulttimeout(prev_timeout)
 
                 content_text = (
                     content_bytes.decode("utf-8", errors="replace")
