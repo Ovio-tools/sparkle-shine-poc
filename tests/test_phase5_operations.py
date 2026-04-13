@@ -782,6 +782,198 @@ class TestJobSchedulingGeneratorPass2(unittest.TestCase):
         self.assertEqual(len(queue_calls), 1)
         self.assertEqual(queue_calls[0][2]["job_id"], "SS-JOB-C001")
 
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations._get_or_fetch_property_id")
+    @patch("simulation.generators.operations._gql")
+    def test_commercial_blank_notes_default_to_3x_weekly_schedule(
+        self, mock_gql, mock_get_property, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        from simulation.generators.operations import JobSchedulingGenerator
+
+        today = date(2026, 3, 30)  # Monday, included in 3x weekly cadence
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT, company_name TEXT,
+                notes TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                last_service_date TEXT
+            );
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT, scheduled_time TEXT,
+                duration_minutes_actual INTEGER,
+                status TEXT DEFAULT 'scheduled', address TEXT, notes TEXT,
+                review_requested INTEGER DEFAULT 0, completed_at TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO clients VALUES (?,?,?,?,?,?,?)",
+            (
+                "SS-CLIENT-C002",
+                "commercial",
+                "Blank Notes Office",
+                "",
+                "",
+                "active",
+                "2026-03-01",
+            ),
+        )
+        conn.commit()
+
+        mock_gen_id.return_value = "SS-JOB-C002"
+        mock_get_property.return_value = "GQL-PROP-C002"
+        mock_gql.return_value = {
+            "data": {"jobCreate": {"job": {"id": "GQL-JOB-C002"}, "userErrors": []}}
+        }
+
+        queue_calls = []
+
+        def fake_queue(fire_at, generator_name, kwargs):
+            queue_calls.append((fire_at, generator_name, kwargs))
+
+        gen = JobSchedulingGenerator(db_path=":memory:", queue_fn=fake_queue)
+
+        with _patched_ops_db(conn):
+            with patch("simulation.generators.operations.date") as mock_date:
+                mock_date.today.return_value = today
+                mock_date.fromisoformat.side_effect = date.fromisoformat
+                result = gen.execute(dry_run=False)
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(queue_calls), 1)
+        job = dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("SS-JOB-C002",)).fetchone())
+        self.assertEqual(job["crew_id"], "crew-d")
+        self.assertEqual(job["service_type_id"], "commercial-nightly")
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations._get_or_fetch_property_id")
+    @patch("simulation.generators.operations._gql")
+    def test_fill_in_falls_back_to_unzoned_clients(
+        self, mock_gql, mock_get_property, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        from simulation.generators.operations import JobSchedulingGenerator
+
+        today = date(2026, 3, 31)  # Tuesday
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT, company_name TEXT,
+                notes TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                last_service_date TEXT
+            );
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT, scheduled_time TEXT,
+                duration_minutes_actual INTEGER,
+                status TEXT DEFAULT 'scheduled', address TEXT, notes TEXT,
+                review_requested INTEGER DEFAULT 0, completed_at TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO clients VALUES (?,?,?,?,?,?,?)",
+            (
+                "SS-CLIENT-U001",
+                "residential",
+                "Fallback Client",
+                "",
+                "",
+                "active",
+                "2026-01-15",
+            ),
+        )
+        # Keep crews B/C at capacity so only crew A looks for a fill-in.
+        for idx in range(5):
+            conn.execute(
+                "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"SS-JOB-B{idx}",
+                    f"SS-CLIENT-B{idx}",
+                    "crew-b",
+                    "std-residential",
+                    today.isoformat(),
+                    f"0{7 + idx}:00",
+                    120,
+                    "scheduled",
+                    None,
+                    None,
+                    0,
+                    None,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"SS-JOB-C{idx}",
+                    f"SS-CLIENT-C{idx}",
+                    "crew-c",
+                    "std-residential",
+                    today.isoformat(),
+                    f"0{8 + idx}:00",
+                    120,
+                    "scheduled",
+                    None,
+                    None,
+                    0,
+                    None,
+                ),
+            )
+        conn.commit()
+
+        mock_gen_id.return_value = "SS-JOB-U001"
+        mock_get_property.return_value = "GQL-PROP-U001"
+        mock_gql.return_value = {
+            "data": {"jobCreate": {"job": {"id": "GQL-JOB-U001"}, "userErrors": []}}
+        }
+
+        queue_calls = []
+
+        def fake_queue(fire_at, generator_name, kwargs):
+            queue_calls.append((fire_at, generator_name, kwargs))
+
+        gen = JobSchedulingGenerator(db_path=":memory:", queue_fn=fake_queue)
+
+        with _patched_ops_db(conn):
+            with patch("simulation.generators.operations.date") as mock_date:
+                mock_date.today.return_value = today
+                mock_date.fromisoformat.side_effect = date.fromisoformat
+                result = gen.execute(dry_run=False)
+
+        self.assertTrue(result.success)
+        self.assertIn(("job_completion", "SS-JOB-U001"), [(name, payload["job_id"]) for _, name, payload in queue_calls])
+        job = dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("SS-JOB-U001",)).fetchone())
+        self.assertEqual(job["crew_id"], "crew-a")
+        self.assertEqual(job["client_id"], "SS-CLIENT-U001")
+
 
 class TestJobCompletionGeneratorCompleted(unittest.TestCase):
     """completed outcome: jobs updated, review inserted."""

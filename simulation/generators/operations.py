@@ -81,6 +81,14 @@ _ONE_TIME_FREQS = {
     "one_time_move_in_out", "one_time_project",
 }
 
+_COMMERCIAL_SCOPE_DAYS = {
+    "nightly": {0, 1, 2, 3, 4},
+    "5x weekly": {0, 1, 2, 3, 4},
+    "daily": {0, 1, 2, 3, 4, 5},
+    "3x weekly": {0, 2, 4},
+    "2x weekly": {1, 3},
+}
+
 
 def _next_review_id(conn) -> str:
     """Return the next numeric review ID, ignoring malformed legacy values."""
@@ -323,6 +331,82 @@ def _assign_scheduled_time(crew_id: str, prior_jobs: list[dict], today: date) ->
         for j in prior_jobs
     )
     return base + timedelta(minutes=offset)
+
+
+def _commercial_scope(notes: str | None) -> str:
+    """Map free-form commercial notes to a scheduling cadence.
+
+    Blank notes fall back to 3x weekly to match the seeding model and avoid
+    silently dropping active commercial accounts from the daily schedule.
+    """
+    normalized = (notes or "").lower()
+    if "nightly" in normalized:
+        return "nightly"
+    if "5x weekly" in normalized:
+        return "5x weekly"
+    if "daily" in normalized:
+        return "daily"
+    if "3x weekly" in normalized:
+        return "3x weekly"
+    if "2x weekly" in normalized:
+        return "2x weekly"
+    return "3x weekly"
+
+
+def _fillin_candidates(
+    conn,
+    *,
+    today_iso: str,
+    limit: int,
+    preferred_zone: str | None = None,
+    client_group: str = "residential",
+) -> list[dict]:
+    """Return fill-in candidates ordered by route fit and service staleness."""
+    if client_group == "commercial":
+        type_filter = "c.client_type = 'commercial'"
+    else:
+        type_filter = "c.client_type IN ('residential', 'one-time')"
+
+    if preferred_zone:
+        rows = conn.execute(
+            f"""
+            SELECT c.id AS client_id,
+                   c.zone,
+                   c.last_service_date,
+                   CASE
+                       WHEN COALESCE(NULLIF(c.zone, ''), '') = %s THEN 0
+                       WHEN COALESCE(NULLIF(c.zone, ''), '') = '' THEN 1
+                       ELSE 2
+                   END AS zone_rank
+            FROM clients c
+            WHERE c.status IN ('active', 'occasional')
+              AND {type_filter}
+              AND c.id NOT IN (
+                  SELECT j.client_id FROM jobs j
+                  WHERE j.scheduled_date = %s
+              )
+            ORDER BY zone_rank, c.last_service_date ASC NULLS FIRST, c.id ASC
+            LIMIT %s
+            """,
+            (preferred_zone, today_iso, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT c.id AS client_id, c.zone, c.last_service_date
+            FROM clients c
+            WHERE c.status IN ('active', 'occasional')
+              AND {type_filter}
+              AND c.id NOT IN (
+                  SELECT j.client_id FROM jobs j
+                  WHERE j.scheduled_date = %s
+              )
+            ORDER BY c.last_service_date ASC NULLS FIRST, c.id ASC
+            LIMIT %s
+            """,
+            (today_iso, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # ── Recurrence field discovery (cached) ──────────────────────────────────────
@@ -860,20 +944,14 @@ class JobSchedulingGenerator:
             commercial_clients = [dict(c) for c in commercial_clients]
 
             for client in commercial_clients:
-                notes = (client.get("notes") or "").lower()
+                notes = client.get("notes")
                 client_id = client["id"]
                 weekday = today.weekday()  # 0=Mon ... 6=Sun
 
-                # Determine if this client has a job today
-                is_scheduled = False
-                if "nightly" in notes or "5x" in notes:
-                    is_scheduled = weekday < 5  # Mon-Fri
-                elif "daily" in notes:
-                    is_scheduled = weekday < 6  # Mon-Sat
-                elif "3x" in notes:
-                    is_scheduled = weekday in (0, 2, 4)  # Mon, Wed, Fri
-                elif "2x" in notes:
-                    is_scheduled = weekday in (1, 3)  # Tue, Thu
+                # Determine if this client has a job today. Blank notes default
+                # to 3x weekly instead of silently removing the client from the
+                # commercial schedule.
+                is_scheduled = weekday in _COMMERCIAL_SCOPE_DAYS[_commercial_scope(notes)]
 
                 if not is_scheduled:
                     continue
@@ -1124,13 +1202,14 @@ class JobSchedulingGenerator:
                     results.append(("failed", job.get("id"), str(e)))
 
             # ── Pass 3: utilization balancing (fill-in jobs) ────────────
-            # For crews below 80% target, add one-time deep cleans or
-            # standard cleans for clients overdue for service.
-            # Skip crew-d (commercial nightly, already at 100%+ utilization).
-            _CREW_ZONE_MAP = {
-                "crew-a": "West Austin",
-                "crew-b": "East Austin",
-                "crew-c": "South Austin",
+            # For crews below 80% target, add extra work from the active client
+            # base. Residential crews prefer zone-matched clients but fall back
+            # to unzoned customers on slow days; crew-d pulls commercial fill-ins.
+            _CREW_FILL_CONFIG = {
+                "crew-a": {"zone": "West Austin", "client_group": "residential"},
+                "crew-b": {"zone": "East Austin", "client_group": "residential"},
+                "crew-c": {"zone": "South Austin", "client_group": "residential"},
+                "crew-d": {"zone": None, "client_group": "commercial"},
             }
             target_min_minutes = int(
                 CREW_CAPACITY["daily_minutes"] * CREW_CAPACITY["target_utilization_min"]
@@ -1140,7 +1219,7 @@ class JobSchedulingGenerator:
             )
             max_jobs = CREW_CAPACITY["max_jobs_per_crew"]
 
-            for crew_id in ("crew-a", "crew-b", "crew-c"):
+            for crew_id in ("crew-a", "crew-b", "crew-c", "crew-d"):
                 prior = prior_jobs_by_crew.get(crew_id, [])
                 total_minutes = sum(j["expected_duration"] for j in prior)
                 job_count = len(prior)
@@ -1153,41 +1232,35 @@ class JobSchedulingGenerator:
                     target_min_minutes - total_minutes,
                     target_max_minutes - total_minutes,
                 )
-                zone = _CREW_ZONE_MAP.get(crew_id)
-
-                # Find clients in the crew's zone overdue for a deep clean (>60 days)
-                cutoff_date = (today - timedelta(days=60)).isoformat()
-                fillin_candidates = conn.execute("""
-                    SELECT c.id AS client_id
-                    FROM clients c
-                    WHERE c.status IN ('active', 'occasional')
-                      AND c.zone = %s
-                      AND c.id NOT IN (
-                          SELECT j.client_id FROM jobs j
-                          WHERE j.service_type_id = 'deep-clean'
-                            AND j.scheduled_date > %s
-                      )
-                      AND c.id NOT IN (
-                          SELECT j.client_id FROM jobs j
-                          WHERE j.scheduled_date = %s
-                      )
-                    ORDER BY c.last_service_date ASC NULLS FIRST
-                    LIMIT %s
-                """, (zone, cutoff_date, today.isoformat(), max_jobs - job_count)).fetchall()
-                fillin_candidates = [dict(r) for r in fillin_candidates]
+                fill_cfg = _CREW_FILL_CONFIG[crew_id]
+                zone = fill_cfg["zone"]
+                fillin_candidates = _fillin_candidates(
+                    conn,
+                    today_iso=today.isoformat(),
+                    limit=max((max_jobs - job_count) * 8, 12),
+                    preferred_zone=zone,
+                    client_group=fill_cfg["client_group"],
+                )
 
                 for candidate in fillin_candidates:
                     if gap_minutes <= 0 or job_count >= max_jobs:
                         break
 
-                    # Choose service type based on available gap:
-                    # deep clean (210 min) if gap is large, standard (120 min) if small
-                    if gap_minutes >= 200:
-                        service_type_id = "deep-clean"
-                        duration = _expected_duration(service_type_id, "deep_clean")
+                    if fill_cfg["client_group"] == "commercial":
+                        service_type_id = "commercial-nightly"
+                        duration = _expected_duration(service_type_id, "standard")
+                        fill_title = "Commercial Clean (Fill-In)"
                     else:
-                        service_type_id = "std-residential"
-                        duration = _expected_duration(service_type_id, "regular")
+                        # Choose service type based on available gap:
+                        # deep clean (210 min) if gap is large, standard (120 min) if small
+                        if gap_minutes >= 200:
+                            service_type_id = "deep-clean"
+                            duration = _expected_duration(service_type_id, "deep_clean")
+                            fill_title = "Deep Clean (Fill-In)"
+                        else:
+                            service_type_id = "std-residential"
+                            duration = _expected_duration(service_type_id, "regular")
+                            fill_title = "Standard Clean (Fill-In)"
                     scheduled_dt = _assign_scheduled_time(crew_id, prior, today)
                     completion_dt = scheduled_dt + timedelta(minutes=duration)
                     completion_dt += timedelta(
@@ -1203,7 +1276,6 @@ class JobSchedulingGenerator:
                             if property_id is None:
                                 continue
 
-                            fill_title = "Deep Clean (Fill-In)" if service_type_id == "deep-clean" else "Standard Clean (Fill-In)"
                             job_input = {
                                 "propertyId": property_id,
                                 "title": fill_title,
@@ -1242,19 +1314,24 @@ class JobSchedulingGenerator:
                                 kwargs={"job_id": fill_job_id},
                             )
 
-                        prior.append({"expected_duration": duration})
+                        prior_jobs_by_crew.setdefault(crew_id, prior).append(
+                            {"expected_duration": duration}
+                        )
                         gap_minutes -= duration
                         job_count += 1
                         results.append(("ok_fill", fill_job_id))
+                        service_label = "commercial clean" if service_type_id == "commercial-nightly" else (
+                            "deep clean" if service_type_id == "deep-clean" else "standard clean"
+                        )
                         if dry_run:
                             logger.debug(
-                                "Fill-in: %s deep clean for %s (%s), %d min gap remaining",
-                                crew_id, candidate["client_id"], zone, gap_minutes,
+                                "Fill-in: %s %s for %s (%s), %d min gap remaining",
+                                crew_id, service_label, candidate["client_id"], zone or "any-zone", gap_minutes,
                             )
                         else:
                             logger.info(
-                                "Fill-in: %s deep clean for %s (%s), %d min gap remaining",
-                                crew_id, candidate["client_id"], zone, gap_minutes,
+                                "Fill-in: %s %s for %s (%s), %d min gap remaining",
+                                crew_id, service_label, candidate["client_id"], zone or "any-zone", gap_minutes,
                             )
 
                     except Exception as e:
