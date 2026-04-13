@@ -956,6 +956,7 @@ class JobSchedulingGenerator:
                     prior_jobs_by_crew.setdefault(crew_id, []).append(
                         {"expected_duration": duration}
                     )
+                    jobs_created_this_run.append(job_id)
                     results.append(("ok", job_id))
 
                 except Exception as e:
@@ -1336,6 +1337,32 @@ class JobCompletionGenerator:
             if not job:
                 return GeneratorResult(success=False, message=f"job {job_id}: not found")
             job = dict(job)
+
+            # Duplicate timed events can happen after a restart when the engine
+            # restores a checkpointed queue and also re-queues today's scheduled
+            # jobs. Treat already-finished jobs as idempotent no-ops instead of
+            # letting a second outcome overwrite the terminal status.
+            if job.get("completed_at"):
+                if job.get("status") == "scheduled":
+                    conn.execute(
+                        "UPDATE jobs SET status = 'completed' WHERE id = %s",
+                        (job_id,),
+                    )
+                    conn.commit()
+                    return GeneratorResult(
+                        success=True,
+                        message=f"job {job_id}: normalized completed status",
+                    )
+                return GeneratorResult(
+                    success=True,
+                    message=f"job {job_id}: already completed",
+                )
+
+            if job.get("status") != "scheduled":
+                return GeneratorResult(
+                    success=True,
+                    message=f"job {job_id}: already {job['status']}",
+                )
 
             if dry_run:
                 return GeneratorResult(success=True, message=f"job {job_id}: dry_run skip")
