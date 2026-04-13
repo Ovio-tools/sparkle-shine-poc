@@ -647,7 +647,7 @@ class TestRun(unittest.TestCase):
                     self.fail("run() crashed when reconciler module was missing")
 
     def test_run_does_not_crash_when_reconciler_raises(self):
-        """Exception from reconciler.daily_sweep() must not crash run()."""
+        """Exception from reconciler.run_daily_sweep() must not crash run()."""
         with patch("signal.signal"):
             engine = SimulationEngine(dry_run=True, target_date=date(2026, 3, 27))
 
@@ -656,7 +656,7 @@ class TestRun(unittest.TestCase):
             return {}
 
         mock_reconciler = MagicMock()
-        mock_reconciler.return_value.daily_sweep.side_effect = RuntimeError("sweep failed")
+        mock_reconciler.return_value.run_daily_sweep.side_effect = RuntimeError("sweep failed")
 
         with patch.object(engine, "run_once", side_effect=fake_run_once):
             with patch("time.sleep"):

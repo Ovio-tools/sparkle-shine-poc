@@ -333,13 +333,17 @@ class JobberSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE jobs
-                    SET status       = %s,
+                    SET status       = CASE
+                                           WHEN completed_at IS NOT NULL AND %s = 'scheduled'
+                                               THEN 'completed'
+                                           ELSE %s
+                                       END,
                         completed_at = CASE WHEN %s = 'completed'
                                            THEN COALESCE(%s, completed_at)
                                            ELSE completed_at END
                     WHERE id = %s
                     """,
-                    (status, status, end_at, canonical_id),
+                    (status, status, status, end_at, canonical_id),
                 )
 
     # ------------------------------------------------------------------ #

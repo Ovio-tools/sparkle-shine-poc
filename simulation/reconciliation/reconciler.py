@@ -175,6 +175,10 @@ class Reconciler:
         automation_findings = self.run_automation_health_check()
         return reports, automation_findings
 
+    def daily_sweep(self) -> tuple[list[ReconciliationReport], list[Finding]]:
+        """Backward-compatible alias for older callers."""
+        return self.run_daily_sweep()
+
     def run_automation_health_check(self) -> list[Finding]:
         """
         Find completed jobs older than 24 hours with no matching invoice.

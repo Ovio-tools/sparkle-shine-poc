@@ -449,7 +449,7 @@ class SimulationEngine:
             try:
                 from simulation.reconciliation.reconciler import Reconciler
                 reconciler = Reconciler(self.db_path)
-                reconciler.daily_sweep()
+                reconciler.run_daily_sweep()
             except ImportError:
                 pass
             except Exception as e:
