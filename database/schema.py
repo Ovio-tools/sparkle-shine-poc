@@ -91,6 +91,8 @@ CREATE_TABLES = [
         client_id                   TEXT NOT NULL REFERENCES clients(id),
         crew_id                     TEXT REFERENCES crews(id),
         service_type_id             TEXT NOT NULL,
+        job_title_raw               TEXT,
+        jobber_job_type             TEXT,
         scheduled_date              TEXT NOT NULL,
         scheduled_time              TEXT,
         duration_minutes_actual     INTEGER,
@@ -98,10 +100,16 @@ CREATE_TABLES = [
                                         CHECK(status IN ('scheduled','completed','cancelled','no-show')),
         address                     TEXT,
         notes                       TEXT,
+        is_recurring_job            BOOLEAN,
+        jobber_updated_at           TEXT,
         review_requested            INTEGER NOT NULL DEFAULT 0 CHECK(review_requested IN (0,1)),
         completed_at                TEXT
     )
     """,
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_title_raw TEXT",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_job_type TEXT",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_recurring_job BOOLEAN",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_updated_at TEXT",
 
     # ------------------------------------------------------------------ #
     # 6. recurring_agreements
@@ -336,6 +344,7 @@ CREATE_TABLES = [
     "CREATE INDEX IF NOT EXISTS idx_leads_status         ON leads(status)",
     "CREATE INDEX IF NOT EXISTS idx_leads_email          ON leads(email)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_client_id       ON jobs(client_id)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_jobber_updated  ON jobs(jobber_updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_scheduled_date  ON jobs(scheduled_date)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_status          ON jobs(status)",
     "CREATE INDEX IF NOT EXISTS idx_invoices_client_id   ON invoices(client_id)",
