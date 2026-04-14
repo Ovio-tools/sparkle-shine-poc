@@ -1,0 +1,17 @@
+# Dedicated Railway config for always-on worker services.
+#
+# Set each long-lived worker service's Custom Config File to:
+#   /railway.worker.toml
+#
+# Current workers:
+#   - simulation-engine
+#   - token-keeper
+#
+# This keeps workers on restartPolicyType = "ALWAYS" without changing the
+# cron-oriented defaults in /railway.toml.
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+restartPolicyType = "ALWAYS"

@@ -1,9 +1,8 @@
-# Dedicated Railway config for the long-lived simulation worker.
-# Set the simulation-engine service's Custom Config File to:
-#   /railway.simulation.toml
+# Backward-compatible alias for the simulation worker.
 #
-# This keeps the worker always-on without changing restart behavior
-# for the cron-driven services that still use /railway.toml.
+# New deployments should prefer /railway.worker.toml so both always-on workers
+# (simulation-engine and token-keeper) share the same restart policy. Keeping
+# this file avoids breaking existing Railway Custom Config File references.
 
 [build]
 builder = "nixpacks"

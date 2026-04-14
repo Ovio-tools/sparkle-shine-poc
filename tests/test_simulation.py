@@ -425,12 +425,14 @@ class TestCheckpoint(unittest.TestCase):
         return engine
 
     def test_save_and_load_roundtrip(self):
+        from simulation.engine import GeneratorCall
         engine = self._make_engine()
         engine.counters["contacts"] = 5
         engine.counters["deals"] = 3
         engine.event_count = 8
         engine.error_count = 1
         engine.current_date = date(2026, 3, 27)
+        engine._remaining_plan = [GeneratorCall("contacts", {})]
         engine.save_checkpoint()
 
         # Load into a fresh engine
@@ -445,6 +447,8 @@ class TestCheckpoint(unittest.TestCase):
         self.assertEqual(engine2.event_count, 8)
         self.assertEqual(engine2.error_count, 1)
         self.assertEqual(engine2.current_date, date(2026, 3, 27))
+        self.assertEqual(len(engine2._remaining_plan), 1)
+        self.assertEqual(engine2._remaining_plan[0].generator_name, "contacts")
 
     def test_save_checkpoint_skipped_in_dry_run(self):
         engine = self._make_engine(dry_run=True)
@@ -471,6 +475,7 @@ class TestCheckpoint(unittest.TestCase):
         self.assertIn("counters", data)
         self.assertIn("event_count", data)
         self.assertIn("last_event_time", data)
+        self.assertIn("remaining_plan", data)
         self.assertEqual(data["date"], "2026-03-27")
 
     def test_log_daily_summary_includes_error_count(self):
@@ -558,6 +563,16 @@ class TestRunOnce(unittest.TestCase):
         # sleep should be called once per event dispatched (all generators)
         self.assertEqual(mock_sleep.call_count, engine.event_count)
 
+    def test_run_once_resets_daily_counters_for_fresh_day(self):
+        engine, _ = self._make_engine_with_mock_gen()
+        engine.counters["contacts"] = 99
+        engine.event_count = 99
+        engine.error_count = 4
+        with patch("time.sleep"):
+            engine.run_once(date(2026, 3, 27))
+        self.assertLess(engine.event_count, 99)
+        self.assertLess(engine.counters["contacts"], 99)
+
 
 class TestShutdown(unittest.TestCase):
 
@@ -617,7 +632,7 @@ class TestRun(unittest.TestCase):
             engine = SimulationEngine(dry_run=True, target_date=date(2026, 3, 27))
 
         call_count = 0
-        def fake_run_once(d):
+        def fake_run_once(d, **kwargs):
             nonlocal call_count
             call_count += 1
             engine.running = False  # stop after first iteration
@@ -634,7 +649,7 @@ class TestRun(unittest.TestCase):
         with patch("signal.signal"):
             engine = SimulationEngine(dry_run=True, target_date=date(2026, 3, 27))
 
-        def fake_run_once(d):
+        def fake_run_once(d, **kwargs):
             engine.running = False
             return {}
 
@@ -651,7 +666,7 @@ class TestRun(unittest.TestCase):
         with patch("signal.signal"):
             engine = SimulationEngine(dry_run=True, target_date=date(2026, 3, 27))
 
-        def fake_run_once(d):
+        def fake_run_once(d, **kwargs):
             engine.running = False
             return {}
 
