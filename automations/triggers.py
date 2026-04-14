@@ -249,7 +249,7 @@ def poll_jobber_completed_jobs(clients: Any, db) -> list:
             events.append({
                 "job_id": str(job.get("id", "")),
                 "client_id": str((job.get("client") or {}).get("id", "")),
-                "service_type": job.get("jobType") or job.get("title", ""),
+                "service_type": job.get("title") or job.get("jobType", ""),
                 "duration_minutes": duration_minutes,
                 "crew": crew,
                 "completion_notes": job.get("instructions", ""),

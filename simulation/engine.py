@@ -17,6 +17,7 @@ import heapq
 import hashlib
 import json
 import logging
+import os
 import random
 import signal
 import sys
@@ -36,6 +37,9 @@ GeneratorCall = namedtuple("GeneratorCall", ["generator_name", "kwargs"])
 TimedEvent = namedtuple("TimedEvent", ["fire_at", "generator_name", "kwargs"])
 
 CHECKPOINT_FILE = Path("simulation/checkpoint.json")
+DEFAULT_DAY_RUNTIME_BUDGET_SECONDS = int(
+    os.getenv("SIM_ENGINE_DAY_RUNTIME_BUDGET_SECONDS", str(6 * 60 * 60))
+)
 
 
 def _stable_seed(value: str) -> int:
@@ -78,6 +82,11 @@ class SimulationEngine:
         self.error_count: int = 0
         self._generators: dict = {}
         self._timed_queue: list = []  # heapq sorted by fire_at
+        self._remaining_plan: list[GeneratorCall] = []
+        self._checkpoint_loaded = False
+        self._resume_incomplete_day = False
+        self._fresh_start = True
+        self.day_runtime_budget_seconds = DEFAULT_DAY_RUNTIME_BUDGET_SECONDS
 
         # --date wins: seed RNG and skip checkpoint (L7)
         if target_date is not None:
@@ -283,6 +292,19 @@ class SimulationEngine:
         if not self.dry_run and self.event_count % 10 == 0:
             self.save_checkpoint()
 
+    def _serialize_plan(self, plan: list[GeneratorCall]) -> list[list]:
+        """Convert the remaining plan into JSON-serializable rows."""
+        return [[gc.generator_name, gc.kwargs] for gc in plan]
+
+    def _deserialize_plan(self, raw_plan: list[list]) -> list[GeneratorCall]:
+        """Restore GeneratorCall rows from checkpoint JSON."""
+        restored = []
+        for row in raw_plan:
+            if not isinstance(row, list) or len(row) != 2:
+                continue
+            restored.append(GeneratorCall(row[0], row[1]))
+        return restored
+
     def save_checkpoint(self) -> None:
         """Write engine state to simulation/checkpoint.json.
 
@@ -301,6 +323,7 @@ class SimulationEngine:
                 (e.fire_at.isoformat(), e.generator_name, e.kwargs)
                 for e in self._timed_queue
             ],
+            "remaining_plan": self._serialize_plan(self._remaining_plan),
         }
         checkpoint_file = getattr(self, "_checkpoint_file", CHECKPOINT_FILE)
         checkpoint_file.write_text(json.dumps(state, indent=2))
@@ -327,11 +350,45 @@ class SimulationEngine:
                 self._timed_queue,
                 TimedEvent(datetime.fromisoformat(fire_at_iso), gen_name, kwargs),
             )
+        self._remaining_plan = self._deserialize_plan(state.get("remaining_plan", []))
+        self._checkpoint_loaded = True
+        self._resume_incomplete_day = bool(self._remaining_plan)
+        self._fresh_start = False
         logger.info(
             f"Resumed from checkpoint: {self.current_date}, "
             f"{self.event_count} events already processed"
         )
         return state
+
+    def _start_new_day(self, target_date: date) -> None:
+        """Reset per-day counters before building a fresh daily plan."""
+        self.current_date = target_date
+        self.counters = defaultdict(int)
+        self.event_count = 0
+        self.error_count = 0
+        self._remaining_plan = []
+        self._resume_incomplete_day = False
+
+    def _get_sleep_delay(
+        self,
+        target_date: date,
+        remaining_events: int,
+        started_at: datetime,
+        fast_forward: bool,
+    ) -> float:
+        """Bound per-event sleep so one simulated day cannot spill indefinitely."""
+        if fast_forward:
+            return 0.0
+
+        base_delay = get_next_event_delay(target_date) / max(self.speed, 0.001)
+        if remaining_events <= 0:
+            return base_delay
+
+        elapsed = max(0.0, (datetime.utcnow() - started_at).total_seconds())
+        remaining_budget = max(0.0, self.day_runtime_budget_seconds - elapsed)
+        if remaining_budget <= 0:
+            return 0.0
+        return min(base_delay, remaining_budget / remaining_events)
 
     def log_daily_summary(self) -> None:
         """Log a one-line summary of the day's event counts and crew utilization.
@@ -379,7 +436,7 @@ class SimulationEngine:
         except Exception as e:
             logger.warning(f"Could not log utilization: {e}")
 
-    def run_once(self, target_date: date) -> dict:
+    def run_once(self, target_date: date, fast_forward: bool = False) -> dict:
         """Run exactly one full simulated day.
 
         Builds a shuffled plan of events, dispatches each with a timing delay,
@@ -394,8 +451,14 @@ class SimulationEngine:
         Returns:
             Dict of successful event counts by generator name (partial if interrupted).
         """
-        self.current_date = target_date
-        plan = self.plan_day(target_date)
+        if self._resume_incomplete_day and self.current_date == target_date and self._remaining_plan:
+            plan = list(self._remaining_plan)
+        else:
+            self._start_new_day(target_date)
+            plan = self.plan_day(target_date)
+            self._remaining_plan = plan
+
+        started_at = datetime.utcnow()
 
         while plan and self.running:
             if not self.running:
@@ -413,11 +476,26 @@ class SimulationEngine:
             # to fail (sleep count must equal execute count).
             if generator_call.generator_name not in self._generators:
                 continue
-            delay = get_next_event_delay(target_date) / max(self.speed, 0.001)
+            self._remaining_plan = plan
+            delay = self._get_sleep_delay(
+                target_date,
+                remaining_events=len(plan) + 1,
+                started_at=started_at,
+                fast_forward=fast_forward,
+            )
             time.sleep(delay)
             self.dispatch(generator_call)
 
+        self._remaining_plan = plan
         self.log_daily_summary()
+        if not plan:
+            self._resume_incomplete_day = False
+            self._remaining_plan = []
+        else:
+            self._resume_incomplete_day = True
+
+        if not self.dry_run:
+            self.save_checkpoint()
         return dict(self.counters)
 
     def handle_shutdown(self, signum: int, frame) -> None:
@@ -441,8 +519,17 @@ class SimulationEngine:
         then sleep until midnight (waking every second to check self.running).
         """
         while self.running:
-            today = date.today()
-            self.run_once(today)
+            real_today = date.today()
+            if self._resume_incomplete_day:
+                target_day = self.current_date
+            elif self._fresh_start:
+                target_day = self.current_date
+                self._fresh_start = False
+            else:
+                target_day = min(self.current_date + timedelta(days=1), real_today)
+
+            fast_forward = target_day < real_today
+            self.run_once(target_day, fast_forward=fast_forward)
 
             # Daily reconciliation sweep — no-op until reconciler is built (Step 7).
             # ImportError guard keeps the engine running before the module exists.
@@ -465,10 +552,13 @@ class SimulationEngine:
             if not self.running:
                 break
 
+            if fast_forward:
+                continue
+
             # Sleep until midnight. Check self.running every second so a shutdown
             # signal is not ignored during a long sleep.
             tomorrow_midnight = datetime.combine(
-                today + timedelta(days=1), datetime.min.time()
+                target_day + timedelta(days=1), datetime.min.time()
             )
             while self.running:
                 remaining = (tomorrow_midnight - datetime.now()).total_seconds()

@@ -4,6 +4,7 @@ Jobber syncer -- pulls clients, jobs, and recurring agreements into SQLite.
 Uses the Jobber GraphQL API with cursor-based pagination.
 Handles cross_tool_mapping for all three entity types.
 """
+import re
 import time
 from datetime import datetime
 from typing import Optional
@@ -38,10 +39,22 @@ query ListJobs($cursor: String) {
     nodes {
       id
       title
+      instructions
       startAt
       endAt
       jobStatus
+      jobType
       client { id }
+      visitSchedule {
+        recurrenceSchedule {
+          calendarRule
+        }
+      }
+      visits(first: 1) {
+        nodes {
+          duration
+        }
+      }
       updatedAt
     }
     pageInfo { hasNextPage endCursor }
@@ -77,6 +90,86 @@ _JOBBER_STATUS_MAP = {
     "LATE": "scheduled",
     "UNSCHEDULED": "scheduled",
 }
+
+_TITLE_TOKEN_MAP = {
+    "commercial nightly clean": "commercial-nightly",
+    "commercial nightly": "commercial-nightly",
+    "deep clean": "deep-clean",
+    "move in move out clean": "move-in-out",
+    "move in out clean": "move-in-out",
+    "move in out": "move-in-out",
+    "monthly recurring": "recurring-monthly",
+    "recurring biweekly": "recurring-biweekly",
+    "recurring monthly": "recurring-monthly",
+    "recurring weekly": "recurring-weekly",
+    "residential clean": "std-residential",
+    "standard residential clean": "std-residential",
+    "std residential": "std-residential",
+    "weekly recurring": "recurring-weekly",
+}
+
+
+def _clean_text(value: object) -> Optional[str]:
+    text = (value or "").strip()
+    return text or None
+
+
+def _slug_title(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _service_type_from_title(title: Optional[str]) -> Optional[str]:
+    title = _clean_text(title)
+    if not title:
+        return None
+
+    normalized = _slug_title(title)
+    if normalized in _TITLE_TOKEN_MAP:
+        return _TITLE_TOKEN_MAP[normalized]
+
+    normalized_dash = normalized.replace(" ", "-")
+    if normalized_dash in {
+        "commercial-nightly",
+        "deep-clean",
+        "move-in-out",
+        "recurring-biweekly",
+        "recurring-monthly",
+        "recurring-weekly",
+        "std-residential",
+    }:
+        return normalized_dash
+
+    return None
+
+
+def _duration_minutes(node: dict) -> Optional[int]:
+    visit_nodes = (node.get("visits") or {}).get("nodes") or []
+    first_visit = visit_nodes[0] if visit_nodes else {}
+    raw_duration = first_visit.get("duration") or 0
+    return round(raw_duration / 60) if raw_duration else None
+
+
+def _is_recurring_job(node: dict) -> Optional[bool]:
+    recurrence = (node.get("visitSchedule") or {}).get("recurrenceSchedule")
+    if recurrence is not None:
+        return True
+
+    title = _clean_text(node.get("title"))
+    if title:
+        lowered = _slug_title(title)
+        if lowered.startswith("recurring ") or lowered.endswith(" recurring"):
+            return True
+    return None
+
+
+def _choose_service_type(existing_value: Optional[str], node: dict) -> str:
+    candidate = _service_type_from_title(node.get("title"))
+    current = _clean_text(existing_value)
+    if candidate:
+        if not current or current == "residential-clean":
+            return candidate
+        return current
+    return current or "residential-clean"
 
 
 def _quote_is_recurring(node: dict) -> bool:
@@ -303,47 +396,105 @@ class JobberSyncer(BaseSyncer):
             return  # Skip jobs whose client we haven't synced yet
 
         status = _JOBBER_STATUS_MAP.get(node.get("jobStatus", "ACTIVE"), "scheduled")
-        scheduled_date = (node.get("startAt") or "")[:10] or None
-        scheduled_time = (node.get("startAt") or "")[11:16] or None
+        start_at = node.get("startAt") or ""
+        scheduled_date = start_at[:10] or None
+        scheduled_time = start_at[11:16] or None
         end_at = node.get("endAt")
+        title = _clean_text(node.get("title"))
+        instructions = _clean_text(node.get("instructions"))
+        job_type = _clean_text(node.get("jobType"))
+        duration_minutes = _duration_minutes(node)
+        is_recurring = _is_recurring_job(node)
+        updated_at = _clean_text(node.get("updatedAt"))
 
         if canonical_id is None:
+            service_type_id = _choose_service_type(None, node)
             canonical_id = generate_id("JOB", self.db_path)
             with self.db:
                 self.db.execute(
                     """
                     INSERT INTO jobs
-                        (id, client_id, service_type_id, scheduled_date,
-                         scheduled_time, status, completed_at)
-                    VALUES (%s, %s, 'residential-clean', %s, %s, %s, %s)
+                        (id, client_id, service_type_id, job_title_raw,
+                         jobber_job_type, scheduled_date, scheduled_time,
+                         duration_minutes_actual, status, notes,
+                         is_recurring_job, jobber_updated_at, completed_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
                     (
                         canonical_id,
                         client_canonical,
+                        service_type_id,
+                        title,
+                        job_type,
                         scheduled_date,
                         scheduled_time,
+                        duration_minutes,
                         status,
+                        instructions,
+                        is_recurring,
+                        updated_at,
                         end_at if status == "completed" else None,
                     ),
                 )
             register_mapping(canonical_id, "jobber", jobber_id, db_path=self.db_path)
         else:
+            row = self.db.execute(
+                """
+                SELECT service_type_id, job_title_raw, jobber_job_type,
+                       scheduled_date, scheduled_time, duration_minutes_actual,
+                       status, notes, is_recurring_job, jobber_updated_at, completed_at
+                FROM jobs
+                WHERE id = %s
+                """,
+                (canonical_id,),
+            ).fetchone()
+            if row is None:
+                return
+
+            merged_status = "completed" if row["completed_at"] is not None and status == "scheduled" else status
+            merged_completed_at = end_at if status == "completed" else row["completed_at"]
+            merged_service_type = _choose_service_type(row["service_type_id"], node)
+            merged_title = title or row["job_title_raw"]
+            merged_job_type = job_type or row["jobber_job_type"]
+            merged_scheduled_date = scheduled_date or row["scheduled_date"]
+            merged_scheduled_time = scheduled_time or row["scheduled_time"]
+            merged_duration = duration_minutes or row["duration_minutes_actual"]
+            merged_notes = instructions or row["notes"]
+            merged_is_recurring = is_recurring if is_recurring is not None else row["is_recurring_job"]
+            merged_updated_at = updated_at or row["jobber_updated_at"]
+
             with self.db:
                 self.db.execute(
                     """
                     UPDATE jobs
-                    SET status       = CASE
-                                           WHEN completed_at IS NOT NULL AND %s = 'scheduled'
-                                               THEN 'completed'
-                                           ELSE %s
-                                       END,
-                        completed_at = CASE WHEN %s = 'completed'
-                                           THEN COALESCE(%s, completed_at)
-                                           ELSE completed_at END
+                    SET service_type_id         = %s,
+                        job_title_raw           = %s,
+                        jobber_job_type         = %s,
+                        scheduled_date          = %s,
+                        scheduled_time          = %s,
+                        duration_minutes_actual = %s,
+                        status                  = %s,
+                        notes                   = %s,
+                        is_recurring_job        = %s,
+                        jobber_updated_at       = %s,
+                        completed_at            = %s
                     WHERE id = %s
                     """,
-                    (status, status, status, end_at, canonical_id),
+                    (
+                        merged_service_type,
+                        merged_title,
+                        merged_job_type,
+                        merged_scheduled_date,
+                        merged_scheduled_time,
+                        merged_duration,
+                        merged_status,
+                        merged_notes,
+                        merged_is_recurring,
+                        merged_updated_at,
+                        merged_completed_at,
+                        canonical_id,
+                    ),
                 )
 
     # ------------------------------------------------------------------ #
