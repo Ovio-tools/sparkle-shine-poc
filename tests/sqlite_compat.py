@@ -20,6 +20,7 @@ def adapt_postgres_sql(sql: str) -> str:
     """Translate the PostgreSQL subset used by legacy tests into SQLite SQL."""
     adapted = sql.replace("%s", "?")
     adapted = adapted.replace("::date", "")
+    adapted = adapted.replace("::timestamp", "")
     adapted = _INTERVAL_RE.sub(lambda m: f"date('now', '-{m.group(1)} days')", adapted)
     adapted = adapted.replace("CURRENT_DATE", "date('now')")
     adapted = _NULLS_FIRST_RE.sub(r"ORDER BY \1 IS NOT NULL, \1 ASC", adapted)

@@ -478,6 +478,21 @@ class TestReportError(unittest.TestCase):
         assert "Invoice for Sarah Chen was skipped" in blocks_text
 
     @patch("simulation.error_reporter.get_client")
+    def test_unknown_exception_includes_exception_summary(self, mock_get_client):
+        mock_client = _make_slack_mock()
+        mock_get_client.return_value = mock_client
+        from simulation.error_reporter import report_error
+        report_error(
+            ValueError("operator does not exist: text >= timestamp with time zone"),
+            tool_name="reconciliation",
+            context="Daily reconciliation sweep",
+        )
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        blocks_text = str(call_kwargs["blocks"])
+        assert "ValueError" in blocks_text
+        assert "operator does not exist" in blocks_text
+
+    @patch("simulation.error_reporter.get_client")
     def test_chat_post_exception_returns_false_never_raises(self, mock_get_client):
         mock_client = _make_slack_mock()
         mock_client.chat_postMessage.side_effect = Exception("Network error")

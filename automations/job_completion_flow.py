@@ -28,6 +28,8 @@ from automations.utils.id_resolver import MappingNotFoundError, register_mapping
 
 logger = logging.getLogger(__name__)
 
+_INVOICE_ID_LOCK_KEY = 9_214_001
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Service catalogue — mirrors config/business.py SERVICE_TYPES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,6 +104,29 @@ def _lookup_service(service_type: str) -> dict:
     }
 
 
+def _allocate_invoice_id(db) -> str:
+    """Allocate the next SS-INV ID under an advisory lock to avoid races."""
+    db.execute("SELECT pg_advisory_xact_lock(%s)", (_INVOICE_ID_LOCK_KEY,))
+
+    invoice_row = db.execute(
+        """
+        SELECT COALESCE(MAX(CAST(split_part(id, '-', 3) AS INTEGER)), 0) AS max_id
+        FROM invoices
+        WHERE id LIKE 'SS-INV-%'
+        """
+    ).fetchone()
+    mapping_row = db.execute(
+        """
+        SELECT COALESCE(MAX(CAST(split_part(canonical_id, '-', 3) AS INTEGER)), 0) AS max_id
+        FROM cross_tool_mapping
+        WHERE entity_type = 'INV' AND canonical_id LIKE 'SS-INV-%'
+        """
+    ).fetchone()
+
+    next_n = max(invoice_row["max_id"], mapping_row["max_id"]) + 1
+    return f"SS-INV-{next_n:04d}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main class
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,28 +167,21 @@ class JobCompletionFlow(BaseAutomation):
         try:
             invoice_id, invoice_amount, payment_terms = self._action_quickbooks_invoice(ctx)
             if not self.dry_run and invoice_id:
-                # Generate a proper SS-INV-NNNN canonical ID
-                row = self.db.execute(
-                    "SELECT id FROM invoices ORDER BY id DESC LIMIT 1"
-                ).fetchone()
-                last_n = int(
-                    (row["id"] if row else "SS-INV-0000").split("-")[-1]
-                )
-                inv_canonical_id = f"SS-INV-{last_n + 1:04d}"
-                # Persist the invoice to SQLite (source of truth)
                 inv_due_date = (
                     (ctx["completion_date"] + timedelta(days=30)).isoformat()
                     if ctx["is_commercial"]
                     else ctx["completion_date"].isoformat()
                 )
                 with self.db:
+                    inv_canonical_id = _allocate_invoice_id(self.db)
                     self.db.execute(
                         "INSERT INTO invoices "
-                        "(id, client_id, amount, status, issue_date, due_date) "
-                        "VALUES (%s, %s, %s, 'sent', %s, %s)",
+                        "(id, client_id, job_id, amount, status, issue_date, due_date) "
+                        "VALUES (%s, %s, %s, %s, 'sent', %s, %s)",
                         (
                             inv_canonical_id,
                             ctx["canonical_id"],
+                            ctx["canonical_job_id"],
                             invoice_amount,
                             ctx["completion_date"].isoformat(),
                             inv_due_date,
@@ -240,7 +258,7 @@ class JobCompletionFlow(BaseAutomation):
         Resolve cross-tool IDs and normalize the trigger event.
         Missing mappings are stored as None; each action decides how to handle them.
         """
-        job_id           = str(event.get("job_id", ""))
+        jobber_job_id    = str(event.get("job_id", ""))
         jobber_client_id = str(event.get("client_id", ""))
         service_type     = event.get("service_type") or "Standard Residential Clean"
 
@@ -259,6 +277,13 @@ class JobCompletionFlow(BaseAutomation):
         except MappingNotFoundError:
             pass
 
+        canonical_job_id: Optional[str] = None
+        if jobber_job_id:
+            try:
+                canonical_job_id = self.reverse_resolve_id(jobber_job_id, "jobber")
+            except MappingNotFoundError:
+                pass
+
         # Resolve downstream tool IDs
         qbo_customer_id: Optional[str] = None
         hs_contact_id:   Optional[str] = None
@@ -266,7 +291,12 @@ class JobCompletionFlow(BaseAutomation):
             try:
                 qbo_customer_id = self.resolve_id(canonical_id, "quickbooks")
             except MappingNotFoundError:
-                pass
+                try:
+                    # Backward compatibility for rows created before we standardized
+                    # on the "quickbooks" customer mapping.
+                    qbo_customer_id = self.resolve_id(canonical_id, "quickbooks_customer")
+                except MappingNotFoundError:
+                    pass
             try:
                 hs_contact_id = self.resolve_id(canonical_id, "hubspot")
             except MappingNotFoundError:
@@ -285,7 +315,9 @@ class JobCompletionFlow(BaseAutomation):
                 client_email = row["email"] or ""
 
         return {
-            "job_id":           job_id,
+            "job_id":           canonical_job_id or jobber_job_id,
+            "jobber_job_id":    jobber_job_id,
+            "canonical_job_id": canonical_job_id,
             "jobber_client_id": jobber_client_id,
             "canonical_id":     canonical_id,
             "qbo_customer_id":  qbo_customer_id,

@@ -179,6 +179,25 @@ def _build_test_db():
                 (cid, etype, tool, tid),
             )
 
+    # Seed a sample completed job so invoice writes can satisfy the FK on invoices.job_id.
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO jobs
+                (id, client_id, service_type_id, scheduled_date, status, completed_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                "SS-JOB-0001",
+                "SS-CLIENT-0001",
+                "std-residential",
+                "2026-03-15",
+                "completed",
+                "2026-03-15",
+            ),
+        )
+
     return conn
 
 

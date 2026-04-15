@@ -87,9 +87,14 @@ class BaseAutomation:
         """
         return resolve(self.db, canonical_id, target_tool)
 
-    def reverse_resolve_id(self, tool_specific_id: str, source_tool: str) -> str:
+    def reverse_resolve_id(
+        self,
+        tool_specific_id: str,
+        source_tool: str,
+        entity_type: Optional[str] = None,
+    ) -> str:
         """Return the canonical SS-ID for a tool-specific ID."""
-        return reverse_resolve(self.db, tool_specific_id, source_tool)
+        return reverse_resolve(self.db, tool_specific_id, source_tool, entity_type=entity_type)
 
     # ------------------------------------------------------------------ #
     # Slack

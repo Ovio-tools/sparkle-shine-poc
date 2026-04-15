@@ -219,6 +219,13 @@ def _truncate_slack_text(text: str, limit: int) -> str:
     return text[: limit - len(_SLACK_TRUNCATION_SUFFIX)].rstrip() + _SLACK_TRUNCATION_SUFFIX
 
 
+def _summarize_exception(exc: Exception) -> str:
+    """Return a compact exception summary suitable for human-facing alerts."""
+    name = exc.__class__.__name__
+    message = " ".join(str(exc).split())
+    return f"{name}: {message}" if message else name
+
+
 def _build_slack_section(label: str, body: str) -> dict:
     return {
         "type": "section",
@@ -498,6 +505,11 @@ def report_error(
         what_happened = translation["what_happened"]
         what_to_do = translation["what_to_do"]
         base_severity = translation["severity"]
+
+        if category == "unknown" and isinstance(exc, Exception):
+            what_happened = (
+                f"{what_happened} ({_summarize_exception(exc)})"
+            )
 
         # Determine final severity and header text
         header_text = "Automation Issue"

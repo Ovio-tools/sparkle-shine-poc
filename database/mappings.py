@@ -98,8 +98,8 @@ def register_mapping(
     # Collision guard: same external ID must not point to two canonical entities.
     existing = conn.execute(
         "SELECT canonical_id FROM cross_tool_mapping "
-        "WHERE tool_name = %s AND tool_specific_id = %s",
-        (tool_name, tool_specific_id),
+        "WHERE tool_name = %s AND tool_specific_id = %s AND entity_type = %s",
+        (tool_name, tool_specific_id, entity_type),
     ).fetchone()
     if existing is not None:
         existing_cid = existing["canonical_id"]

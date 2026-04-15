@@ -63,6 +63,13 @@ def test_invoice_created_residential_due_on_receipt(
         "Residential invoice DueDate should equal TxnDate (due on receipt)"
     )
 
+    row = auto.db.execute(
+        "SELECT job_id, status FROM invoices ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row["job_id"] == "SS-JOB-0001"
+    assert row["status"] == "sent"
+
 
 @patch("automations.job_completion_flow.requests.post")
 def test_invoice_created_commercial_net30(mock_post, mock_db, mock_clients):

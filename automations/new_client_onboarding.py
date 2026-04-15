@@ -247,6 +247,7 @@ class NewClientOnboarding(BaseAutomation):
         try:
             qbo_customer_id = self._action_quickbooks(ctx)
             if not self.dry_run and qbo_customer_id:
+                register_mapping(self.db, ctx["canonical_id"], "quickbooks", qbo_customer_id)
                 register_mapping(self.db, ctx["canonical_id"], "quickbooks_customer", qbo_customer_id)
             self.log_action(
                 run_id, "create_quickbooks_customer",
@@ -967,7 +968,7 @@ class NewClientOnboarding(BaseAutomation):
     def _action_verify_mappings(
         self, run_id: str, ctx: dict, trigger_source: str
     ) -> None:
-        required_tools = ["pipedrive", "jobber", "quickbooks_customer", "mailchimp"]
+        required_tools = ["pipedrive", "jobber", "quickbooks", "quickbooks_customer", "mailchimp"]
         if ctx.get("email"):
             required_tools.append("hubspot")
         canonical_id = ctx["canonical_id"]

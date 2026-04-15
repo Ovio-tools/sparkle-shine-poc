@@ -1,6 +1,6 @@
 import pytest
 
-from automations.utils.id_resolver import register_mapping
+from automations.utils.id_resolver import register_mapping, reverse_resolve
 
 
 class _FakeCursor:
@@ -43,5 +43,14 @@ def test_register_mapping_uses_entity_type_from_ss_prefix():
 
     register_mapping(fake_db, "SS-INV-FAKE-01", "quickbooks", "8734")
 
-    assert fake_db.calls[0][1] == ("quickbooks", "8734")
+    assert fake_db.calls[0][1] == ("quickbooks", "8734", "INV")
     assert fake_db.calls[1][1] == ("SS-INV-FAKE-01", "INV", "quickbooks", "8734")
+
+
+def test_reverse_resolve_can_filter_by_entity_type():
+    fake_db = _FakeDB({"canonical_id": "SS-CLIENT-0001"})
+
+    result = reverse_resolve(fake_db, "401", "quickbooks", entity_type="client")
+
+    assert result == "SS-CLIENT-0001"
+    assert fake_db.calls[0][1] == ("401", "quickbooks", "CLIENT")

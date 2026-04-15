@@ -195,7 +195,9 @@ class PaymentReceived(BaseAutomation):
         # Resolve canonical ID from QBO customer ID
         canonical_id: Optional[str] = None
         try:
-            canonical_id = self.reverse_resolve_id(qbo_customer_id, "quickbooks")
+            canonical_id = self.reverse_resolve_id(
+                qbo_customer_id, "quickbooks", entity_type="CLIENT"
+            )
         except MappingNotFoundError:
             pass
 

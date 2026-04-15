@@ -1,8 +1,8 @@
 """
 simulation/reconciliation/reconciler.py
 
-Verifies that every client in SQLite has matching, consistent records across
-all relevant SaaS tools.  Runs in two modes:
+Verifies that every client in the canonical database has matching, consistent
+records across all relevant SaaS tools. Runs in two modes:
 
 TARGETED — check one specific client across all tools:
     python -m simulation.reconciliation.reconciler --client SS-CLIENT-0047
@@ -24,7 +24,7 @@ import hashlib
 import json
 import random
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -116,6 +116,20 @@ class Reconciler:
         self.dry_run = dry_run
         self._tool_ids = _load_tool_ids()
 
+    def _connect(self):
+        """Open the shared canonical database connection."""
+        return get_connection(self.db_path)
+
+    @staticmethod
+    def _text_timestamp_sql(column: str) -> str:
+        """Normalize legacy text timestamps before PostgreSQL comparisons.
+
+        Some legacy date/time columns are still stored as TEXT. Normalizing the
+        separator keeps both `YYYY-MM-DD HH:MM:SS` and ISO `...T...` values
+        comparable as real PostgreSQL timestamps.
+        """
+        return f"NULLIF(TRIM(REPLACE({column}, 'T', ' ')), '')::timestamp"
+
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
@@ -124,7 +138,7 @@ class Reconciler:
         """TARGETED mode: check one client across all relevant tools."""
         report = ReconciliationReport(client_id=canonical_id)
 
-        conn = get_connection(self.db_path)
+        conn = self._connect()
         try:
             client = conn.execute(
                 "SELECT * FROM clients WHERE id = %s", (canonical_id,)
@@ -135,9 +149,9 @@ class Reconciler:
         if client is None:
             report.findings.append(Finding(
                 category="reconciliation_missing",
-                tool="sqlite",
+                tool="database",
                 entity=canonical_id,
-                description=f"{canonical_id} not found in SQLite clients table",
+                description=f"{canonical_id} not found in the canonical clients table",
                 auto_fixable=False,
             ))
             return report
@@ -184,19 +198,25 @@ class Reconciler:
         Find completed jobs older than 24 hours with no matching invoice.
         Post to #automation-failure if any found.  Never creates invoices.
         """
-        import sqlite3 as _sqlite3
-        conn = _sqlite3.connect(self.db_path)
-        conn.row_factory = _sqlite3.Row
+        completed_at_sql = self._text_timestamp_sql("j.completed_at")
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        conn = self._connect()
         try:
             rows = conn.execute(
-                """
+                f"""
                 SELECT j.id
                 FROM jobs j
                 WHERE j.status = 'completed'
-                  AND j.completed_at < datetime('now', '-24 hours')
-                  AND j.id NOT IN (SELECT job_id FROM invoices WHERE job_id IS NOT NULL)
-                ORDER BY j.completed_at DESC
-                """
+                  AND {completed_at_sql} IS NOT NULL
+                  AND {completed_at_sql} < %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM invoices i
+                      WHERE i.job_id = j.id
+                  )
+                ORDER BY {completed_at_sql} DESC
+                """,
+                (cutoff,),
             ).fetchall()
         finally:
             conn.close()
@@ -252,7 +272,7 @@ class Reconciler:
     # ------------------------------------------------------------------
 
     def _check_hubspot(self, canonical_id: str, client: dict) -> list[Finding]:
-        """Verify the HubSpot contact exists and key fields match SQLite."""
+        """Verify the HubSpot contact exists and key fields match the database."""
         findings: list[Finding] = []
 
         hubspot_id = get_tool_id(canonical_id, "hubspot", self.db_path)
@@ -294,17 +314,17 @@ class Reconciler:
         expected_email = (client.get("email") or "").lower()
         actual_email = (props.get("email") or "").lower()
         if expected_email and actual_email and expected_email != actual_email:
-            mismatches.append(f"email: SQLite={expected_email!r}, HubSpot={actual_email!r}")
+            mismatches.append(f"email: Database={expected_email!r}, HubSpot={actual_email!r}")
 
         expected_fn = (client.get("first_name") or "").strip().lower()
         actual_fn = (props.get("firstname") or "").strip().lower()
         if expected_fn and actual_fn and expected_fn != actual_fn:
-            mismatches.append(f"first_name: SQLite={expected_fn!r}, HubSpot={actual_fn!r}")
+            mismatches.append(f"first_name: Database={expected_fn!r}, HubSpot={actual_fn!r}")
 
         expected_ln = (client.get("last_name") or "").strip().lower()
         actual_ln = (props.get("lastname") or "").strip().lower()
         if expected_ln and actual_ln and expected_ln != actual_ln:
-            mismatches.append(f"last_name: SQLite={expected_ln!r}, HubSpot={actual_ln!r}")
+            mismatches.append(f"last_name: Database={expected_ln!r}, HubSpot={actual_ln!r}")
 
         if mismatches:
             findings.append(Finding(
@@ -319,7 +339,7 @@ class Reconciler:
         return findings
 
     def _check_mailchimp(self, canonical_id: str, client: dict) -> list[Finding]:
-        """Verify the Mailchimp subscriber exists and fields match SQLite."""
+        """Verify the Mailchimp subscriber exists and fields match the database."""
         findings: list[Finding] = []
 
         email = client.get("email")
@@ -364,12 +384,12 @@ class Reconciler:
         expected_fn = (client.get("first_name") or "").strip()
         actual_fn = (merge.get("FNAME") or "").strip()
         if expected_fn and actual_fn and expected_fn.lower() != actual_fn.lower():
-            mismatches.append(f"FNAME: SQLite={expected_fn!r}, Mailchimp={actual_fn!r}")
+            mismatches.append(f"FNAME: Database={expected_fn!r}, Mailchimp={actual_fn!r}")
 
         expected_ln = (client.get("last_name") or "").strip()
         actual_ln = (merge.get("LNAME") or "").strip()
         if expected_ln and actual_ln and expected_ln.lower() != actual_ln.lower():
-            mismatches.append(f"LNAME: SQLite={expected_ln!r}, Mailchimp={actual_ln!r}")
+            mismatches.append(f"LNAME: Database={expected_ln!r}, Mailchimp={actual_ln!r}")
 
         if mismatches:
             findings.append(Finding(
@@ -384,14 +404,14 @@ class Reconciler:
         return findings
 
     def _check_quickbooks(self, canonical_id: str, client: dict) -> list[Finding]:
-        """Verify the QBO customer exists and key fields match SQLite."""
+        """Verify the QBO customer exists and key fields match the database."""
         findings: list[Finding] = []
 
         qbo_id = get_tool_id(canonical_id, "quickbooks", self.db_path)
         if qbo_id is None:
             # QBO customer may not be created yet for recent onboards — only flag
             # if the client has at least one completed job (needs invoicing).
-            conn = get_connection(self.db_path)
+            conn = self._connect()
             try:
                 job_count = conn.execute(
                     "SELECT COUNT(*) AS cnt FROM jobs WHERE client_id = %s AND status = 'completed'",
@@ -445,7 +465,7 @@ class Reconciler:
         ).lower()
         expected_email = (client.get("email") or "").lower()
         if expected_email and qbo_email and expected_email != qbo_email:
-            mismatches.append(f"email: SQLite={expected_email!r}, QBO={qbo_email!r}")
+            mismatches.append(f"email: Database={expected_email!r}, QBO={qbo_email!r}")
 
         # Check canonical ID is embedded in Notes
         notes = customer.get("Notes", "") or ""
@@ -534,16 +554,16 @@ class Reconciler:
                 entity=canonical_id,
                 description=f"Email mismatch on Jobber client {jobber_id}",
                 auto_fixable=False,
-                details=f"SQLite={expected_email!r}, Jobber={actual_email!r}",
+                details=f"Database={expected_email!r}, Jobber={actual_email!r}",
             ))
 
         return findings
 
     def _check_asana(self, canonical_id: str, client: dict) -> list[Finding]:
-        """Check that SQLite tasks for this client have Asana mappings."""
+        """Check that database tasks for this client have Asana mappings."""
         findings: list[Finding] = []
 
-        conn = get_connection(self.db_path)
+        conn = self._connect()
         try:
             tasks = conn.execute(
                 "SELECT id FROM tasks WHERE client_id = %s", (canonical_id,)
@@ -604,7 +624,7 @@ class Reconciler:
                 logger.warning("Repair failed for %s/%s: %s", finding.tool, canonical_id, exc)
 
     def _repair_mailchimp(self, canonical_id: str, client: dict) -> bool:
-        """Create or update the Mailchimp subscriber from SQLite data."""
+        """Create or update the Mailchimp subscriber from database data."""
         email = client.get("email")
         if not email:
             return False
@@ -640,7 +660,7 @@ class Reconciler:
         return True
 
     def _repair_quickbooks(self, canonical_id: str, client: dict) -> bool:
-        """Create the QBO customer from SQLite data."""
+        """Create the QBO customer from database data."""
         if self.dry_run:
             logger.info("[DRY RUN] Would create QBO customer for %s", canonical_id)
             return True
@@ -732,15 +752,23 @@ class Reconciler:
           3 recently churned (last 30 days)
           2 commercial (random)
         """
-        conn = get_connection(self.db_path)
+        now = datetime.utcnow()
+        fourteen_days_ago = now - timedelta(days=14)
+        thirty_days_ago = now - timedelta(days=30)
+        created_at_sql = self._text_timestamp_sql("created_at")
+        last_service_sql = self._text_timestamp_sql("last_service_date")
+
+        conn = self._connect()
         try:
             recently_onboarded = [
                 row["id"] for row in conn.execute(
-                    """
+                    f"""
                     SELECT id FROM clients
-                    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '14 days'
-                    ORDER BY created_at DESC
-                    """
+                    WHERE {created_at_sql} IS NOT NULL
+                      AND {created_at_sql} >= %s
+                    ORDER BY {created_at_sql} DESC
+                    """,
+                    (fourteen_days_ago,),
                 ).fetchall()
             ]
 
@@ -757,12 +785,14 @@ class Reconciler:
 
             recently_churned = [
                 row["id"] for row in conn.execute(
-                    """
+                    f"""
                     SELECT id FROM clients
                     WHERE status = 'churned'
-                      AND last_service_date >= CURRENT_TIMESTAMP - INTERVAL '30 days'
-                    ORDER BY last_service_date DESC
-                    """
+                      AND {last_service_sql} IS NOT NULL
+                      AND {last_service_sql} >= %s
+                    ORDER BY {last_service_sql} DESC
+                    """,
+                    (thirty_days_ago,),
                 ).fetchall()
             ]
 

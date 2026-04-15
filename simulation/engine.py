@@ -544,7 +544,7 @@ class SimulationEngine:
                 try:
                     from simulation.error_reporter import report_error
                     report_error(e, tool_name="reconciliation",
-                                 context="Daily reconciliation sweep",
+                                 context=f"Daily reconciliation sweep ({e.__class__.__name__})",
                                  dry_run=self.dry_run)
                 except Exception:
                     pass

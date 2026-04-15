@@ -22,7 +22,7 @@ import sys
 import tempfile
 import unittest
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1155,28 +1155,56 @@ class TestDeepLinks(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# RECONCILIATION — UNIT (no live API, temp SQLite)
+# RECONCILIATION — UNIT (no live API, temp DB via SQLite compat)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestReconciliationUnit(unittest.TestCase):
-    """Reconciler automation health check using a temp SQLite database."""
+    """Reconciler sweep queries against an isolated temp database."""
 
     def setUp(self):
-        """Create a minimal temp database with a completed job and no invoice."""
+        """Create a minimal temp database for sweep and automation-gap checks."""
         import tempfile
-        from datetime import datetime, timedelta
         import sqlite3
 
         self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self._tmp.close()
         self._db_path = self._tmp.name
 
+        now = datetime.utcnow()
+        two_days_ago = now - timedelta(days=2)
+        five_days_ago = now - timedelta(days=5)
+        sixty_days_ago = now - timedelta(days=60)
+
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("""
+            CREATE TABLE clients (
+                id               TEXT PRIMARY KEY,
+                client_type      TEXT NOT NULL,
+                email            TEXT NOT NULL,
+                status           TEXT NOT NULL,
+                created_at       TEXT,
+                last_service_date TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE recurring_agreements (
+                id              TEXT PRIMARY KEY,
+                client_id       TEXT NOT NULL,
+                service_type_id TEXT NOT NULL,
+                frequency       TEXT NOT NULL,
+                price_per_visit REAL NOT NULL,
+                start_date      TEXT NOT NULL,
+                status          TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE jobs (
-                id          TEXT PRIMARY KEY,
-                status      TEXT,
+                id           TEXT PRIMARY KEY,
+                client_id    TEXT NOT NULL,
+                service_type_id TEXT NOT NULL,
+                scheduled_date TEXT NOT NULL,
+                status       TEXT,
                 completed_at TEXT
             )
         """)
@@ -1186,10 +1214,82 @@ class TestReconciliationUnit(unittest.TestCase):
                 job_id  TEXT
             )
         """)
-        two_days_ago = (datetime.utcnow() - timedelta(days=2)).isoformat()
+
+        self.recent_client_id = "SS-CLIENT-RECENT"
+        self.recurring_client_id = "SS-CLIENT-RECUR"
+        self.churned_client_id = "SS-CLIENT-CHURN"
+        self.commercial_client_id = "SS-CLIENT-COMM"
+        self.job_id = "TEST-JOB-0001"
+
+        conn.executemany(
+            """
+            INSERT INTO clients (id, client_type, email, status, created_at, last_service_date)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    self.recent_client_id,
+                    "residential",
+                    "recent@example.com",
+                    "active",
+                    now.isoformat(),
+                    None,
+                ),
+                (
+                    self.recurring_client_id,
+                    "residential",
+                    "recurring@example.com",
+                    "active",
+                    sixty_days_ago.isoformat(),
+                    None,
+                ),
+                (
+                    self.churned_client_id,
+                    "residential",
+                    "churned@example.com",
+                    "churned",
+                    sixty_days_ago.isoformat(),
+                    five_days_ago.date().isoformat(),
+                ),
+                (
+                    self.commercial_client_id,
+                    "commercial",
+                    "commercial@example.com",
+                    "active",
+                    sixty_days_ago.isoformat(),
+                    None,
+                ),
+            ],
+        )
         conn.execute(
-            "INSERT INTO jobs (id, status, completed_at) VALUES (?, ?, ?)",
-            ("TEST-JOB-0001", "completed", two_days_ago),
+            """
+            INSERT INTO recurring_agreements
+                (id, client_id, service_type_id, frequency, price_per_visit, start_date, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "SS-RECUR-TEST",
+                self.recurring_client_id,
+                "svc-standard",
+                "weekly",
+                125.0,
+                sixty_days_ago.date().isoformat(),
+                "active",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs (id, client_id, service_type_id, scheduled_date, status, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                self.job_id,
+                self.recent_client_id,
+                "svc-standard",
+                two_days_ago.date().isoformat(),
+                "completed",
+                two_days_ago.isoformat(),
+            ),
         )
         conn.commit()
         conn.close()
@@ -1199,10 +1299,18 @@ class TestReconciliationUnit(unittest.TestCase):
         if os.path.exists(self._db_path):
             os.unlink(self._db_path)
 
-    def test_reconciliation_completed_jobs_without_invoices(self):
+    def _compat_connection(self, _db_path):
+        from tests.sqlite_compat import open_sqlite_compat
+
+        return open_sqlite_compat(self._db_path)
+
+    @patch("simulation.reconciliation.reconciler.get_connection")
+    def test_reconciliation_completed_jobs_without_invoices(self, mock_get_connection):
         """Reconciler flags completed job without invoice; does NOT create an invoice."""
         import sqlite3
         from simulation.reconciliation.reconciler import Reconciler
+
+        mock_get_connection.side_effect = self._compat_connection
 
         # Run automation health check in dry_run mode (no Slack post)
         reconciler = Reconciler(db_path=self._db_path, repair=False, dry_run=True)
@@ -1214,6 +1322,7 @@ class TestReconciliationUnit(unittest.TestCase):
         self.assertEqual(findings[0].category, "reconciliation_automation_gap")
         self.assertEqual(findings[0].auto_fixable, False,
             "automation_gap should NOT be auto-fixable")
+        self.assertIn(self.job_id, findings[0].description)
 
         # No invoice must have been created
         conn = sqlite3.connect(self._db_path)
@@ -1221,6 +1330,23 @@ class TestReconciliationUnit(unittest.TestCase):
         conn.close()
         self.assertEqual(invoice_count, 0,
             "Reconciler auto-created an invoice (it must not)")
+
+    @patch("simulation.reconciliation.reconciler.random.sample")
+    @patch("simulation.reconciliation.reconciler.get_connection")
+    def test_build_sweep_sample_handles_text_dates(self, mock_get_connection, mock_sample):
+        """Sweep sampling must work with legacy text-backed date columns."""
+        from simulation.reconciliation.reconciler import Reconciler
+
+        mock_get_connection.side_effect = self._compat_connection
+        mock_sample.side_effect = lambda pool, n: list(pool)[: min(n, len(pool))]
+
+        reconciler = Reconciler(db_path=self._db_path, repair=False, dry_run=True)
+        sample = reconciler._build_sweep_sample()
+
+        self.assertIn(self.recent_client_id, sample)
+        self.assertIn(self.recurring_client_id, sample)
+        self.assertIn(self.churned_client_id, sample)
+        self.assertIn(self.commercial_client_id, sample)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
