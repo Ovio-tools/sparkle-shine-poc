@@ -253,6 +253,10 @@ def _is_due_today(agreement: dict, today: date) -> bool:
         agreement: dict with keys: start_date (ISO str), day_of_week (str or None),
                    frequency ('weekly'|'biweekly'|'monthly')
         today: date to check
+
+    `day_of_week` may be a single weekday name ('monday') or a comma-separated
+    list ('monday,wednesday,friday') for multi-day schedules used by commercial
+    recurring agreements. Whitespace around names is tolerated.
     """
     start = date.fromisoformat(agreement["start_date"])
     freq = agreement["frequency"]
@@ -261,15 +265,25 @@ def _is_due_today(agreement: dict, today: date) -> bool:
         "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
         "friday": 4, "saturday": 5, "sunday": 6,
     }
-    dow_str = (agreement.get("day_of_week") or "").lower()
-    day_of_week_int = _DOW_MAP.get(dow_str, start.weekday())
+
+    raw_dow = (agreement.get("day_of_week") or "").lower()
+    if raw_dow:
+        day_set = {
+            _DOW_MAP[d.strip()]
+            for d in raw_dow.split(",")
+            if d.strip() in _DOW_MAP
+        }
+        if not day_set:
+            day_set = {start.weekday()}
+    else:
+        day_set = {start.weekday()}
 
     if freq == "weekly":
-        return today.weekday() == day_of_week_int
+        return today.weekday() in day_set
 
     elif freq == "biweekly":
         return (
-            today.weekday() == day_of_week_int
+            today.weekday() in day_set
             and (today - start).days % 14 < 7
         )
 
@@ -805,6 +819,16 @@ class JobSchedulingGenerator:
         today = date.today()
         conn = get_connection()
         try:
+            # Track E: rollout flag for canonical commercial agreement scheduling.
+            # Read at call time so a config flip takes effect on the next tick
+            # without a worker restart.
+            from intelligence import config as _intel_config
+            track_e_enabled = getattr(
+                _intel_config,
+                "TRACK_E_COMMERCIAL_AGREEMENT_SCHEDULING_ENABLED",
+                False,
+            )
+
             session = get_client("jobber") if not dry_run else None
             results = []
             jobs_created_this_run: list[str] = []  # canonical job IDs created here
@@ -834,6 +858,14 @@ class JobSchedulingGenerator:
 
             for agreement in agreements:
                 if not _is_due_today(agreement, today):
+                    continue
+
+                # Track E gate: skip commercial agreements when flag is off.
+                # Pass 1b (notes-based) still handles these clients in legacy mode.
+                if (
+                    agreement.get("client_type") == "commercial"
+                    and not track_e_enabled
+                ):
                     continue
 
                 crew_id_check = agreement.get("crew_id") or "crew-a"
@@ -936,6 +968,12 @@ class JobSchedulingGenerator:
             # Commercial clients (Crew D) don't have recurring_agreements.
             # Their schedules are encoded in client notes (nightly, 3x, 2x, daily).
             # This pass creates jobs for active commercial clients on scheduled days.
+            #
+            # Track E gate: when the flag is on, skip clients that have an
+            # active commercial agreement — Pass 1 handled them. The existing
+            # idempotency guard (SELECT id FROM jobs WHERE client_id AND date)
+            # is a second line of defense, but the explicit skip keeps this
+            # pass's intent clear and avoids redundant work on the hot path.
             commercial_clients = conn.execute("""
                 SELECT id, company_name, notes
                 FROM clients
@@ -943,7 +981,17 @@ class JobSchedulingGenerator:
             """).fetchall()
             commercial_clients = [dict(c) for c in commercial_clients]
 
+            clients_with_active_agreement: set[str] = set()
+            if track_e_enabled:
+                rows = conn.execute("""
+                    SELECT DISTINCT client_id FROM recurring_agreements
+                    WHERE status = 'active' AND client_type = 'commercial'
+                """).fetchall()
+                clients_with_active_agreement = {r["client_id"] for r in rows}
+
             for client in commercial_clients:
+                if client["id"] in clients_with_active_agreement:
+                    continue
                 notes = client.get("notes")
                 client_id = client["id"]
                 weekday = today.weekday()  # 0=Mon ... 6=Sun

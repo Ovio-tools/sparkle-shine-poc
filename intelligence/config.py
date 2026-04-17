@@ -78,6 +78,23 @@ CASH_COLLECTION_ALERT_ENABLED: bool = False
 # the next PaymentGenerator tick without a worker restart.
 TRACK_D_PAYMENT_TIMING_ENABLED: bool = False
 
+# Track E: commercial recurring agreement scheduling.
+#
+# When True, the simulation's JobSchedulingGenerator reads commercial
+# recurring work from the canonical `recurring_agreements` table
+# (Pass 1) and the legacy notes-based commercial scheduling (Pass 1b)
+# skips any client that already has an active agreement. When False,
+# commercial agreements are skipped by Pass 1 and Pass 1b runs in
+# legacy mode — behavior identical to pre-Track-E production.
+#
+# Merge this flag False. Flip True only after
+# scripts/backfill_commercial_agreements.py has been run in production
+# and scripts/audit_commercial_scheduling.py confirms every active
+# commercial client has a matching active agreement. The flag is read
+# at call time via getattr, so a config change takes effect on the
+# next generator tick without a worker restart.
+TRACK_E_COMMERCIAL_AGREEMENT_SCHEDULING_ENABLED: bool = False
+
 # Cash-collection alert band (MTD cash / MTD booked).
 #
 # Moved out of intelligence/metrics/revenue.py so the floor can be
