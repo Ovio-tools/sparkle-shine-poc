@@ -13,7 +13,12 @@ from datetime import date, timedelta
 from typing import Optional
 
 from intelligence import config as intel_config
-from intelligence.config import ALERT_THRESHOLDS, REVENUE_TARGETS
+from intelligence.config import (
+    ALERT_THRESHOLDS,
+    EXPECTED_CASH_RATIO_HIGH,
+    EXPECTED_CASH_RATIO_LOW,
+    REVENUE_TARGETS,
+)
 
 
 def _sum_cash(db, start_date: str, end_date: Optional[str] = None) -> float:
@@ -193,8 +198,6 @@ def compute(db, briefing_date: str) -> dict:
     #                 historical invoices landed this month.
     # Pacing buckets mirror the booked thresholds so both read the same.
     # ------------------------------------------------------------------ #
-    EXPECTED_CASH_RATIO_LOW = 0.70
-    EXPECTED_CASH_RATIO_HIGH = 1.05
 
     if mtd_total > 0:
         collection_ratio = mtd_cash / mtd_total
