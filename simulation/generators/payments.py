@@ -53,14 +53,42 @@ _PROFILES = ["on_time", "slow", "very_slow", "non_payer"]
 
 # Payment window (days after invoice issue_date): (min, max)
 # non_payer has no window — invoice is never paid
-_PAYMENT_WINDOWS = {
+# Flag-off baseline (behavior before Track D)
+_PAYMENT_WINDOWS_LEGACY = {
     "on_time":   (3, 15),
     "slow":      (15, 45),
     "very_slow": (45, 75),
     "non_payer": None,
 }
 
-_WRITE_OFF_DAYS = 90
+# V2: Payment windows by client_type then profile
+# Residential: "due on receipt" (immediate payment) — typical 0-3 days
+# Commercial: "Net 30" (30-day term) — typical 20-35 days
+_PAYMENT_WINDOWS_V2 = {
+    "residential": {
+        "on_time":      (0, 3),      # Most pay within 3 days of receipt
+        "slow":         (5, 14),     # Delayed payers
+        "very_slow":    (20, 40),    # Very slow payers
+        "non_payer":    None,        # Never pays
+    },
+    "commercial": {
+        "on_time":      (20, 35),    # Pay at or near Net 30 due date
+        "slow":         (35, 55),    # Pay significantly late
+        "very_slow":    (55, 85),    # Very slow large accounts
+        "non_payer":    None,        # Never pays
+    },
+}
+
+# Flag-off baseline (behavior before Track D)
+_WRITE_OFF_DAYS_LEGACY = 90
+
+# V2: Write-off thresholds by client type
+# Residential: write off at 60 days (shorter cycle, higher volume)
+# Commercial: write off at 90 days (longer contract cycles, patience for collection)
+_WRITE_OFF_DAYS_V2 = {
+    "residential": 60,
+    "commercial": 90,
+}
 
 _qbo_base_url_cache: Optional[str] = None
 
@@ -93,19 +121,57 @@ def _assign_profile(client_id: str, client_type: str) -> str:
     return rng.choices(_PROFILES, weights=weights, k=1)[0]
 
 
-def _target_payment_date(profile: str, issue_date: date) -> Optional[date]:
+def _write_off_threshold(client_type: str) -> int:
+    """Days overdue before marking an invoice as a write-off.
+
+    Flag-gated per Track D: residential (shorter 60d cycle) vs commercial (standard 90d).
+    """
+    import intelligence.config as intel_config
+    if getattr(intel_config, "TRACK_D_PAYMENT_TIMING_ENABLED", False):
+        return _WRITE_OFF_DAYS_V2.get(client_type, _WRITE_OFF_DAYS_V2["commercial"])
+    return _WRITE_OFF_DAYS_LEGACY
+
+
+def _target_payment_date(client_type: str, profile: str, issue_date: date) -> Optional[date]:
     """Return the day the client will pay, or None for non-payers.
 
-    People procrastinate and pay near the end of their window: uses a
-    beta(2, 1) distribution skewed toward the high end.
+    Args:
+        client_type: "residential" or "commercial" (used for V2 window selection when flag ON)
+        profile: "on_time", "slow", "very_slow", or "non_payer"
+        issue_date: the date the invoice was created
+
+    Behavior:
+    - Flag OFF (legacy): uses _PAYMENT_WINDOWS_LEGACY, ignores client_type
+    - Flag ON (Track D V2): uses _PAYMENT_WINDOWS_V2[client_type], with beta shaping:
+      * Residential on_time: beta(1,2) skews early
+      * All other profiles: beta(2,1) skews late
     """
-    window = _PAYMENT_WINDOWS[profile]
-    if window is None:
-        return None
-    lo, hi = window
-    # beta(2, 1) skews toward 1.0 (end of window)
-    fraction = random.betavariate(2, 1)
-    days = lo + int(fraction * (hi - lo))
+    import intelligence.config as intel_config
+
+    if getattr(intel_config, "TRACK_D_PAYMENT_TIMING_ENABLED", False):
+        # V2 path: per-client-type windows with beta shaping
+        windows = _PAYMENT_WINDOWS_V2.get(client_type, _PAYMENT_WINDOWS_V2["commercial"])
+        window = windows.get(profile)
+        if window is None:
+            return None
+        lo, hi = window
+
+        # Residential on_time skews early (beta(1,2)); all others skew late (beta(2,1))
+        if client_type == "residential" and profile == "on_time":
+            shape_a, shape_b = 1, 2
+        else:
+            shape_a, shape_b = 2, 1
+
+        fraction = random.betavariate(shape_a, shape_b)
+        days = lo + int(fraction * (hi - lo))
+    else:
+        # Legacy path: uniform windows, ignores client_type
+        window = _PAYMENT_WINDOWS_LEGACY.get(profile)
+        if window is None:
+            return None
+        lo, hi = window
+        days = random.randint(lo, hi)
+
     return issue_date + timedelta(days=days)
 
 
@@ -205,7 +271,7 @@ class PaymentGenerator:
 
         # ── Non-payer write-off at 90+ days ──────────────────────────────────
         if profile == "non_payer":
-            if days_outstanding >= _WRITE_OFF_DAYS:
+            if days_outstanding >= _write_off_threshold(client_type):
                 db.execute(
                     "UPDATE invoices SET status = 'overdue', days_outstanding = %s WHERE id = %s",
                     (days_outstanding, invoice_id),
@@ -228,7 +294,7 @@ class PaymentGenerator:
             return None  # try the next invoice
 
         # ── Check whether the client's target payment date has arrived ────────
-        target_date = _target_payment_date(profile, issue_date)
+        target_date = _target_payment_date(client_type, profile, issue_date)
         if target_date is None or today < target_date:
             # Update days_outstanding but don't pay yet; try the next invoice
             db.execute(

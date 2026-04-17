@@ -1889,5 +1889,223 @@ class TestIntegrationWeeklyReport(unittest.TestCase):
                     f"Graduated insight re-framed as new discovery: found {phrase!r}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRACK D PAYMENT TIMING — WRITE-OFF THRESHOLD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestTrackDWriteOffThreshold(unittest.TestCase):
+    """Test the _write_off_threshold helper for Track D payment timing.
+
+    _write_off_threshold(client_type) returns the number of days overdue
+    before marking an invoice as a write-off. Flag-gated per client type:
+    - Flag OFF: all types return 90 (legacy behavior)
+    - Flag ON: residential returns 60, commercial returns 90,
+               unknown types return 90 (safe default)
+    """
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", False)
+    def test_flag_off_residential_returns_legacy(self):
+        """Flag OFF + residential → 90 (legacy)."""
+        from simulation.generators.payments import _write_off_threshold
+        self.assertEqual(_write_off_threshold("residential"), 90)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", False)
+    def test_flag_off_commercial_returns_legacy(self):
+        """Flag OFF + commercial → 90 (legacy)."""
+        from simulation.generators.payments import _write_off_threshold
+        self.assertEqual(_write_off_threshold("commercial"), 90)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", False)
+    def test_flag_off_unknown_type_returns_legacy(self):
+        """Flag OFF + unknown type → 90 (legacy)."""
+        from simulation.generators.payments import _write_off_threshold
+        self.assertEqual(_write_off_threshold("other"), 90)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_flag_on_residential_returns_60(self):
+        """Flag ON + residential → 60 (v2)."""
+        from simulation.generators.payments import _write_off_threshold
+        self.assertEqual(_write_off_threshold("residential"), 60)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_flag_on_commercial_returns_90(self):
+        """Flag ON + commercial → 90 (v2)."""
+        from simulation.generators.payments import _write_off_threshold
+        self.assertEqual(_write_off_threshold("commercial"), 90)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_flag_on_unknown_type_returns_90_safe_default(self):
+        """Flag ON + unknown type → 90 (safe default, commercial's longer window)."""
+        from simulation.generators.payments import _write_off_threshold
+        self.assertEqual(_write_off_threshold("other"), 90)
+
+
+class TestTrackDTargetPaymentDate(unittest.TestCase):
+    """Test _target_payment_date(client_type, profile, issue_date) with Track D flag.
+
+    Covers:
+    - Flag OFF: legacy behavior, 3 profiles (on_time, slow, very_slow)
+    - Flag ON: V2 windows by client_type, with beta-shaping per profile
+    - Confidence in mean distribution via N=200 samples
+    """
+
+    # ─────────────────────────────────────────────────────────────────
+    # Flag OFF (legacy path, 3 tests)
+    # ─────────────────────────────────────────────────────────────────
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", False)
+    def test_legacy_on_time_within_window(self):
+        """Flag OFF + on_time → within legacy window (3, 15)."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        # Run multiple times to get good coverage
+        for _ in range(10):
+            target = _target_payment_date("residential", "on_time", issue_date)
+            days_offset = (target - issue_date).days
+            self.assertGreaterEqual(days_offset, 3)
+            self.assertLessEqual(days_offset, 15)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", False)
+    def test_legacy_slow_within_window(self):
+        """Flag OFF + slow → within legacy window (15, 45)."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        for _ in range(10):
+            target = _target_payment_date("commercial", "slow", issue_date)
+            days_offset = (target - issue_date).days
+            self.assertGreaterEqual(days_offset, 15)
+            self.assertLessEqual(days_offset, 45)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", False)
+    def test_legacy_ignores_client_type(self):
+        """Flag OFF: same profile + same seed → same date regardless of client_type."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        random.seed(42)
+        target_res = _target_payment_date("residential", "on_time", issue_date)
+        random.seed(42)
+        target_com = _target_payment_date("commercial", "on_time", issue_date)
+        # With identical seed, both should produce the same randint call
+        self.assertEqual(target_res, target_com)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Flag ON (V2 path, 8 tests)
+    # ─────────────────────────────────────────────────────────────────
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_residential_on_time_within_window(self):
+        """Flag ON + residential on_time → within V2 window (0, 3)."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        for _ in range(10):
+            target = _target_payment_date("residential", "on_time", issue_date)
+            days_offset = (target - issue_date).days
+            self.assertGreaterEqual(days_offset, 0)
+            self.assertLessEqual(days_offset, 3)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_residential_on_time_early_skew(self):
+        """Flag ON + residential on_time uses beta(1,2) → mean < midpoint 1.5.
+
+        beta(1,2) is heavily skewed toward 0. Over N=200 samples, the mean
+        should be noticeably less than 1.5 (midpoint of 0-3 window).
+        """
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        offsets = []
+        for i in range(200):
+            # Vary seed/date to get different beta draws
+            random.seed(i)
+            target = _target_payment_date("residential", "on_time", issue_date)
+            offset = (target - issue_date).days
+            offsets.append(offset)
+        mean = sum(offsets) / len(offsets)
+        # beta(1,2) skews toward 0; midpoint is 1.5
+        # Mean should be noticeably below 1.5, expect ~0.75-1.2
+        self.assertLess(mean, 1.5,
+            f"Residential on_time mean={mean:.2f} should be < 1.5 (early skew). "
+            f"Beta(1,2) skews toward low end.")
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_commercial_on_time_within_window(self):
+        """Flag ON + commercial on_time → within V2 window (20, 35)."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        for _ in range(10):
+            target = _target_payment_date("commercial", "on_time", issue_date)
+            days_offset = (target - issue_date).days
+            self.assertGreaterEqual(days_offset, 20)
+            self.assertLessEqual(days_offset, 35)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_commercial_on_time_late_skew(self):
+        """Flag ON + commercial on_time uses beta(2,1) → mean > midpoint 27.5.
+
+        beta(2,1) is skewed toward 1.0. Over N=200 samples, the mean
+        should be noticeably greater than 27.5 (midpoint of 20-35 window).
+        """
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        offsets = []
+        for i in range(200):
+            random.seed(i)
+            target = _target_payment_date("commercial", "on_time", issue_date)
+            offset = (target - issue_date).days
+            offsets.append(offset)
+        mean = sum(offsets) / len(offsets)
+        # beta(2,1) skews toward 1.0; midpoint is 27.5
+        # Mean should be noticeably above 27.5, expect ~28.5-33
+        self.assertGreater(mean, 27.5,
+            f"Commercial on_time mean={mean:.2f} should be > 27.5 (late skew). "
+            f"Beta(2,1) skews toward high end.")
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_residential_slow_within_window(self):
+        """Flag ON + residential slow → within V2 window (5, 14)."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        for _ in range(10):
+            target = _target_payment_date("residential", "slow", issue_date)
+            days_offset = (target - issue_date).days
+            self.assertGreaterEqual(days_offset, 5)
+            self.assertLessEqual(days_offset, 14)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_commercial_slow_within_window(self):
+        """Flag ON + commercial slow → within V2 window (35, 55)."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        for _ in range(10):
+            target = _target_payment_date("commercial", "slow", issue_date)
+            days_offset = (target - issue_date).days
+            self.assertGreaterEqual(days_offset, 35)
+            self.assertLessEqual(days_offset, 55)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_residential_very_slow_within_window(self):
+        """Flag ON + residential very_slow → within V2 window (20, 40)."""
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        for _ in range(10):
+            target = _target_payment_date("residential", "very_slow", issue_date)
+            days_offset = (target - issue_date).days
+            self.assertGreaterEqual(days_offset, 20)
+            self.assertLessEqual(days_offset, 40)
+
+    @patch("intelligence.config.TRACK_D_PAYMENT_TIMING_ENABLED", True)
+    def test_v2_unknown_client_type_falls_back_to_commercial(self):
+        """Flag ON + unknown client_type → falls back to commercial windows.
+
+        For 'other' type, should use commercial windows (safe default).
+        """
+        from simulation.generators.payments import _target_payment_date
+        issue_date = date(2026, 4, 1)
+        # 'other' type with on_time should use commercial (20, 35)
+        target = _target_payment_date("other", "on_time", issue_date)
+        days_offset = (target - issue_date).days
+        self.assertGreaterEqual(days_offset, 20)
+        self.assertLessEqual(days_offset, 35)
+
+
 if __name__ == "__main__":
     unittest.main()
