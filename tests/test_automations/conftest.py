@@ -26,7 +26,8 @@ try:
 except ImportError:
     pass
 
-_TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql://localhost/sparkle_shine_test")
+from tests._pg_test_db import resolve_test_db_url
+_TEST_DB_URL = resolve_test_db_url()
 
 # ── Minimal tool_ids used across all tests ────────────────────────────────────
 TEST_TOOL_IDS = {

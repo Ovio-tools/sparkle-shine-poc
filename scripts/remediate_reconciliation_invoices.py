@@ -543,6 +543,226 @@ def _materialize_invoice(
     return "created_local_invoice"
 
 
+def _fetch_orphan_invoices(
+    db,
+    since: str,
+    until: str,
+    limit: Optional[int],
+) -> list[dict]:
+    """Return orphan invoices (``job_id IS NULL``) within ``[since, until]``.
+
+    An orphan is surfaced by the Track B integrity metric and by
+    ``audit_orphan_invoices.py``. This query is deliberately kept in sync
+    with ``scripts/audit_orphan_invoices._fetch_orphans`` so an operator
+    running the audit and then ``--mode=orphans`` over the same window
+    sees the same rows.
+    """
+    sql = """
+        SELECT
+            i.id,
+            i.client_id,
+            i.amount,
+            i.status,
+            i.issue_date,
+            c.client_type,
+            c.company_name,
+            c.first_name,
+            c.last_name,
+            (
+                SELECT m.tool_specific_id
+                FROM cross_tool_mapping m
+                WHERE m.canonical_id = i.id AND m.tool_name = 'quickbooks'
+            ) AS quickbooks_invoice_id
+        FROM invoices i
+        JOIN clients c ON c.id = i.client_id
+        WHERE i.job_id IS NULL
+          AND i.issue_date BETWEEN %s AND %s
+        ORDER BY i.issue_date, i.id
+    """
+    params: tuple = (since, until)
+    if limit is not None:
+        sql += " LIMIT %s"
+        params = (since, until, limit)
+    return [dict(row) for row in db.execute(sql, params).fetchall()]
+
+
+def _fetch_candidate_jobs_for_orphan(db, orphan: dict) -> list[dict]:
+    """Completed jobs for the same client on the orphan's issue_date.
+
+    Only unlinked jobs are eligible — a job that already has an invoice row
+    (i.e. appears in ``invoices.job_id``) is excluded so we never reassign
+    an invoice away from a legitimate link.
+
+    Jobs where ``completed_at::date`` equals ``issue_date`` are matched
+    first; jobs where ``scheduled_date`` equals ``issue_date`` are matched
+    as a secondary fallback (some simulation paths only populate
+    ``scheduled_date``). The caller then narrows by expected amount.
+    """
+    rows = db.execute(
+        """
+        SELECT
+            j.id,
+            j.client_id,
+            j.service_type_id,
+            j.scheduled_date,
+            COALESCE(NULLIF(j.completed_at, '')::text,
+                     j.scheduled_date::text) AS service_date,
+            jm.tool_specific_id AS jobber_job_id
+        FROM jobs j
+        LEFT JOIN cross_tool_mapping jm
+          ON jm.canonical_id = j.id
+         AND jm.tool_name = 'jobber'
+        WHERE j.client_id = %s
+          AND j.status = 'completed'
+          AND (
+                j.completed_at::date = %s::date
+             OR j.scheduled_date::date = %s::date
+          )
+          AND NOT EXISTS (
+                SELECT 1 FROM invoices i2 WHERE i2.job_id = j.id
+          )
+        ORDER BY j.completed_at NULLS LAST, j.scheduled_date, j.id
+        """,
+        (orphan["client_id"], orphan["issue_date"], orphan["issue_date"]),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _match_orphan_to_job(
+    orphan: dict,
+    candidates: list[dict],
+) -> tuple[Optional[dict], str]:
+    """Return (matched_job, reason). Only link when exactly one candidate
+    has the expected per-job amount. Ambiguity is a skip, not a guess —
+    the operator needs to resolve it manually because a wrong link corrupts
+    revenue attribution permanently.
+    """
+    if not candidates:
+        return None, "no_candidate_job_on_issue_date"
+
+    orphan_amount = round(float(orphan["amount"]), 2)
+    amount_matches: list[dict] = []
+    for job in candidates:
+        job_with_ctx = {
+            **job,
+            "client_type": orphan["client_type"],
+            "client_id": orphan["client_id"],
+        }
+        try:
+            expected = _invoice_details_for_job(job_with_ctx)["amount"]
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "orphan %s: could not compute expected amount for job %s: %s",
+                orphan["id"], job["id"], exc,
+            )
+            continue
+        if abs(float(expected) - orphan_amount) < 0.01:
+            amount_matches.append(job)
+
+    if len(amount_matches) == 1:
+        return amount_matches[0], "linked_unique_amount_match"
+    if len(amount_matches) > 1:
+        return None, "ambiguous_multiple_amount_matches"
+    return None, "no_candidate_with_matching_amount"
+
+
+def remediate_orphans(
+    db,
+    dry_run: bool,
+    since: str,
+    until: str,
+    limit: Optional[int],
+) -> dict[str, int]:
+    """Link orphan invoices (``job_id IS NULL``) back to the completed job
+    they belong to, when the match is unambiguous.
+
+    Writes are strictly: ``UPDATE invoices SET job_id = ? WHERE id = ?
+    AND job_id IS NULL``. No QBO calls are made — the orphan's existing
+    QBO mapping (if any) stays on the invoice row. Orphans that don't
+    match cleanly are counted and logged so an operator can follow up.
+    """
+    stats = {
+        "orphans_seen": 0,
+        "orphans_linked": 0,
+        "orphans_no_candidate": 0,
+        "orphans_no_amount_match": 0,
+        "orphans_ambiguous": 0,
+        "orphan_failures": 0,
+    }
+
+    orphans = _fetch_orphan_invoices(db, since, until, limit)
+    stats["orphans_seen"] = len(orphans)
+    logger.info(
+        "Loaded %d orphan invoice(s) with issue_date in [%s, %s]",
+        len(orphans), since, until,
+    )
+
+    for index, orphan in enumerate(orphans, start=1):
+        try:
+            candidates = _fetch_candidate_jobs_for_orphan(db, orphan)
+            matched, reason = _match_orphan_to_job(orphan, candidates)
+
+            if matched is None:
+                if reason == "no_candidate_job_on_issue_date":
+                    stats["orphans_no_candidate"] += 1
+                elif reason == "ambiguous_multiple_amount_matches":
+                    stats["orphans_ambiguous"] += 1
+                else:
+                    stats["orphans_no_amount_match"] += 1
+                logger.info(
+                    "Orphan %s ($%.2f, %s): %s (candidates=%d)",
+                    orphan["id"], float(orphan["amount"]),
+                    orphan["issue_date"], reason, len(candidates),
+                )
+                continue
+
+            if dry_run:
+                logger.info(
+                    "Orphan %s → job %s (would link, amount=$%.2f, %s)",
+                    orphan["id"], matched["id"],
+                    float(orphan["amount"]), orphan["issue_date"],
+                )
+            else:
+                with db:
+                    result = db.execute(
+                        "UPDATE invoices SET job_id = %s "
+                        "WHERE id = %s AND job_id IS NULL",
+                        (matched["id"], orphan["id"]),
+                    )
+                    updated = getattr(result, "rowcount", 1)
+                if not updated:
+                    logger.warning(
+                        "Orphan %s: link raced — job_id was no longer NULL",
+                        orphan["id"],
+                    )
+                    stats["orphan_failures"] += 1
+                    continue
+                logger.info(
+                    "Orphan %s → job %s linked (amount=$%.2f, %s)",
+                    orphan["id"], matched["id"],
+                    float(orphan["amount"]), orphan["issue_date"],
+                )
+
+            stats["orphans_linked"] += 1
+
+            if index % 50 == 0 or index == len(orphans):
+                logger.info(
+                    "Processed %d/%d orphans (linked=%d, no_candidate=%d, "
+                    "no_amount=%d, ambiguous=%d)",
+                    index, len(orphans),
+                    stats["orphans_linked"],
+                    stats["orphans_no_candidate"],
+                    stats["orphans_no_amount_match"],
+                    stats["orphans_ambiguous"],
+                )
+        except Exception as exc:
+            stats["orphan_failures"] += 1
+            logger.error("Orphan %s: remediation failed: %s",
+                         orphan["id"], exc)
+
+    return stats
+
+
 def remediate(db, dry_run: bool, limit: Optional[int]) -> dict[str, int]:
     stats = {
         "jobs_seen": 0,
@@ -667,7 +887,33 @@ def main() -> int:
         "--limit",
         type=int,
         default=None,
-        help="Optional max number of missing jobs to process.",
+        help="Optional max number of records to process.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("jobs", "orphans"),
+        default="jobs",
+        help=(
+            "jobs: repair completed jobs with no linked invoice (default). "
+            "orphans: relink invoices.job_id IS NULL to an unambiguous "
+            "completed job in --since/--until (Track B remediation)."
+        ),
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "Orphan-mode only: inclusive start of issue_date window. "
+            "Defaults to 30 days ago."
+        ),
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help=(
+            "Orphan-mode only: inclusive end of issue_date window. "
+            "Defaults to today."
+        ),
     )
     args = parser.parse_args()
 
@@ -676,12 +922,26 @@ def main() -> int:
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     )
 
+    if args.mode == "jobs" and (args.since or args.until):
+        parser.error("--since/--until are only valid with --mode=orphans")
+
     dry_run = not args.execute
-    logger.info("Starting reconciliation invoice remediation (%s)", "dry-run" if dry_run else "execute")
+    logger.info(
+        "Starting reconciliation invoice remediation (mode=%s, %s)",
+        args.mode, "dry-run" if dry_run else "execute",
+    )
 
     db = get_connection()
     try:
-        stats = remediate(db, dry_run=dry_run, limit=args.limit)
+        if args.mode == "orphans":
+            since = args.since or (date.today() - timedelta(days=30)).isoformat()
+            until = args.until or date.today().isoformat()
+            stats = remediate_orphans(
+                db, dry_run=dry_run, since=since, until=until,
+                limit=args.limit,
+            )
+        else:
+            stats = remediate(db, dry_run=dry_run, limit=args.limit)
     finally:
         db.close()
 

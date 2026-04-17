@@ -36,6 +36,14 @@ def reconcile() -> dict:
             """
         ).fetchall()
 
+        # Dormant = active commercial agreement where either (a) no jobs have
+        # ever been scheduled, OR (b) the most recent job is >14 days old.
+        # The previous query only handled case (b): the outer `<` comparison
+        # silently dropped rows where MAX(scheduled_date) IS NULL, so a brand
+        # new agreement that never got scheduled would stay invisible until
+        # someone manually checked. An agreement that produces zero jobs is
+        # the loudest possible "scheduler never fired" signal — it must
+        # surface here.
         dormant = conn.execute(
             """
             SELECT ra.id AS agreement_id,
@@ -50,9 +58,12 @@ def reconcile() -> dict:
             WHERE ra.status = 'active'
               AND c.client_type = 'commercial'
               AND (
-                  SELECT MAX(scheduled_date::date) FROM jobs
-                  WHERE client_id = ra.client_id
-              ) < CURRENT_DATE - INTERVAL '14 days'
+                  (SELECT MAX(scheduled_date::date) FROM jobs
+                   WHERE client_id = ra.client_id) IS NULL
+                  OR
+                  (SELECT MAX(scheduled_date::date) FROM jobs
+                   WHERE client_id = ra.client_id) < CURRENT_DATE - INTERVAL '14 days'
+              )
             ORDER BY c.company_name
             """
         ).fetchall()

@@ -86,6 +86,7 @@ _ALERT_CHANNEL_MAP: dict[str, str] = {
     "financial_health": "#operations",
     "operations":       "#operations",
     "tasks":            "#operations",
+    "integrity":        "#operations",
     "sales":            "#sales",
     "marketing":        "#sales",
 }
@@ -148,7 +149,7 @@ class PipelineResult:
     sync_succeeded: int = 0
     sync_skipped: int = 0
     sync_errors: list[str] = field(default_factory=list)      # ["mailchimp: 401 Unauthorized"]
-    metrics_total: int = 6
+    metrics_total: int = 7
     metrics_computed: int = 0
     alert_warnings: int = 0
     alert_criticals: int = 0

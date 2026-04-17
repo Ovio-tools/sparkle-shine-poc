@@ -37,7 +37,8 @@ try:
 except ImportError:
     pass
 
-_TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql://localhost/sparkle_shine_test")
+from tests._pg_test_db import resolve_test_db_url
+_TEST_DB_URL = resolve_test_db_url()
 
 # ── Real DB path (required for discovery pattern and context tests) ─────────────
 _REAL_DB = os.path.join(_PROJECT_ROOT, "sparkle_shine.db")

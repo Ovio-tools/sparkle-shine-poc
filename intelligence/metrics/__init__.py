@@ -10,6 +10,7 @@ from datetime import datetime
 from database.schema import get_connection
 from intelligence.metrics import (
     financial_health,
+    integrity,
     marketing,
     operations,
     revenue,
@@ -40,6 +41,7 @@ def compute_all_metrics(db_path: str, briefing_date: str) -> dict:
             "financial_health": ...,
             "marketing": ...,
             "tasks": ...,
+            "integrity": ...,      # orphan invoices, stale jobs, etc.
             "computed_at": "<ISO datetime>"
         }
     """
@@ -53,6 +55,7 @@ def compute_all_metrics(db_path: str, briefing_date: str) -> dict:
             "financial_health": financial_health.compute(db, briefing_date),
             "marketing": marketing.compute(db, briefing_date),
             "tasks": tasks.compute(db, briefing_date),
+            "integrity": integrity.compute(db, briefing_date),
             "computed_at": datetime.utcnow().isoformat(),
         }
         for legacy_key in LEGACY_REVENUE_SHIM_KEYS:

@@ -34,11 +34,9 @@ except ImportError:
     pass
 
 from credentials import google_noninteractive_credentials_available
+from tests._pg_test_db import resolve_test_db_url
 
-_TEST_DB_URL = os.getenv(
-    "TEST_DATABASE_URL",
-    "postgresql://localhost/sparkle_shine_test",
-)
+_TEST_DB_URL = resolve_test_db_url()
 
 # Legacy SQLite path kept only for the shrinking set of tests that still
 # explicitly exercise SQLite-only helpers.

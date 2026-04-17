@@ -171,6 +171,7 @@ def _format_context_document(
     sales = metrics.get("sales", {})
     mkt = metrics.get("marketing", {})
     tsk = metrics.get("tasks", {})
+    integ = metrics.get("integrity", {})
 
     # ---- Header ----
     lines.append(f"# Daily Briefing Data -- {date_formatted}")
@@ -459,6 +460,28 @@ def _format_context_document(
                 f'"{excerpt}" — {nd["client_name"]}'
             )
         lines.append("")
+
+    # ---- DATA INTEGRITY ----
+    # Surface the three integrity counts on every briefing so silent drift
+    # (the 2026-04-09 orphan-invoice spike would have shown up here) cannot
+    # sit undetected. Alerts above a threshold also feed the ALERTS section.
+    orphan_inv = integ.get("orphan_invoices", {})
+    dangling   = integ.get("payments_missing_invoice_link", {})
+    stale_jobs = integ.get("stale_completed_jobs", {})
+    lines.append("## DATA INTEGRITY")
+    lines.append(
+        f"- Orphan invoices (job_id IS NULL): {orphan_inv.get('count', 0)} "
+        f"(${orphan_inv.get('amount', 0.0):,.0f})"
+    )
+    lines.append(
+        f"- Payments missing invoice link: {dangling.get('count', 0)} "
+        f"(${dangling.get('amount', 0.0):,.0f})"
+    )
+    lines.append(
+        f"- Completed jobs >24h with no invoice: {stale_jobs.get('count', 0)} "
+        f"(oldest {stale_jobs.get('oldest_age_hours', 0.0):.1f}h)"
+    )
+    lines.append("")
 
     # ---- ALERTS AND FLAGS ----
     lines.append("## ALERTS AND FLAGS")

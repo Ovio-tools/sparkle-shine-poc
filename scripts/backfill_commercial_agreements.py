@@ -104,15 +104,38 @@ def _ensure_client_type_column(conn) -> None:
         conn.commit()
 
 
-def _existing_active_agreements(conn, client_id: str) -> set[str]:
+def _existing_active_agreements(conn, client_id: str) -> list[dict]:
+    """Return every active agreement for a client, not just the set of
+    service_type_ids.
+
+    The old version collapsed rows to a set of service_type_ids, which
+    meant `commercial-nightly` on Tue/Thu (2x weekly) looked identical to
+    `commercial-nightly` on Mon/Wed/Fri (3x weekly) and the backfill would
+    silently skip the cadence change, leaving the wrong schedule in place.
+    Returning the full row lets the caller enforce the
+    (client_id, service_type_id, day_of_week) composite uniqueness and
+    detect cadence changes explicitly.
+    """
     rows = conn.execute(
         """
-        SELECT service_type_id FROM recurring_agreements
+        SELECT id, service_type_id, day_of_week
+        FROM recurring_agreements
         WHERE client_id = %s AND status = 'active'
         """,
         (client_id,),
     ).fetchall()
-    return {r["service_type_id"] for r in rows}
+    return [dict(r) for r in rows]
+
+
+def _normalize_days(day_of_week: Optional[str]) -> str:
+    """Normalize a comma-separated day list so order/whitespace/case don't
+    prevent the idempotency check from recognizing equivalent schedules.
+    'Monday, Wednesday, Friday' and 'monday,wednesday,friday' must match.
+    """
+    if not day_of_week:
+        return ""
+    parts = [p.strip().lower() for p in day_of_week.split(",") if p.strip()]
+    return ",".join(sorted(parts))
 
 
 def backfill(dry_run: bool) -> dict:
@@ -120,6 +143,7 @@ def backfill(dry_run: bool) -> dict:
     created: list[dict] = []
     skipped: list[dict] = []
     failed: list[dict] = []
+    cadence_changed: list[dict] = []
 
     try:
         _ensure_client_type_column(conn)
@@ -144,14 +168,56 @@ def backfill(dry_run: bool) -> dict:
             existing = _existing_active_agreements(conn, client["id"])
 
             for service_type_id, day_of_week in agreements:
-                if service_type_id in existing:
+                desired_days = _normalize_days(day_of_week)
+                same_service = [
+                    r for r in existing if r["service_type_id"] == service_type_id
+                ]
+                exact_match = [
+                    r for r in same_service
+                    if _normalize_days(r.get("day_of_week")) == desired_days
+                ]
+
+                # Exact (service_type_id, day_of_week) already active →
+                # true idempotent skip. Rerunning the script is a no-op.
+                if exact_match:
                     skipped.append({
                         "client_id": client["id"],
                         "company_name": client.get("company_name"),
                         "service_type_id": service_type_id,
-                        "reason": "active agreement already exists",
+                        "day_of_week": day_of_week,
+                        "reason": "active agreement already exists with same cadence",
                     })
                     continue
+
+                # Same service_type but different day_of_week → cadence
+                # change (e.g. 3x_weekly → daily). The old agreement must
+                # be cancelled before the new row is inserted; otherwise
+                # the client ends up with two "active" rows for the same
+                # service type and the automation double-books them.
+                if same_service:
+                    old_ids = [r["id"] for r in same_service]
+                    old_days = [
+                        _normalize_days(r.get("day_of_week")) for r in same_service
+                    ]
+                    cadence_changed.append({
+                        "client_id": client["id"],
+                        "company_name": client.get("company_name"),
+                        "service_type_id": service_type_id,
+                        "old_agreement_ids": old_ids,
+                        "old_days": old_days,
+                        "new_days": desired_days,
+                        "schedule_key": schedule_key,
+                    })
+                    if not dry_run:
+                        for old_id in old_ids:
+                            conn.execute(
+                                """
+                                UPDATE recurring_agreements
+                                SET status = 'cancelled', end_date = %s
+                                WHERE id = %s
+                                """,
+                                (today, old_id),
+                            )
 
                 price = _per_visit_rate(client["id"], service_type_id)
                 if price is None:
@@ -207,6 +273,7 @@ def backfill(dry_run: bool) -> dict:
             "created": created,
             "skipped": skipped,
             "failed": failed,
+            "cadence_changed": cadence_changed,
         }
     except Exception:
         conn.rollback()
@@ -228,6 +295,7 @@ def main() -> int:
     print(
         f"created={len(result['created'])} "
         f"skipped={len(result['skipped'])} "
+        f"cadence_changed={len(result.get('cadence_changed', []))} "
         f"failed={len(result['failed'])} "
         f"dry_run={result['dry_run']}"
     )
@@ -235,6 +303,12 @@ def main() -> int:
         print(
             f"  created {row['id']} {row['client_id']} {row['service_type_id']} "
             f"({row['day_of_week']}) @ ${row['price_per_visit']:.2f}"
+        )
+    for row in result.get("cadence_changed", []):
+        print(
+            f"  cadence_changed {row['client_id']} {row['service_type_id']}: "
+            f"{row['old_days']} → {row['new_days']} "
+            f"(cancelled {len(row['old_agreement_ids'])} old row(s))"
         )
     for row in result["failed"]:
         print(

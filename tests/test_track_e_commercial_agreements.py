@@ -326,6 +326,181 @@ class TestBackfillRegression(unittest.TestCase):
             "at least one active recurring agreement",
         )
 
+    def test_rerun_with_unchanged_schedule_is_true_noop(self):
+        """Task 3: composite (client, service_type, day_of_week) idempotency.
+
+        A rerun where nothing changed must create 0 rows, skip exactly what
+        the first run created, trigger 0 cadence changes, and leave the
+        agreement-row count identical.
+        """
+        from scripts.backfill_commercial_agreements import backfill
+        conn = _make_commercial_fixture()
+        _seed_active_commercial_clients(conn, [
+            {"id": "SS-CLIENT-0040", "company_name": "Test 3x Weekly Co"},
+            {"id": "SS-CLIENT-0041",
+             "company_name": "Test Nightly Plus Saturday Co"},
+        ])
+
+        with _patched_backfill_db(conn):
+            for p in self._patches():
+                p.start()
+            try:
+                first = backfill(dry_run=False)
+                rows_after_first = conn.execute(
+                    "SELECT COUNT(*) AS c FROM recurring_agreements"
+                ).fetchone()["c"]
+                second = backfill(dry_run=False)
+            finally:
+                for p in self._patches():
+                    p.stop()
+
+        # First run: 1 row for 3x_weekly + 2 rows for nightly_plus_saturday.
+        self.assertEqual(len(first["created"]), 3)
+        self.assertEqual(len(first["skipped"]), 0)
+        self.assertEqual(len(first.get("cadence_changed", [])), 0)
+
+        # Second run: pure no-op.
+        self.assertEqual(len(second["created"]), 0)
+        self.assertEqual(len(second["skipped"]), 3)
+        self.assertEqual(len(second.get("cadence_changed", [])), 0)
+        self.assertEqual(len(second["failed"]), 0)
+
+        rows_after_second = conn.execute(
+            "SELECT COUNT(*) AS c FROM recurring_agreements"
+        ).fetchone()["c"]
+        self.assertEqual(
+            rows_after_first, rows_after_second,
+            "rerun must not mutate the recurring_agreements table",
+        )
+
+    def test_cadence_change_3x_weekly_to_daily_cancels_old_and_inserts_new(self):
+        """Task 3: when the seed map changes cadence for an existing client,
+        the backfill must cancel the stale agreement (status='cancelled',
+        end_date set) and insert a fresh row with the new days. An operator
+        must see a 'cadence_changed' entry, not a silent skip.
+        """
+        from scripts.backfill_commercial_agreements import backfill
+        conn = _make_commercial_fixture()
+        _seed_active_commercial_clients(conn, [
+            {"id": "SS-CLIENT-0050", "company_name": "Test 3x Weekly Co"},
+        ])
+
+        # First run: schedule is 3x_weekly (mon/wed/fri).
+        with _patched_backfill_db(conn):
+            for p in self._patches():
+                p.start()
+            try:
+                first = backfill(dry_run=False)
+
+                # Flip the seed entry for this company to 'daily' in place so
+                # _seed_schedule_by_company returns the new cadence on rerun.
+                for entry in self._fake_seed:
+                    if entry["company_name"] == "Test 3x Weekly Co":
+                        entry["schedule"] = "daily"
+
+                second = backfill(dry_run=False)
+            finally:
+                for p in self._patches():
+                    p.stop()
+
+        self.assertEqual(len(first["created"]), 1)
+        self.assertEqual(
+            first["created"][0]["day_of_week"], "monday,wednesday,friday"
+        )
+
+        # Second run: 0 created (new row IS inserted but reported under
+        # cadence_changed in the summary print, yet also written to DB).
+        # The cadence_changed bucket captures the transition for operators.
+        self.assertEqual(
+            len(second.get("cadence_changed", [])), 1,
+            f"expected one cadence_changed entry, got {second.get('cadence_changed')}",
+        )
+        self.assertEqual(
+            second["cadence_changed"][0]["service_type_id"], "commercial-nightly"
+        )
+        self.assertEqual(
+            second["cadence_changed"][0]["new_days"],
+            "friday,monday,saturday,thursday,tuesday,wednesday",  # normalized sort
+        )
+        # Same service_type but different days → not an idempotent skip.
+        nightly_skips = [
+            r for r in second["skipped"]
+            if r["service_type_id"] == "commercial-nightly"
+        ]
+        self.assertEqual(nightly_skips, [])
+
+        # The old row must be cancelled.
+        cancelled = conn.execute(
+            """
+            SELECT status, end_date, day_of_week FROM recurring_agreements
+            WHERE client_id = 'SS-CLIENT-0050'
+              AND day_of_week = 'monday,wednesday,friday'
+            """
+        ).fetchone()
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["end_date"], date.today().isoformat())
+
+        # Exactly one active commercial-nightly row for this client, with the
+        # new 6-day cadence. No double-booking.
+        active = conn.execute(
+            """
+            SELECT day_of_week FROM recurring_agreements
+            WHERE client_id = 'SS-CLIENT-0050'
+              AND service_type_id = 'commercial-nightly'
+              AND status = 'active'
+            """
+        ).fetchall()
+        self.assertEqual(len(active), 1)
+        self.assertEqual(
+            active[0]["day_of_week"],
+            "monday,tuesday,wednesday,thursday,friday,saturday",
+        )
+
+    def test_nightly_plus_saturday_rerun_creates_no_duplicates(self):
+        """Task 3: the multi-row schedule (nightly Mon-Fri + deep-clean Sat)
+        must still be composite-key idempotent. Rerunning must not produce
+        a second deep-clean-Saturday row even though service_type_id alone
+        matches what's already there.
+        """
+        from scripts.backfill_commercial_agreements import backfill
+        conn = _make_commercial_fixture()
+        _seed_active_commercial_clients(conn, [
+            {"id": "SS-CLIENT-0060",
+             "company_name": "Test Nightly Plus Saturday Co"},
+        ])
+
+        with _patched_backfill_db(conn):
+            for p in self._patches():
+                p.start()
+            try:
+                first = backfill(dry_run=False)
+                second = backfill(dry_run=False)
+            finally:
+                for p in self._patches():
+                    p.stop()
+
+        self.assertEqual(len(first["created"]), 2)
+        self.assertEqual(len(second["created"]), 0)
+        self.assertEqual(len(second["skipped"]), 2)
+        self.assertEqual(len(second.get("cadence_changed", [])), 0)
+
+        active_rows = conn.execute(
+            """
+            SELECT service_type_id, day_of_week FROM recurring_agreements
+            WHERE client_id = 'SS-CLIENT-0060' AND status = 'active'
+            ORDER BY service_type_id
+            """
+        ).fetchall()
+        self.assertEqual(len(active_rows), 2,
+                         "nightly_plus_saturday must stay at 2 active rows")
+        pairs = [(r["service_type_id"], r["day_of_week"]) for r in active_rows]
+        self.assertEqual(
+            pairs,
+            [("commercial-nightly",
+              "monday,tuesday,wednesday,thursday,friday"),
+             ("deep-clean", "saturday")],
+        )
+
     def test_backfill_falls_back_to_notes_for_unknown_company(self):
         """A client not in the seed map falls through to notes inference."""
         from scripts.backfill_commercial_agreements import backfill
