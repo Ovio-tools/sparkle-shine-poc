@@ -214,12 +214,124 @@ class TestRevenueMetrics(unittest.TestCase):
         yesterday = result["yesterday"]
         self.assertIsInstance(yesterday["total"], (int, float))
         self.assertGreaterEqual(yesterday["total"], 0)
+        self.assertIn("cash_collected", yesterday)
+        self.assertIsInstance(yesterday["cash_collected"], (int, float))
 
         pacing = result["month_to_date"]["pacing"]
         self.assertIn(pacing, ("ahead", "on_track", "behind"))
+        self.assertIn("cash_collected", result["month_to_date"])
 
         vs_prior_30 = result["trailing_30_days"]["vs_prior_30"]
         self.assertIsInstance(vs_prior_30, float)
+
+    def test_revenue_metric_basis_is_booked(self):
+        """Primary pacing metric must declare booked_revenue as its basis."""
+        result = revenue.compute(self.db, "2026-03-17")
+        self.assertEqual(result.get("metric_basis"), "booked_revenue")
+
+    def test_revenue_cash_pacing_block_shape(self):
+        """cash_pacing block exposes finance-specific pacing separately."""
+        result = revenue.compute(self.db, "2026-03-17")
+        self.assertIn("cash_pacing", result)
+        cp = result["cash_pacing"]
+        for key in (
+            "mtd_cash", "mtd_booked", "collection_ratio",
+            "expected_ratio_low", "expected_ratio_high",
+            "pacing", "projected_month_end_cash",
+        ):
+            self.assertIn(key, cp, f"cash_pacing missing {key}")
+        self.assertIn(cp["pacing"], ("ahead", "on_track", "behind", "unknown"))
+        # Ratios must be sane floats
+        self.assertIsInstance(cp["collection_ratio"], float)
+        self.assertLess(cp["expected_ratio_low"], cp["expected_ratio_high"])
+
+    def test_revenue_cash_behind_alert_fires_when_booked_healthy(self):
+        """If booked is on track but collection ratio is below the floor,
+        a cash-lag alert should fire — otherwise the booked-vs-cash gap is invisible.
+
+        The alert is gated on CASH_COLLECTION_ALERT_ENABLED (off by default
+        pending Track D). This test patches it on to verify the alert logic
+        still works end-to-end so it's ready to flip live.
+        """
+        # Insert extra completed jobs earlier in the month to push booked
+        # revenue up to a comfortably on-track level, without adding any
+        # matching payments — collection ratio then drops below the 0.70 floor.
+        with self.db:
+            for i in range(1, 15):
+                day = f"2026-03-{i:02d}"
+                job_id = f"SS-JOB-PAD-{i:02d}"
+                inv_id = f"SS-INV-PAD-{i:02d}"
+                self.db.execute(
+                    "INSERT INTO jobs (id, client_id, crew_id, service_type_id, "
+                    "scheduled_date, status, completed_at) VALUES "
+                    "(%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    (job_id, "SS-CLIENT-0001", "crew-a", "std-residential",
+                     day, "completed", f"{day} 14:00:00"),
+                )
+                self.db.execute(
+                    "INSERT INTO invoices (id, client_id, job_id, amount, status, issue_date) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    (inv_id, "SS-CLIENT-0001", job_id, 10000.0, "sent", day),
+                )
+
+        with unittest.mock.patch(
+            "intelligence.config.CASH_COLLECTION_ALERT_ENABLED", True
+        ):
+            result = revenue.compute(self.db, "2026-03-17")
+        cp = result["cash_pacing"]
+        # Booked should now dominate cash, so collection ratio is well below floor.
+        self.assertLess(cp["collection_ratio"], cp["expected_ratio_low"])
+        self.assertEqual(cp["pacing"], "behind")
+        # An alert must call out the cash lag specifically (not the booked alert).
+        joined = " || ".join(result["alerts"])
+        self.assertIn("Cash collection is lagging", joined)
+
+    def test_revenue_cash_behind_alert_suppressed_by_default(self):
+        """With the flag off (default), the cash-lag alert must stay quiet
+        even when the collection ratio is well below the floor — otherwise
+        the alert will fire every month until Track D lands."""
+        with self.db:
+            for i in range(1, 15):
+                day = f"2026-03-{i:02d}"
+                job_id = f"SS-JOB-PAD2-{i:02d}"
+                inv_id = f"SS-INV-PAD2-{i:02d}"
+                self.db.execute(
+                    "INSERT INTO jobs (id, client_id, crew_id, service_type_id, "
+                    "scheduled_date, status, completed_at) VALUES "
+                    "(%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    (job_id, "SS-CLIENT-0001", "crew-a", "std-residential",
+                     day, "completed", f"{day} 14:00:00"),
+                )
+                self.db.execute(
+                    "INSERT INTO invoices (id, client_id, job_id, amount, status, issue_date) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    (inv_id, "SS-CLIENT-0001", job_id, 10000.0, "sent", day),
+                )
+
+        result = revenue.compute(self.db, "2026-03-17")
+        cp = result["cash_pacing"]
+        # Pacing metric is still reported — the block is for finance visibility.
+        self.assertEqual(cp["pacing"], "behind")
+        # But no alert text about cash lag should appear.
+        joined = " || ".join(result["alerts"])
+        self.assertNotIn("Cash collection is lagging", joined)
+
+
+class TestMetricsShim(unittest.TestCase):
+    """compute_all_metrics exposes both `booked_revenue` (canonical) and
+    `revenue` (Track A compatibility shim) pointing at the same object."""
+
+    def test_booked_revenue_and_revenue_share_same_object(self):
+        from intelligence.metrics import compute_all_metrics
+
+        db_url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+        if not db_url:
+            self.skipTest("DATABASE_URL not set — skipping shim integration test")
+
+        metrics = compute_all_metrics(db_url, "2026-03-17")
+        self.assertIn("booked_revenue", metrics)
+        self.assertIn("revenue", metrics)
+        self.assertIs(metrics["booked_revenue"], metrics["revenue"])
 
 
 class TestOperationsMetrics(unittest.TestCase):
@@ -287,6 +399,47 @@ class TestOperationsMetrics(unittest.TestCase):
                                     f"{crew_name}: utilization must be >= 0")
             self.assertLessEqual(utilization, 1.0,
                                  f"{crew_name}: utilization must be <= 1")
+
+    def test_commercial_gap_counts_distinct_uncovered_clients(self):
+        """commercial_recurring_gap.missing_active_clients must count
+        DISTINCT active commercial clients that lack any active agreement —
+        not (client_count − agreement_count). The subtraction approach
+        silently undercounts as soon as any client holds 2+ active agreements.
+        """
+        # Seed a second commercial client so we can split behaviors cleanly.
+        with self.db:
+            self.db.execute(
+                "INSERT INTO clients (id, client_type, first_name, email, status) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                ("SS-CLIENT-0004", "commercial", "Corp2", "corp2@test.com", "active"),
+            )
+            # Commercial client 0003: two active agreements (e.g., two sites)
+            self.db.executemany(
+                "INSERT INTO recurring_agreements "
+                "(id, client_id, service_type_id, frequency, price_per_visit, "
+                "start_date, status) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                [
+                    ("SS-RECUR-0001", "SS-CLIENT-0003", "std-commercial",
+                     "weekly", 500.0, "2026-01-01", "active"),
+                    ("SS-RECUR-0002", "SS-CLIENT-0003", "std-commercial",
+                     "weekly", 500.0, "2026-01-01", "active"),
+                ],
+            )
+            # Commercial client 0004: no active agreement — this is the uncovered one.
+
+        result = operations.compute(self.db, "2026-03-17")
+        gap = result["commercial_recurring_gap"]
+
+        # 2 active commercial clients total, 2 active agreements, only 1 covered client,
+        # so exactly 1 is uncovered. The old (clients − agreements) math would say 0.
+        self.assertEqual(gap["active_clients"], 2)
+        self.assertEqual(gap["active_recurring_agreements"], 2)
+        self.assertEqual(gap["covered_clients"], 1)
+        self.assertEqual(gap["missing_active_clients"], 1)
+
+        alerts_joined = " || ".join(result["alerts"])
+        self.assertIn("Commercial scheduling gap", alerts_joined)
 
 
 class TestSalesMetrics(unittest.TestCase):
@@ -698,13 +851,29 @@ class TestContextBuilder(unittest.TestCase):
         from database.connection import get_connection as _gc
         conn = _gc()
         with conn:
-            # Add fake invoice for September payment
+            # Add a completed job plus a linked invoice in September 2025 so
+            # booked revenue differs between the two dates.
             conn.execute(
-                "INSERT INTO invoices (id, client_id, amount, status, issue_date) "
-                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                ("SS-INV-FAKE-S", "SS-CLIENT-0001", 100.0, "paid", "2025-09-01"),
+                "INSERT INTO jobs "
+                "(id, client_id, crew_id, service_type_id, scheduled_date, status, completed_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (
+                    "SS-JOB-FAKE-S",
+                    "SS-CLIENT-0001",
+                    "crew-a",
+                    "std-residential",
+                    "2025-09-13",
+                    "completed",
+                    "2025-09-13",
+                ),
             )
-            # Add a payment in September 2025 so MTD differs between the two dates
+            # Add fake invoice for September booked revenue
+            conn.execute(
+                "INSERT INTO invoices (id, client_id, job_id, amount, status, issue_date) "
+                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                ("SS-INV-FAKE-S", "SS-CLIENT-0001", "SS-JOB-FAKE-S", 100.0, "paid", "2025-09-13"),
+            )
+            # Keep a payment too so cash metrics remain populated.
             conn.execute(
                 "INSERT INTO payments "
                 "(id, invoice_id, client_id, amount, payment_date) VALUES (%s, %s, %s, %s, %s) "
@@ -720,10 +889,10 @@ class TestContextBuilder(unittest.TestCase):
             )
         conn.close()
 
-        # 2025-09-15  →  MTD covers 2025-09-01 to 2025-09-14 (has $100 payment)
+        # 2025-09-15  →  MTD covers 2025-09-01 to 2025-09-14 (has $100 booked revenue)
         ctx_rough    = build_briefing_context(self.db_url, "2025-09-15",
                                               include_doc_search=False)
-        # 2026-03-17  →  MTD covers 2026-03-01 to 2026-03-16 (no March payments)
+        # 2026-03-17  →  MTD covers 2026-03-01 to 2026-03-16 (no March booked revenue)
         ctx_recovery = build_briefing_context(self.db_url, "2026-03-17",
                                               include_doc_search=False)
 

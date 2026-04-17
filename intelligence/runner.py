@@ -76,8 +76,12 @@ _SYNCERS: list[tuple[str, str]] = [
     ("SlackSyncer",       "slack"),
 ]
 
-# Alert source -> Slack channel routing
+# Alert source -> Slack channel routing.
+# `booked_revenue` is canonical; `revenue` is the Track A compat shim and is
+# deduped in _collect_alerts, but we still route both to the same channel so
+# nothing regresses if a caller switches keys without updating this map.
 _ALERT_CHANNEL_MAP: dict[str, str] = {
+    "booked_revenue":   "#operations",
     "revenue":          "#operations",
     "financial_health": "#operations",
     "operations":       "#operations",
@@ -335,12 +339,22 @@ def _is_critical(alert_text: str) -> bool:
 
 
 def _collect_alerts(metrics: dict) -> list[dict]:
-    """Collect all alerts from every metrics module."""
+    """Collect all alerts from every metrics module.
+
+    Dedupes by object identity so compat aliases (e.g. the Track A
+    `revenue` → `booked_revenue` shim, which is the same dict under two
+    keys) do not emit duplicate alerts. First key wins.
+    """
     all_alerts: list[dict] = []
+    seen_ids: set[int] = set()
     for module_name, module_result in metrics.items():
-        if isinstance(module_result, dict) and "alerts" in module_result:
-            for alert_text in module_result["alerts"]:
-                all_alerts.append({"source": module_name, "text": alert_text})
+        if not isinstance(module_result, dict) or "alerts" not in module_result:
+            continue
+        if id(module_result) in seen_ids:
+            continue
+        seen_ids.add(id(module_result))
+        for alert_text in module_result["alerts"]:
+            all_alerts.append({"source": module_name, "text": alert_text})
     return all_alerts
 
 
@@ -710,11 +724,18 @@ def main() -> None:
     metrics = compute_all_metrics(DB_PATH, briefing_date)
     metrics_time = time.monotonic() - metrics_start
 
-    # Count successfully computed modules (all except 'computed_at')
-    computed_modules = sum(
-        1 for k, v in metrics.items()
-        if k != "computed_at" and isinstance(v, dict)
-    )
+    # Count successfully computed modules (all except 'computed_at'),
+    # deduping by object identity so compat aliases (e.g. revenue /
+    # booked_revenue) don't inflate the count.
+    seen_ids: set[int] = set()
+    computed_modules = 0
+    for k, v in metrics.items():
+        if k == "computed_at" or not isinstance(v, dict):
+            continue
+        if id(v) in seen_ids:
+            continue
+        seen_ids.add(id(v))
+        computed_modules += 1
     result.metrics_computed = computed_modules
 
     logger.info("Metrics computed in %.1fs", metrics_time)

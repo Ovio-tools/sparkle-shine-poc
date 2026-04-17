@@ -165,7 +165,7 @@ def _format_context_document(
     """
     lines: list[str] = []
 
-    rev = metrics.get("revenue", {})
+    rev = metrics.get("booked_revenue") or metrics.get("revenue", {})
     ops = metrics.get("operations", {})
     fin = metrics.get("financial_health", {})
     sales = metrics.get("sales", {})
@@ -206,7 +206,8 @@ def _format_context_document(
     yesterday_rev = rev.get("yesterday", {})
     completion_rate = yesterday_ops.get("completion_rate", 0.0)
     lines.append(f"- Jobs completed: {yesterday_ops.get('completed', 0)}")
-    lines.append(f"- Revenue collected: ${yesterday_rev.get('total', 0.0):,.0f}")
+    lines.append(f"- Booked revenue: ${yesterday_rev.get('total', 0.0):,.0f}")
+    lines.append(f"- Cash collected: ${yesterday_rev.get('cash_collected', 0.0):,.0f}")
     lines.append(f"- Completion rate: {completion_rate:.0%}")
 
     # Flag if notably off
@@ -222,7 +223,7 @@ def _format_context_document(
     elif daily_run_rate > 0 and yesterday_total_rev < daily_run_rate * 0.80:
         shortfall_pct = (1 - yesterday_total_rev / daily_run_rate) * 100
         lines.append(
-            f"- FLAG: Revenue was {shortfall_pct:.0f}% below the daily run rate "
+            f"- FLAG: Booked revenue was {shortfall_pct:.0f}% below the daily run rate "
             f"(${daily_run_rate:,.0f}/day expected)."
         )
     lines.append("")
@@ -264,6 +265,14 @@ def _format_context_document(
     if overnight_cancelled > 0:
         lines.append(f"- Overnight cancellations: {overnight_cancelled} job(s) cancelled")
 
+    commercial_gap = ops.get("commercial_recurring_gap", {})
+    missing_commercial = commercial_gap.get("missing_active_clients", 0)
+    if missing_commercial > 0:
+        lines.append(
+            f"- COMMERCIAL GAP: {missing_commercial} active commercial client(s) lack "
+            "active recurring agreements; scheduling may be relying on fallback rules"
+        )
+
     lines.append("")
 
     # ---- CASH POSITION ----
@@ -301,6 +310,31 @@ def _format_context_document(
             rest_total = sum(lp["amount"] for lp in rest)
             lines.append(f"  - ...and {len(rest)} more totalling ${rest_total:,.0f}")
     lines.append("")
+
+    # ---- CASH COLLECTION PACING ----
+    # Separate from booked-revenue pacing so finance can distinguish a
+    # work shortfall (booked behind) from a collection lag (cash behind
+    # while booked is on track). Commercial net-30 means cash always
+    # trails booked; the question is whether it's trailing more than usual.
+    cash_pacing_block = rev.get("cash_pacing", {})
+    if cash_pacing_block:
+        mtd_cash_val = cash_pacing_block.get("mtd_cash", 0.0)
+        mtd_booked_val = cash_pacing_block.get("mtd_booked", 0.0)
+        ratio = cash_pacing_block.get("collection_ratio", 0.0)
+        low = cash_pacing_block.get("expected_ratio_low", 0.70)
+        high = cash_pacing_block.get("expected_ratio_high", 1.05)
+        cash_pacing_label = cash_pacing_block.get("pacing", "unknown")
+        proj_cash = cash_pacing_block.get("projected_month_end_cash", 0.0)
+        lines.append("## CASH COLLECTION PACING")
+        lines.append(f"- MTD cash collected: ${mtd_cash_val:,.0f}")
+        lines.append(f"- MTD booked revenue: ${mtd_booked_val:,.0f}")
+        lines.append(
+            f"- Collection ratio: {ratio:.0%} "
+            f"(expected range {low:.0%}–{high:.0%})"
+        )
+        lines.append(f"- Cash pacing: {cash_pacing_label}")
+        lines.append(f"- Projected month-end cash: ${proj_cash:,.0f}")
+        lines.append("")
 
     # ---- INVOICES CROSSING OVERDUE THRESHOLDS TODAY ----
     lines.append("## INVOICES CROSSING OVERDUE THRESHOLDS TODAY")
@@ -606,16 +640,24 @@ def _format_weekly_context_document(
     total_jobs = total_completed + total_cancelled
     completion_rate = total_completed / total_jobs if total_jobs > 0 else 0.0
 
+    def _rev(m: dict) -> dict:
+        # Prefer the new canonical key; fall back to the shim during migration.
+        return m.get("booked_revenue") or m.get("revenue", {})
+
     total_revenue = sum(
-        m.get("revenue", {}).get("yesterday", {}).get("total", 0.0)
+        _rev(m).get("yesterday", {}).get("total", 0.0)
+        for m in daily_metrics
+    )
+    total_cash = sum(
+        _rev(m).get("yesterday", {}).get("cash_collected", 0.0)
         for m in daily_metrics
     )
     total_residential = sum(
-        m.get("revenue", {}).get("yesterday", {}).get("residential", 0.0)
+        _rev(m).get("yesterday", {}).get("residential", 0.0)
         for m in daily_metrics
     )
     total_commercial = sum(
-        m.get("revenue", {}).get("yesterday", {}).get("commercial", 0.0)
+        _rev(m).get("yesterday", {}).get("commercial", 0.0)
         for m in daily_metrics
     )
     active_days = len(daily_metrics) or 1
@@ -624,15 +666,16 @@ def _format_weekly_context_document(
     lines.append(f"- Total jobs completed: {total_completed}")
     lines.append(f"- Total jobs cancelled: {total_cancelled}")
     lines.append(f"- Overall completion rate: {completion_rate:.0%}")
-    lines.append(f"- Total revenue collected: ${total_revenue:,.0f}")
+    lines.append(f"- Total booked revenue: ${total_revenue:,.0f}")
     lines.append(f"  - Residential: ${total_residential:,.0f}")
     lines.append(f"  - Commercial: ${total_commercial:,.0f}")
+    lines.append(f"- Total cash collected: ${total_cash:,.0f}")
     lines.append(f"- Average daily jobs: {total_completed / active_days:.1f}")
-    lines.append(f"- Average daily revenue: ${total_revenue / active_days:,.0f}")
+    lines.append(f"- Average daily booked revenue: ${total_revenue / active_days:,.0f}")
     lines.append("")
 
     # ---- REVENUE TREND ----
-    snap_rev = snapshot_metrics.get("revenue", {})
+    snap_rev = snapshot_metrics.get("booked_revenue") or snapshot_metrics.get("revenue", {})
     lines.append("## REVENUE TREND")
     wtd = snap_rev.get("week_to_date", {})
     mtd = snap_rev.get("month_to_date", {})
@@ -641,13 +684,31 @@ def _format_weekly_context_document(
     target_low = mtd.get("target_low", 0.0)
     target_high = mtd.get("target_high", 0.0)
     lines.append(
-        f"- Week total (WTD metric): ${wtd.get('total', 0.0):,.0f} "
+        f"- Week total booked revenue: ${wtd.get('total', 0.0):,.0f} "
         f"({direction} {abs(vs_last_week):.1f}% vs prior week)"
     )
-    lines.append(f"- Month to date: ${mtd.get('total', 0.0):,.0f}")
+    lines.append(f"- Week cash collected: ${wtd.get('cash_collected', 0.0):,.0f}")
+    lines.append(f"- Month to date booked revenue: ${mtd.get('total', 0.0):,.0f}")
+    lines.append(f"- Month to date cash collected: ${mtd.get('cash_collected', 0.0):,.0f}")
     lines.append(f"- Monthly target range: ${target_low:,.0f} - ${target_high:,.0f}")
-    lines.append(f"- Pacing: {mtd.get('pacing', 'unknown')}")
-    lines.append(f"- Projected month-end: ${mtd.get('projected_month_end', 0.0):,.0f}")
+    lines.append(f"- Booked pacing: {mtd.get('pacing', 'unknown')}")
+    lines.append(f"- Projected month-end booked: ${mtd.get('projected_month_end', 0.0):,.0f}")
+
+    # Cash pacing (separate from booked pacing — see metrics/revenue.py).
+    cash_pacing_block = snap_rev.get("cash_pacing", {})
+    if cash_pacing_block:
+        ratio = cash_pacing_block.get("collection_ratio", 0.0)
+        low = cash_pacing_block.get("expected_ratio_low", 0.70)
+        high = cash_pacing_block.get("expected_ratio_high", 1.05)
+        lines.append(
+            f"- Collection ratio (cash / booked MTD): {ratio:.0%} "
+            f"(expected {low:.0%}–{high:.0%})"
+        )
+        lines.append(f"- Cash pacing: {cash_pacing_block.get('pacing', 'unknown')}")
+        lines.append(
+            f"- Projected month-end cash: "
+            f"${cash_pacing_block.get('projected_month_end_cash', 0.0):,.0f}"
+        )
     lines.append("")
 
     # ---- CASH POSITION (end-of-week snapshot) ----

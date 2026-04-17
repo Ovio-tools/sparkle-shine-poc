@@ -305,7 +305,7 @@ def _build_citation_index(context: BriefingContext) -> list[dict]:
     )
 
     # ── Section 1 (Week in Review) — Revenue ─────────────────────────────────
-    if metrics.get("revenue"):
+    if metrics.get("booked_revenue") or metrics.get("revenue"):
         _add("Weekly P&L", "quickbooks", "report_pl",
              get_report_link("quickbooks"),
              record_count=week_jobs)

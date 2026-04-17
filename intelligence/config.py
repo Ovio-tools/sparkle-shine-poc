@@ -53,6 +53,17 @@ ALERT_THRESHOLDS: dict = {
     "revenue_variance_percent": 15,     # flag if month is 15%+ off target
 }
 
+# Track A cash-pacing alert.
+#
+# The `cash_pacing` block in revenue metrics always reports the collection
+# ratio for finance visibility. The *alert* derived from it (fires when
+# MTD cash/booked drops below EXPECTED_CASH_RATIO_LOW while booked is healthy)
+# stays off until Track D lands — current simulation payment timing runs well
+# below the target 0.70 floor (April 1-15 2026: ~0.45), so enabling the alert
+# today would fire on every normal month. Flip to True once Track D brings
+# payment timing in line with config/narrative-stated net-30 behavior.
+CASH_COLLECTION_ALERT_ENABLED: bool = False
+
 CREW_CAPACITY: dict = {
     "max_jobs_per_crew_per_day": 4,
     "max_hours_per_crew_per_day": 10,
@@ -83,7 +94,7 @@ Maria reads this at 6 AM before her first call. Write like you are handing her a
 Structure the report in exactly 6 sections, in this exact order:
 
 1. Yesterday's Numbers
-   Exactly 3 lines: jobs completed, revenue collected, completion rate. That is it. If completion rate dropped below 90% OR revenue was 20% or more below the daily run rate, add one sentence flagging it. No comparisons to last week, no trends.
+   Exactly 4 lines: jobs completed, booked revenue, cash collected, completion rate. That is it. "Booked revenue" is what was earned from completed jobs yesterday; "cash collected" is what customers actually paid yesterday — the two usually differ because commercial clients pay on net-30 terms. Never call cash "revenue". If completion rate dropped below 90% OR booked revenue was 20% or more below the daily run rate, add one sentence flagging it. No comparisons to last week, no trends.
 
 2. Today's Operations Snapshot
    Lead with the total number of jobs scheduled today (use a numeral). Break down by crew with utilization percentages. If any crew is below 65% utilized, note it as having capacity for a last-minute booking. If any crew is above 95%, note it as one cancellation away from a difficult day. Mention any overnight job cancellations or crew sick-calls.
@@ -102,7 +113,7 @@ Structure the report in exactly 6 sections, in this exact order:
 
 Style: Short sentences. Bold key numbers. 175–450 words total. Phrase every recommendation as a suggestion, not a command (e.g., "it may be worth following up" rather than "follow up immediately"). Avoid words like "immediately", "critical failure", or "chronic".
 
-EXCLUDE from this report: campaign performance metrics, review summaries (unless a 1-star review arrived overnight), revenue trend comparisons, and conversion rates by source.
+EXCLUDE from this report: campaign performance metrics, review summaries (unless a 1-star review arrived overnight), multi-week revenue trend comparisons (leave to the weekly report), and conversion rates by source.
 
 RECENT BRIEFING HISTORY: If recent briefings are in the context, note whether problems have persisted or improved. Do not repeat the same issue word-for-word.
 
@@ -115,16 +126,16 @@ Maria reads this on Sunday evening or Monday morning with coffee — she is not 
 Structure the report in exactly 9 sections, in this exact order:
 
 0. TL;DR
-   3 sentences maximum. One sentence on revenue performance (vs. target), one on the single most important operational issue, one on the single highest-priority action Maria should consider this week. This sits at the very top — before all numbered sections — so Maria gets the bottom line before reading anything else.
+   3 sentences maximum. One sentence on booked revenue performance vs. target (booked revenue = earned work from completed jobs, not cash collected), one on the single most important operational issue, one on the single highest-priority action Maria should consider this week. This sits at the very top — before all numbered sections — so Maria gets the bottom line before reading anything else.
 
 1. Week in Review
-   Total revenue collected this week vs. the weekly target, plus the week-over-week trend (up, down, or flat, with a percentage). Jobs completed, cancellation count. Compare to the same week last month. End with one narrative sentence that connects the dots — for example, what drove any revenue change.
+   Total booked revenue this week vs. the weekly target, plus the week-over-week trend (up, down, or flat, with a percentage). Report cash collected for the same week on a separate line — the two will usually differ because commercial clients pay on net-30 terms, and that gap is normal, not a shortfall. Jobs completed, cancellation count. Compare booked revenue to the same week last month. End with one narrative sentence that connects the dots — for example, whether a booked-revenue change was driven by job volume, pricing mix, or commercial activation, and whether cash timing is tracking normally.
 
 2. Crew Performance Scorecard
    Show each crew ranked from best to worst. For each crew: average job duration variance (+ or - percent), average review rating, jobs completed this week, and cancellation count. Call out any speed-vs-quality tension — for example, if a crew runs longer than others but earns higher ratings, name that trade-off explicitly.
 
 3. Cash Flow and Payment Health
-   Show how long invoices have been unpaid: current (0–30 days), 31–60, 61–90, and 90+ with dollar amounts and invoice counts. Show the average number of days it takes to collect payment, tracked over the past 4 weeks. Name any client whose payment behaviour has been getting slower. Flag any cash flow risks for the coming week.
+   Show how long invoices have been unpaid: current (0–30 days), 31–60, 61–90, and 90+ with dollar amounts and invoice counts. Show the average number of days it takes to collect payment, tracked over the past 4 weeks. Compare month-to-date cash collected against month-to-date booked revenue so Maria can see the collection lag in one glance. Name any client whose payment behaviour has been getting slower. Flag any cash flow risks for the coming week.
 
 4. Sales Pipeline Movement
    What entered the pipeline this week, what moved forward, what was won, what was lost and why. Total pipeline value and average deal cycle length. Conversion rate by lead source (referral vs. Google Ads vs. organic vs. direct). If referral-sourced deals are closing at a higher rate or higher value than other sources, say so explicitly.
@@ -170,8 +181,8 @@ You will receive a structured data document with metrics, alerts, and relevant b
 Look for patterns across data points. Flag anything that seems like an emerging trend, not just a one-off. When you spot something noteworthy, explain why it matters in business terms Maria would understand.
 
 IMPORTANT: Every section should connect to at least one other domain. For example:
-- In Yesterday's Performance, mention how operational issues (cancellations, delays) affected revenue.
-- In Cash Position, reference whether the sales pipeline will address any shortfalls.
+- In Yesterday's Performance, mention how operational issues (cancellations, delays) affected booked revenue (earned work), not cash collection — cash lags because commercial is net-30.
+- In Cash Position, reference whether the sales pipeline will address any shortfalls and whether cash collection is tracking normally against booked revenue.
 - In Today's Schedule, flag if crew capacity issues could impact pending commercial proposals.
 - In Action Items, group items that are connected rather than listing them by domain.
 

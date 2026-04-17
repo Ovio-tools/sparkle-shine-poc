@@ -213,6 +213,61 @@ def compute(db, briefing_date: str) -> dict:
             f"-- possible competitor activity"
         )
 
+    commercial_gap = {
+        "active_clients": 0,
+        "active_recurring_agreements": 0,
+        "covered_clients": 0,
+        "missing_active_clients": 0,
+    }
+    try:
+        active_commercial_clients = db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM clients
+            WHERE client_type = 'commercial' AND status = 'active'
+            """
+        ).fetchone()["cnt"] or 0
+        active_commercial_agreements = db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM recurring_agreements ra
+            JOIN clients c ON c.id = ra.client_id
+            WHERE c.client_type = 'commercial'
+              AND c.status = 'active'
+              AND ra.status = 'active'
+            """
+        ).fetchone()["cnt"] or 0
+        # Count distinct commercial clients that have *no* active agreement.
+        # A simple (clients - agreements) subtraction undercounts as soon as
+        # any client holds 2+ active agreements, so query uncovered clients
+        # directly via NOT EXISTS against the agreement table.
+        missing_active_clients = db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM clients c
+            WHERE c.client_type = 'commercial'
+              AND c.status = 'active'
+              AND NOT EXISTS (
+                  SELECT 1 FROM recurring_agreements ra
+                  WHERE ra.client_id = c.id AND ra.status = 'active'
+              )
+            """
+        ).fetchone()["cnt"] or 0
+        covered_clients = max(0, active_commercial_clients - missing_active_clients)
+        commercial_gap = {
+            "active_clients": active_commercial_clients,
+            "active_recurring_agreements": active_commercial_agreements,
+            "covered_clients": covered_clients,
+            "missing_active_clients": missing_active_clients,
+        }
+        if missing_active_clients > 0:
+            alerts.append(
+                f"Commercial scheduling gap — {missing_active_clients} active commercial client(s) "
+                "lack active recurring agreements, so production may be relying on fallback scheduling"
+            )
+    except Exception:
+        pass
+
     # Full cancellation breakdown by neighborhood (last 28 days, all counts ≥ 1)
     # Used by the weekly report to surface neighbourhood trends.
     neighborhood_28d = today - timedelta(days=28)
@@ -261,6 +316,7 @@ def compute(db, briefing_date: str) -> dict:
             "worst_crew": worst_crew,
             "worst_variance": worst_variance,
         },
+        "commercial_recurring_gap": commercial_gap,
         "cancellation_by_neighborhood": cancellation_by_neighborhood,
         "alerts": alerts,
     }

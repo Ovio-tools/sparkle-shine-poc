@@ -57,7 +57,7 @@ def _classify_tone(text: str) -> tuple[str, int, int]:
 # ---------------------------------------------------------------------------
 
 def _get_revenue(metrics: dict) -> dict:
-    return metrics.get("revenue", {})
+    return metrics.get("booked_revenue") or metrics.get("revenue", {})
 
 
 def _get_operations(metrics: dict) -> dict:
