@@ -25,35 +25,15 @@ if _PROJECT_ROOT not in sys.path:
 
 from automations.base import BaseAutomation
 from automations.utils.id_resolver import MappingNotFoundError, register_mapping
+from config.service_catalog import (
+    SERVICE_CATALOGUE,
+    canonical_service_id,
+    get_service_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
 _INVOICE_ID_LOCK_KEY = 9_214_001
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Service catalogue — mirrors config/business.py SERVICE_TYPES
-# ─────────────────────────────────────────────────────────────────────────────
-
-_SERVICE_CATALOGUE: dict = {
-    "Standard Residential Clean": {"duration_minutes": 120, "base_price": 150.00},
-    "Deep Clean":                 {"duration_minutes": 210, "base_price": 275.00},
-    "Move-In/Move-Out Clean":     {"duration_minutes": 240, "base_price": 325.00},
-    "Recurring Weekly":           {"duration_minutes": 120, "base_price": 135.00},
-    "Recurring Biweekly":         {"duration_minutes": 120, "base_price": 150.00},
-    "Recurring Monthly":          {"duration_minutes": 120, "base_price": 165.00},
-    "Commercial Nightly Clean":   {"duration_minutes": 180, "base_price": None},
-}
-
-# QBO item IDs — mirrors tool_ids.json quickbooks.items
-_QBO_ITEM_IDS: dict = {
-    "Standard Residential Clean": "19",
-    "Deep Clean":                 "20",
-    "Move-In/Move-Out Clean":     "21",
-    "Recurring Weekly":           "22",
-    "Recurring Biweekly":         "23",
-    "Recurring Monthly":          "24",
-    "Commercial Nightly Clean":   "25",
-}
 
 _QBO_NET30_TERM_ID   = "3"
 _FALLBACK_PRICE      = 150.00
@@ -74,34 +54,156 @@ def _load_tool_ids() -> dict:
         return json.load(f)
 
 
-def _lookup_service(service_type: str) -> dict:
+def _emit_fallback_pricing_alert(
+    raw_label: Optional[str],
+    service_type_id: Optional[str],
+    canonical_job_id: Optional[str],
+) -> None:
     """
-    Return {duration_minutes, base_price, qbo_item_id} for the given service type.
-    Tries exact match first, then case-insensitive partial match.
-    Falls back to Standard Residential Clean values.
+    Warn ops that an invoice is about to price at the fallback rate because
+    the service type could not be normalized. Emits a Slack alert via the
+    simulation error reporter; never raises.
     """
-    if service_type in _SERVICE_CATALOGUE:
-        info = _SERVICE_CATALOGUE[service_type]
+    details = (
+        f"raw_service_type={raw_label!r}, "
+        f"service_type_id={service_type_id!r}, "
+        f"canonical_job_id={canonical_job_id!r}"
+    )
+    logger.warning("Unknown service type — using fallback pricing. %s", details)
+
+    try:
+        from simulation.error_reporter import report_error
+
+        report_error(
+            f"Unknown service type; invoice priced at fallback ${_FALLBACK_PRICE:.2f}. {details}",
+            tool_name="quickbooks",
+            context=(
+                f"job={canonical_job_id or 'unknown'}, "
+                f"label={raw_label or 'unknown'}"
+            ),
+            severity="warning",
+        )
+    except Exception as exc:
+        logger.debug("Fallback-pricing alert suppressed: %s", exc)
+
+
+def _lookup_service(
+    service_type: str,
+    *,
+    service_type_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    job_date: Optional[date] = None,
+    canonical_job_id: Optional[str] = None,
+) -> dict:
+    """
+    Resolve service metadata from canonical IDs first, then free-text labels.
+
+    Pricing policy:
+      * Unknown service types → $150 residential fallback + alert (so a
+        mislabeled Jobber job still produces SOME invoice that ops can
+        correct).
+      * Known residential/recurring types → catalogue ``base_price``.
+      * Known ``commercial-nightly`` with resolvable contract rate →
+        that rate.
+      * Known ``commercial-nightly`` WITHOUT a resolvable rate (missing
+        client mapping or recurring_agreements lookup failure) → alert
+        and return ``skip_invoice=True``. Critically, we do NOT fall
+        back to $150 residential pricing here: billing a commercial job
+        at the residential rate with QBO item "19" silently undercharges
+        and misclassifies the invoice, and the error is hard to spot
+        after the fact. The caller (action 1) must refuse to invoice in
+        this case and leave the record for ops to handle manually.
+    """
+    canonical = canonical_service_id(service_type_id) or canonical_service_id(service_type)
+    info = get_service_metadata(canonical) if canonical else None
+
+    if info is None:
+        _emit_fallback_pricing_alert(
+            raw_label=service_type,
+            service_type_id=service_type_id,
+            canonical_job_id=canonical_job_id,
+        )
         return {
-            "duration_minutes": info["duration_minutes"],
-            "base_price":       info["base_price"] or _FALLBACK_PRICE,
-            "qbo_item_id":      _QBO_ITEM_IDS.get(service_type, _FALLBACK_ITEM_ID),
+            "service_type_id":  "std-residential",
+            "display_name":     "Standard Residential Clean",
+            "duration_minutes": _FALLBACK_DURATION,
+            "base_price":       _FALLBACK_PRICE,
+            "qbo_item_id":      _FALLBACK_ITEM_ID,
+            "used_fallback":    True,
+            "skip_invoice":     False,
         }
 
-    lower = service_type.lower()
-    for name, info in _SERVICE_CATALOGUE.items():
-        if lower in name.lower() or name.lower() in lower:
-            return {
-                "duration_minutes": info["duration_minutes"],
-                "base_price":       info["base_price"] or _FALLBACK_PRICE,
-                "qbo_item_id":      _QBO_ITEM_IDS.get(name, _FALLBACK_ITEM_ID),
-            }
+    base_price = info["base_price"]
+    used_fallback = False
+    skip_invoice = False
+
+    if canonical == "commercial-nightly":
+        if not client_id:
+            _emit_fallback_pricing_alert(
+                raw_label=service_type,
+                service_type_id=service_type_id or canonical,
+                canonical_job_id=canonical_job_id,
+            )
+            base_price = None
+            skip_invoice = True
+        else:
+            try:
+                from seeding.generators.gen_clients import get_commercial_per_visit_rate
+
+                base_price = round(
+                    get_commercial_per_visit_rate(
+                        client_id=client_id,
+                        job_date=job_date.isoformat() if job_date else None,
+                        service_type_id=canonical,
+                    ),
+                    2,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "commercial-nightly rate unresolvable for client %s (%s): %s",
+                    client_id,
+                    service_type,
+                    exc,
+                )
+                _emit_fallback_pricing_alert(
+                    raw_label=service_type,
+                    service_type_id=service_type_id or canonical,
+                    canonical_job_id=canonical_job_id,
+                )
+                base_price = None
+                skip_invoice = True
+    elif base_price is None:
+        # A future known service type with no base price and no runtime
+        # resolver: fail loudly rather than guess.
+        _emit_fallback_pricing_alert(
+            raw_label=service_type,
+            service_type_id=service_type_id or canonical,
+            canonical_job_id=canonical_job_id,
+        )
+        skip_invoice = True
 
     return {
-        "duration_minutes": _FALLBACK_DURATION,
-        "base_price":       _FALLBACK_PRICE,
-        "qbo_item_id":      _FALLBACK_ITEM_ID,
+        "service_type_id":  canonical,
+        "display_name":     info["display_name"],
+        "duration_minutes": info["duration_minutes"],
+        "base_price":       base_price,
+        "qbo_item_id":      info.get("qbo_item_id") or _FALLBACK_ITEM_ID,
+        "used_fallback":    used_fallback,
+        "skip_invoice":     skip_invoice,
     }
+
+
+def _resolve_job_service_type_id(db, canonical_job_id: Optional[str]) -> Optional[str]:
+    if not canonical_job_id:
+        return None
+
+    row = db.execute(
+        "SELECT service_type_id FROM jobs WHERE id = %s",
+        (canonical_job_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return row["service_type_id"] or None
 
 
 def _allocate_invoice_id(db) -> str:
@@ -260,7 +362,7 @@ class JobCompletionFlow(BaseAutomation):
         """
         jobber_job_id    = str(event.get("job_id", ""))
         jobber_client_id = str(event.get("client_id", ""))
-        service_type     = event.get("service_type") or "Standard Residential Clean"
+        raw_service_type = event.get("service_type") or "Standard Residential Clean"
 
         # Parse completion date (poll_jobber_completed_jobs doesn't include it,
         # so callers may inject "completed_at"; fall back to today)
@@ -283,6 +385,8 @@ class JobCompletionFlow(BaseAutomation):
                 canonical_job_id = self.reverse_resolve_id(jobber_job_id, "jobber")
             except MappingNotFoundError:
                 pass
+
+        canonical_service_type = _resolve_job_service_type_id(self.db, canonical_job_id)
 
         # Resolve downstream tool IDs
         qbo_customer_id: Optional[str] = None
@@ -307,12 +411,26 @@ class JobCompletionFlow(BaseAutomation):
         client_email = ""
         if canonical_id:
             row = self.db.execute(
-                "SELECT first_name, last_name, email FROM clients WHERE id = %s",
+                "SELECT first_name, last_name, company_name, email FROM clients WHERE id = %s",
                 (canonical_id,),
             ).fetchone()
             if row:
-                client_name  = f"{row['first_name']} {row['last_name']}".strip() or client_name
+                company_name = (row["company_name"] or "").strip()
+                client_name = (
+                    company_name
+                    or f"{row['first_name']} {row['last_name']}".strip()
+                    or client_name
+                )
                 client_email = row["email"] or ""
+
+        service_info = _lookup_service(
+            raw_service_type,
+            service_type_id=canonical_service_type,
+            client_id=canonical_id,
+            job_date=completion_date,
+            canonical_job_id=canonical_job_id,
+        )
+        service_type = service_info["display_name"]
 
         return {
             "job_id":           canonical_job_id or jobber_job_id,
@@ -324,14 +442,15 @@ class JobCompletionFlow(BaseAutomation):
             "hs_contact_id":    hs_contact_id,
             "client_name":      client_name,
             "client_email":     client_email,
+            "service_type_id":  service_info["service_type_id"],
             "service_type":     service_type,
-            "service_info":     _lookup_service(service_type),
+            "service_info":     service_info,
             "duration_minutes": event.get("duration_minutes"),
             "crew":             event.get("crew"),
             "completion_notes": event.get("completion_notes") or "",
             "is_recurring":     bool(event.get("is_recurring", False)),
             "completion_date":  completion_date,
-            "is_commercial":    "commercial" in service_type.lower(),
+            "is_commercial":    service_info["service_type_id"] == "commercial-nightly",
         }
 
     # ── Action 1: QuickBooks invoice ──────────────────────────────────────────
@@ -345,6 +464,16 @@ class JobCompletionFlow(BaseAutomation):
         amount        = service_info["base_price"]
         qbo_item_id   = service_info["qbo_item_id"]
         is_commercial = ctx["is_commercial"]
+
+        if service_info.get("skip_invoice"):
+            raise RuntimeError(
+                "Invoice creation skipped: pricing unresolved for "
+                f"service_type_id={service_info['service_type_id']} "
+                f"(canonical job {ctx.get('canonical_job_id')}). "
+                "A commercial-nightly job without a resolvable contract "
+                "rate cannot be billed at the residential fallback; ops "
+                "must resolve the rate before this job can be invoiced."
+            )
         completion_date = ctx["completion_date"]
         due_date        = (
             (completion_date + timedelta(days=30)).isoformat()
@@ -463,19 +592,26 @@ class JobCompletionFlow(BaseAutomation):
             f"Crew: {crew_str}. Duration: {duration_str}."
         )
 
-        invoice_amount = ctx["service_info"]["base_price"]
+        service_info = ctx["service_info"]
+        skip_invoice = bool(service_info.get("skip_invoice"))
+        invoice_amount = 0.0 if skip_invoice else (service_info["base_price"] or 0.0)
 
         if self.dry_run:
             print(
                 f"[DRY RUN] Would create HubSpot note for contact "
                 f"{ctx['hs_contact_id'] or 'unknown'}: {note_body}"
             )
+            balance_note = (
+                "outstanding_balance unchanged (invoice skipped)"
+                if skip_invoice
+                else f"outstanding_balance+={invoice_amount:.2f}"
+            )
             print(
                 f"[DRY RUN] Would PATCH HubSpot contact "
                 f"{ctx['hs_contact_id'] or 'unknown'}: "
                 f"last_service_date={ctx['completion_date']}, "
                 f"total_services_completed+=1, "
-                f"outstanding_balance+={invoice_amount:.2f}"
+                f"{balance_note}"
             )
             return
 
@@ -534,8 +670,15 @@ class JobCompletionFlow(BaseAutomation):
             current_count       = int(float(props.get("total_services_completed") or 0))
             current_outstanding = float(props.get("outstanding_balance") or 0.0)
 
-            # 3. Update engagement properties and outstanding_balance
-            new_outstanding = round(current_outstanding + invoice_amount, 2)
+            # 3. Update engagement properties and outstanding_balance.
+            # When the invoice was intentionally skipped (e.g., commercial
+            # pricing unresolved), leave outstanding_balance alone so the
+            # HubSpot contact doesn't drift against QuickBooks.
+            new_outstanding = (
+                current_outstanding
+                if skip_invoice
+                else round(current_outstanding + invoice_amount, 2)
+            )
             hs_client.crm.contacts.basic_api.update(
                 contact_id,
                 SimplePublicObjectInput(

@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 from auth import get_client
+from config.service_catalog import canonical_service_id
 from database.mappings import get_canonical_id, register_mapping, generate_id
 from intelligence.syncers.base_syncer import BaseSyncer, SyncResult
 from seeding.utils.throttler import JOBBER
@@ -91,24 +92,6 @@ _JOBBER_STATUS_MAP = {
     "UNSCHEDULED": "scheduled",
 }
 
-_TITLE_TOKEN_MAP = {
-    "commercial nightly clean": "commercial-nightly",
-    "commercial nightly": "commercial-nightly",
-    "deep clean": "deep-clean",
-    "move in move out clean": "move-in-out",
-    "move in out clean": "move-in-out",
-    "move in out": "move-in-out",
-    "monthly recurring": "recurring-monthly",
-    "recurring biweekly": "recurring-biweekly",
-    "recurring monthly": "recurring-monthly",
-    "recurring weekly": "recurring-weekly",
-    "residential clean": "std-residential",
-    "standard residential clean": "std-residential",
-    "std residential": "std-residential",
-    "weekly recurring": "recurring-weekly",
-}
-
-
 def _clean_text(value: object) -> Optional[str]:
     text = (value or "").strip()
     return text or None
@@ -119,27 +102,7 @@ def _slug_title(value: str) -> str:
 
 
 def _service_type_from_title(title: Optional[str]) -> Optional[str]:
-    title = _clean_text(title)
-    if not title:
-        return None
-
-    normalized = _slug_title(title)
-    if normalized in _TITLE_TOKEN_MAP:
-        return _TITLE_TOKEN_MAP[normalized]
-
-    normalized_dash = normalized.replace(" ", "-")
-    if normalized_dash in {
-        "commercial-nightly",
-        "deep-clean",
-        "move-in-out",
-        "recurring-biweekly",
-        "recurring-monthly",
-        "recurring-weekly",
-        "std-residential",
-    }:
-        return normalized_dash
-
-    return None
+    return canonical_service_id(_clean_text(title))
 
 
 def _duration_minutes(node: dict) -> Optional[int]:
