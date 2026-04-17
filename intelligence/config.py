@@ -64,6 +64,31 @@ ALERT_THRESHOLDS: dict = {
 # payment timing in line with config/narrative-stated net-30 behavior.
 CASH_COLLECTION_ALERT_ENABLED: bool = False
 
+# Track D cash realism gate.
+#
+# When True, simulation.generators.payments uses client-type-specific
+# windows (residential 0-3 due-on-receipt / commercial ~Net 30) and a
+# client-type-specific write-off threshold (residential 60 / commercial 90
+# days). When False, the generator uses the legacy blended windows and
+# the flat 90-day write-off — behavior identical to pre-Track-D production.
+#
+# Merge this flag False. Flip True only after Track A's booked-vs-cash
+# split has been live in production for at least 5 business days. The flag
+# is read at call time via getattr, so a config change takes effect on
+# the next PaymentGenerator tick without a worker restart.
+TRACK_D_PAYMENT_TIMING_ENABLED: bool = False
+
+# Cash-collection alert band (MTD cash / MTD booked).
+#
+# Moved out of intelligence/metrics/revenue.py so the floor can be
+# tuned without a code change once Track D's steady-state ratio is
+# observed in production. LOW is the floor below which CASH_COLLECTION_ALERT
+# fires (when the alert is enabled); HIGH is the ceiling above which the
+# cash_pacing bucket is marked "ahead" (prior-month AR collecting faster
+# than usual, or repriced historical invoices landing this month).
+EXPECTED_CASH_RATIO_LOW: float = 0.70
+EXPECTED_CASH_RATIO_HIGH: float = 1.05
+
 CREW_CAPACITY: dict = {
     "max_jobs_per_crew_per_day": 4,
     "max_hours_per_crew_per_day": 10,
