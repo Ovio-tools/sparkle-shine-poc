@@ -13,6 +13,7 @@ logs/
 .worktrees/
 .env.railway
 .claude/
+sparkle-shine-sales-automation/
 
 # Runtime state files
 simulation/checkpoint.json

@@ -67,14 +67,38 @@ def get_connection() -> Connection:
 
     Raises EnvironmentError if DATABASE_URL is not set.
     """
-    url = os.environ.get("DATABASE_URL")
+    database_url = os.environ.get("DATABASE_URL")
+    public_url = os.environ.get("DATABASE_PUBLIC_URL")
+    url = database_url or public_url
     if not url:
         raise EnvironmentError(
             "DATABASE_URL is not set. Set it in .env or environment.\n"
             "  Local:   DATABASE_URL=postgresql://localhost/sparkle_shine\n"
             "  Railway: provided automatically by the PostgreSQL plugin"
         )
-    conn = psycopg2.connect(url)
+
+    try:
+        conn = psycopg2.connect(url, connect_timeout=5)
+    except psycopg2.OperationalError as exc:
+        error_text = str(exc).lower()
+        using_railway_internal = bool(database_url and "railway.internal" in database_url)
+        host_unreachable = any(
+            needle in error_text
+            for needle in (
+                "could not translate host name",
+                "name or service not known",
+                "temporary failure in name resolution",
+                "nodename nor servname provided",
+                "connection timed out",
+                "timeout expired",
+            )
+        )
+        if using_railway_internal and public_url and public_url != database_url and host_unreachable:
+            logger.info("DATABASE_URL failed via Railway internal host; retrying with DATABASE_PUBLIC_URL")
+            conn = psycopg2.connect(public_url, connect_timeout=5)
+        else:
+            raise
+
     conn.autocommit = False
     return Connection(conn)
 
