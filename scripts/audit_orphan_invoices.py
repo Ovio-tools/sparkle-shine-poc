@@ -56,7 +56,8 @@ def _fetch_orphans(db, since: str, until: str) -> list[dict]:
             ) AS quickbooks_invoice_id
         FROM invoices i
         WHERE i.job_id IS NULL
-          AND i.issue_date BETWEEN %s AND %s
+          AND to_date(i.issue_date, 'YYYY-MM-DD')
+              BETWEEN CAST(%s AS date) AND CAST(%s AS date)
         ORDER BY i.issue_date, i.id
         """,
         (since, until),
@@ -82,11 +83,12 @@ def _fetch_clients_with_no_completed_job_on_issue_date(db, since: str, until: st
         SELECT i.id, i.client_id, i.issue_date, i.amount
         FROM invoices i
         WHERE i.job_id IS NULL
-          AND i.issue_date BETWEEN %s AND %s
+          AND to_date(i.issue_date, 'YYYY-MM-DD')
+              BETWEEN CAST(%s AS date) AND CAST(%s AS date)
           AND NOT EXISTS (
               SELECT 1 FROM jobs j
               WHERE j.client_id = i.client_id
-                AND j.completed_at::date = i.issue_date
+                AND j.completed_at::date = to_date(i.issue_date, 'YYYY-MM-DD')
                 AND j.status = 'completed'
           )
         ORDER BY i.issue_date, i.id
