@@ -191,7 +191,7 @@ def compute(db, briefing_date: str) -> dict:
             FROM clients
             WHERE acquisition_source IS NOT NULL
             GROUP BY acquisition_source
-        )
+        ) AS lead_sources
         GROUP BY source
         """,
     ).fetchall()
