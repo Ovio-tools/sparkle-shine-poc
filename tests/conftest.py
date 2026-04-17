@@ -77,3 +77,34 @@ def test_db_path():
 def test_pg_db():
     """Yield the DSN URL for the test PostgreSQL database."""
     yield _TEST_DB_URL
+
+
+@pytest.fixture
+def pg_test_conn():
+    """Yield a PostgreSQL test connection with a clean schema.
+
+    Truncates domain tables before yielding so tests start from an empty DB.
+    Mirrors the _make_pg_test_db() helper in tests/test_phase4.py.
+    """
+    os.environ["DATABASE_URL"] = _TEST_DB_URL
+    from database.schema import init_db
+    from database.connection import get_connection as _gc
+    init_db()
+    conn = _gc()
+    tables = [
+        "automation_log", "pending_actions", "poll_state",
+        "document_index", "documents", "reviews", "tasks",
+        "marketing_interactions", "marketing_campaigns",
+        "cross_tool_mapping", "payments", "invoices", "jobs",
+        "recurring_agreements", "commercial_proposals",
+        "calendar_events", "won_deals", "gmail_metadata",
+        "daily_metrics_snapshot", "leads", "employees", "crews", "clients",
+    ]
+    for t in tables:
+        try:
+            with conn:
+                conn.execute(f"TRUNCATE {t} CASCADE")
+        except Exception:
+            pass
+    yield conn
+    conn.close()
