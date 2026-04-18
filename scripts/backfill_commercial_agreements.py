@@ -17,6 +17,7 @@ Idempotency: re-running is safe. An existing active agreement for the same
 Usage:
     python -m scripts.backfill_commercial_agreements --dry-run
     python -m scripts.backfill_commercial_agreements --execute
+    python -m scripts.backfill_commercial_agreements --dry-run --client-id SS-CLIENT-0311
 """
 from __future__ import annotations
 
@@ -26,7 +27,6 @@ from datetime import date
 from typing import Optional
 
 from database.connection import get_connection, get_column_names
-from database.mappings import generate_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,31 @@ _SCHEDULE_TO_AGREEMENTS: dict[str, list[tuple[str, str]]] = {
 _DEFAULT_AGREEMENTS: list[tuple[str, str]] = [
     ("commercial-nightly", "monday,wednesday,friday"),
 ]
+
+
+def _next_recurring_id(conn, next_n: Optional[int]) -> tuple[str, int]:
+    """Allocate the next SS-RECUR ID on the current connection.
+
+    Using database.mappings.generate_id() here opens a second connection and can
+    hand out the same ID repeatedly during one large transaction because the
+    uncommitted inserts on this connection are still invisible to that helper.
+    Keeping the sequence on the current connection makes multi-row backfills
+    deterministic and collision-free.
+    """
+    if next_n is None:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM recurring_agreements
+            WHERE id LIKE 'SS-RECUR-%'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        next_n = int(row["id"].split("-")[-1]) + 1 if row else 1
+
+    agreement_id = f"SS-RECUR-{next_n:04d}"
+    return agreement_id, next_n + 1
 
 
 def _seed_schedule_by_company() -> dict[str, str]:
@@ -138,26 +163,42 @@ def _normalize_days(day_of_week: Optional[str]) -> str:
     return ",".join(sorted(parts))
 
 
-def backfill(dry_run: bool) -> dict:
+def backfill(dry_run: bool, client_ids: Optional[list[str]] = None) -> dict:
     conn = get_connection()
     created: list[dict] = []
     skipped: list[dict] = []
     failed: list[dict] = []
     cadence_changed: list[dict] = []
+    next_recur_n: Optional[int] = None
 
     try:
         _ensure_client_type_column(conn)
         seed_map = _seed_schedule_by_company()
         today = date.today().isoformat()
 
-        clients = conn.execute(
-            """
-            SELECT id, company_name, notes
-            FROM clients
-            WHERE client_type = 'commercial' AND status = 'active'
-            ORDER BY company_name
-            """
-        ).fetchall()
+        normalized_client_ids = [cid.strip() for cid in (client_ids or []) if cid and cid.strip()]
+        if normalized_client_ids:
+            placeholders = ", ".join(["%s"] * len(normalized_client_ids))
+            clients = conn.execute(
+                f"""
+                SELECT id, company_name, notes
+                FROM clients
+                WHERE client_type = 'commercial'
+                  AND status = 'active'
+                  AND id IN ({placeholders})
+                ORDER BY company_name
+                """,
+                tuple(normalized_client_ids),
+            ).fetchall()
+        else:
+            clients = conn.execute(
+                """
+                SELECT id, company_name, notes
+                FROM clients
+                WHERE client_type = 'commercial' AND status = 'active'
+                ORDER BY company_name
+                """
+            ).fetchall()
         clients = [dict(c) for c in clients]
 
         for client in clients:
@@ -243,7 +284,7 @@ def backfill(dry_run: bool) -> dict:
                     continue
 
                 try:
-                    agreement_id = generate_id("RECUR")
+                    agreement_id, next_recur_n = _next_recurring_id(conn, next_recur_n)
                     conn.execute(
                         """
                         INSERT INTO recurring_agreements
@@ -287,10 +328,16 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--dry-run", action="store_true")
     group.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--client-id",
+        action="append",
+        dest="client_ids",
+        help="Limit the backfill to one or more canonical client IDs. Repeatable.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    result = backfill(dry_run=args.dry_run)
+    result = backfill(dry_run=args.dry_run, client_ids=args.client_ids)
 
     print(
         f"created={len(result['created'])} "

@@ -130,6 +130,46 @@ class Reconciler:
         """
         return f"NULLIF(TRIM(REPLACE({column}, 'T', ' ')), '')::timestamp"
 
+    def _client_requires_jobber_record(self, canonical_id: str) -> bool:
+        """Return True when downstream state implies a Jobber record should exist.
+
+        Some HubSpot sync artifacts create active canonical client rows before
+        any proposal, job, QBO customer, or agreement exists. Alerting on every
+        such row creates noisy "missing Jobber" findings that ops cannot act on.
+        We only require a Jobber mapping once the client has downstream evidence
+        that they are actually operating in the fulfillment/billing flow.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    EXISTS(
+                        SELECT 1 FROM jobs WHERE client_id = %s
+                    ) AS has_jobs,
+                    EXISTS(
+                        SELECT 1 FROM recurring_agreements
+                        WHERE client_id = %s AND status = 'active'
+                    ) AS has_recurring,
+                    EXISTS(
+                        SELECT 1 FROM commercial_proposals
+                        WHERE client_id = %s
+                    ) AS has_proposals,
+                    EXISTS(
+                        SELECT 1 FROM cross_tool_mapping
+                        WHERE canonical_id = %s
+                          AND tool_name IN ('quickbooks', 'quickbooks_customer')
+                    ) AS has_qbo
+                """,
+                (canonical_id, canonical_id, canonical_id, canonical_id),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        return any(
+            bool(row[key]) for key in ("has_jobs", "has_recurring", "has_proposals", "has_qbo")
+        )
+
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
@@ -491,9 +531,14 @@ class Reconciler:
         jobber_id = get_tool_id(canonical_id, "jobber", self.db_path)
         if jobber_id is None:
             # Only flag clients that have been active long enough to need Jobber records.
-            # New leads and commercial proposals-only clients may not have Jobber records yet.
+            # HubSpot-only sync artifacts and pre-fulfillment contacts may not
+            # have Jobber records yet, so only alert once downstream state
+            # shows the client has entered fulfillment/billing flows.
             client_status = client.get("status", "active")
-            if client_status in ("active", "churned", "occasional"):
+            if (
+                client_status in ("active", "churned", "occasional")
+                and self._client_requires_jobber_record(canonical_id)
+            ):
                 findings.append(Finding(
                     category="reconciliation_missing",
                     tool="jobber",

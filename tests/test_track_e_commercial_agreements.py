@@ -181,23 +181,14 @@ class TestBackfillRegression(unittest.TestCase):
     def _patches(self):
         """Context managers the backfill tests need, returned as a list."""
         import seeding.generators.gen_clients as gc_mod
-        import scripts.backfill_commercial_agreements as bf_mod
 
         # Stub price lookup so we don't need the commercial rate cache.
         def fake_rate(client_id, service_type_id=None, job_date=None):
             return 150.0
 
-        # Deterministic ID generation so assertions can target real IDs.
-        self._id_counter = {"n": 0}
-
-        def fake_generate_id(prefix, db_path=None):
-            self._id_counter["n"] += 1
-            return f"{prefix}-TEST-{self._id_counter['n']:04d}"
-
         return [
             patch.object(gc_mod, "_COMMERCIAL_CLIENTS", self._fake_seed),
             patch.object(gc_mod, "get_commercial_per_visit_rate", fake_rate),
-            patch.object(bf_mod, "generate_id", fake_generate_id),
         ]
 
     def test_backfill_creates_one_agreement_per_simple_schedule(self):
@@ -254,6 +245,41 @@ class TestBackfillRegression(unittest.TestCase):
             r for r in result["created"] if r["service_type_id"] == "deep-clean"
         )
         self.assertEqual(saturday_row["day_of_week"], "saturday")
+
+    def test_backfill_can_target_specific_client_ids(self):
+        from scripts.backfill_commercial_agreements import backfill
+
+        conn = _make_commercial_fixture()
+        _seed_active_commercial_clients(conn, [
+            {"id": "SS-CLIENT-0001", "company_name": "Test 3x Weekly Co"},
+            {"id": "SS-CLIENT-0002", "company_name": "Test Daily Co"},
+        ])
+
+        import seeding.generators.gen_clients as gc_mod
+
+        def fake_rate(client_id, service_type_id=None, job_date=None):
+            return 150.0
+
+        patches = [
+            patch.object(gc_mod, "_COMMERCIAL_CLIENTS", self._fake_seed),
+            patch.object(gc_mod, "get_commercial_per_visit_rate", fake_rate),
+        ]
+
+        with _patched_backfill_db(conn):
+            for p in patches:
+                p.start()
+            try:
+                result = backfill(dry_run=False, client_ids=["SS-CLIENT-0001"])
+            finally:
+                for p in reversed(patches):
+                    p.stop()
+
+        self.assertEqual(len(result["created"]), 1)
+        self.assertEqual(result["created"][0]["client_id"], "SS-CLIENT-0001")
+        rows = conn.execute(
+            "SELECT client_id FROM recurring_agreements ORDER BY client_id"
+        ).fetchall()
+        self.assertEqual([r["client_id"] for r in rows], ["SS-CLIENT-0001"])
 
     def test_backfill_is_idempotent(self):
         """Re-running the backfill must not create duplicates."""

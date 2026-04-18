@@ -53,6 +53,20 @@ _STAGE_STATUS_MAP = {
 }
 
 
+def _has_client_sync_evidence(last_service: Optional[str], lifetime_value: float) -> bool:
+    """Return True when a HubSpot contact has real customer evidence.
+
+    HubSpot often classifies contacts with `client_type` or even lifecycle
+    `customer` before the rest of the stack has created downstream records.
+    Minting a brand-new canonical client row from that hint alone creates
+    active HubSpot-only "clients" that reconciliation later flags as missing
+    Jobber/QBO records. For brand-new inserts, require service history or
+    non-zero lifetime value before treating the contact as a canonical client.
+    Existing client rows are still updated by email match.
+    """
+    return bool(last_service) or float(lifetime_value or 0) > 0
+
+
 class HubSpotSyncer(BaseSyncer):
     tool_name = "hubspot"
 
@@ -163,19 +177,27 @@ class HubSpotSyncer(BaseSyncer):
         last_service = props.get("last_service_date")
 
         canonical_id = get_canonical_id("hubspot", hs_id, db_path=self.db_path)
+        email_row = (
+            self.db.execute("SELECT id FROM clients WHERE email = %s", (email,)).fetchone()
+            if email else None
+        )
+        mapped_to_client = bool(canonical_id and canonical_id.startswith("SS-CLIENT-"))
+        has_client_evidence = _has_client_sync_evidence(last_service, lifetime_value)
 
-        # Determine whether this is a client or a lead
-        is_client = client_type_prop in ("residential", "commercial") or lifecycle == "customer"
+        # Determine whether this contact should be synchronized as a client.
+        # We still update existing client rows by email match, but we do not
+        # mint a brand-new CLIENT canonical record from HubSpot hints alone.
+        client_candidate = client_type_prop in ("residential", "commercial") or lifecycle == "customer"
+        is_client = mapped_to_client or (
+            canonical_id is None
+            and client_candidate
+            and (email_row is not None or has_client_evidence)
+        )
 
         if is_client:
             if canonical_id is None:
-                # Try to match by email
-                row = self.db.execute(
-                    "SELECT id FROM clients WHERE email = %s", (email,)
-                ).fetchone() if email else None
-
-                if row:
-                    canonical_id = row["id"]
+                if email_row:
+                    canonical_id = email_row["id"]
                 else:
                     canonical_id = generate_id("CLIENT", self.db_path)
                     with self.db:

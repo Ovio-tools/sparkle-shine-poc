@@ -1214,6 +1214,23 @@ class TestReconciliationUnit(unittest.TestCase):
                 job_id  TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT NOT NULL,
+                entity_type TEXT,
+                tool_name TEXT NOT NULL,
+                tool_specific_id TEXT,
+                tool_specific_url TEXT,
+                synced_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE commercial_proposals (
+                id TEXT PRIMARY KEY,
+                client_id TEXT,
+                status TEXT
+            )
+        """)
 
         self.recent_client_id = "SS-CLIENT-RECENT"
         self.recurring_client_id = "SS-CLIENT-RECUR"
@@ -1347,6 +1364,44 @@ class TestReconciliationUnit(unittest.TestCase):
         self.assertIn(self.recurring_client_id, sample)
         self.assertIn(self.churned_client_id, sample)
         self.assertIn(self.commercial_client_id, sample)
+
+    @patch("simulation.reconciliation.reconciler.get_tool_id", return_value=None)
+    @patch("simulation.reconciliation.reconciler.get_connection")
+    def test_check_jobber_skips_stranded_client_without_downstream_activity(
+        self, mock_get_connection, _mock_get_tool_id
+    ):
+        """HubSpot-only/stranded clients should not trigger missing-Jobber noise."""
+        from simulation.reconciliation.reconciler import Reconciler
+
+        mock_get_connection.side_effect = self._compat_connection
+
+        reconciler = Reconciler(db_path=self._db_path, repair=False, dry_run=True)
+        findings = reconciler._check_jobber(
+            self.commercial_client_id,
+            {"status": "active", "client_type": "commercial"},
+        )
+
+        self.assertEqual(findings, [])
+
+    @patch("simulation.reconciliation.reconciler.get_tool_id", return_value=None)
+    @patch("simulation.reconciliation.reconciler.get_connection")
+    def test_check_jobber_flags_client_with_downstream_activity(
+        self, mock_get_connection, _mock_get_tool_id
+    ):
+        """Clients already in fulfillment flow should still require Jobber."""
+        from simulation.reconciliation.reconciler import Reconciler
+
+        mock_get_connection.side_effect = self._compat_connection
+
+        reconciler = Reconciler(db_path=self._db_path, repair=False, dry_run=True)
+        findings = reconciler._check_jobber(
+            self.recent_client_id,
+            {"status": "active", "client_type": "residential"},
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].tool, "jobber")
+        self.assertIn("No Jobber client mapping", findings[0].description)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
