@@ -87,7 +87,56 @@ def _emit_fallback_pricing_alert(
         logger.debug("Fallback-pricing alert suppressed: %s", exc)
 
 
+def _resolve_commercial_contract_rate(
+    db,
+    *,
+    client_id: str,
+    job_date: Optional[date],
+    service_type_id: str,
+) -> float:
+    """
+    Resolve the per-visit commercial rate from the canonical DB state.
+
+    Production billing must follow ``recurring_agreements`` rather than any
+    local seeding cache. Prefer an active agreement covering ``job_date``;
+    when no job date is available, fall back to the latest active agreement
+    for the client/service pair.
+    """
+    params = [client_id, service_type_id]
+    date_filter = ""
+    if job_date is not None:
+        job_date_iso = job_date.isoformat()
+        date_filter = (
+            "AND start_date <= %s "
+            "AND (end_date IS NULL OR end_date = '' OR end_date >= %s)"
+        )
+        params.extend([job_date_iso, job_date_iso])
+
+    row = db.execute(
+        f"""
+        SELECT price_per_visit
+        FROM recurring_agreements
+        WHERE client_id = %s
+          AND service_type_id = %s
+          AND status = 'active'
+          {date_filter}
+        ORDER BY start_date DESC, id DESC
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    if row and row["price_per_visit"] is not None:
+        return float(row["price_per_visit"])
+
+    raise ValueError(
+        "no active recurring_agreements row for "
+        f"client_id={client_id!r}, service_type_id={service_type_id!r}, "
+        f"job_date={job_date.isoformat() if job_date else None!r}"
+    )
+
+
 def _lookup_service(
+    db,
     service_type: str,
     *,
     service_type_id: Optional[str] = None,
@@ -148,12 +197,11 @@ def _lookup_service(
             skip_invoice = True
         else:
             try:
-                from seeding.generators.gen_clients import get_commercial_per_visit_rate
-
                 base_price = round(
-                    get_commercial_per_visit_rate(
+                    _resolve_commercial_contract_rate(
+                        db,
                         client_id=client_id,
-                        job_date=job_date.isoformat() if job_date else None,
+                        job_date=job_date,
                         service_type_id=canonical,
                     ),
                     2,
@@ -424,6 +472,7 @@ class JobCompletionFlow(BaseAutomation):
                 client_email = row["email"] or ""
 
         service_info = _lookup_service(
+            self.db,
             raw_service_type,
             service_type_id=canonical_service_type,
             client_id=canonical_id,

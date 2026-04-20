@@ -40,6 +40,37 @@ def _make_qbo_invoice_mock(invoice_id="qbo-inv-123"):
     return m
 
 
+def _seed_commercial_agreement(
+    db,
+    *,
+    client_id="SS-CLIENT-0001",
+    price_per_visit=480.0,
+    start_date="2026-03-01",
+    end_date=None,
+    status="active",
+):
+    with db:
+        db.execute(
+            """
+            INSERT INTO recurring_agreements
+                (id, client_id, service_type_id, frequency, price_per_visit,
+                 start_date, end_date, status, day_of_week)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                f"SS-RECUR-{client_id[-4:]}",
+                client_id,
+                "commercial-nightly",
+                "weekly",
+                price_per_visit,
+                start_date,
+                end_date,
+                status,
+                "monday,tuesday,wednesday,thursday,friday",
+            ),
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Invoice creation — payment terms
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,12 +106,10 @@ def test_invoice_created_residential_due_on_receipt(
 def test_invoice_created_commercial_net30(mock_post, mock_db, mock_clients):
     """
     A commercial job with a resolvable contract rate creates an invoice
-    with DueDate = TxnDate + 30 days. We mock the rate resolver because
-    the test DB has no recurring_agreements row; without the mock the
-    automation would correctly refuse to invoice (see the dedicated
-    refuse-to-invoice regression tests below).
+    with DueDate = TxnDate + 30 days.
     """
     mock_post.return_value = _make_qbo_invoice_mock()
+    _seed_commercial_agreement(mock_db, price_per_visit=480.0)
 
     commercial_job = {
         "job_id":           "602",
@@ -92,10 +121,7 @@ def test_invoice_created_commercial_net30(mock_post, mock_db, mock_clients):
     }
 
     auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
-    with patch(
-        "seeding.generators.gen_clients.get_commercial_per_visit_rate",
-        return_value=480.0,
-    ), patch("automations.base.post_slack_message"):
+    with patch("automations.base.post_slack_message"):
         auto.run(commercial_job)
 
     mock_post.assert_called_once()
@@ -165,12 +191,8 @@ def test_commercial_nightly_uses_contract_rate_not_fallback(
 ):
     """
     commercial-nightly has no base price in the catalogue, so the automation
-    must resolve the per-visit rate from recurring_agreements via
-    get_commercial_per_visit_rate(). The returned amount must be the contract
-    rate and NEVER the generic $150 fallback.
-
-    We patch only the rate resolver — _lookup_service itself runs for real —
-    so this exercises the full canonical-ID + runtime-rate path.
+    must resolve the per-visit rate from recurring_agreements. The returned
+    amount must be the contract rate and NEVER the generic $150 fallback.
     """
     contract_rate = 461.54
     mock_post.return_value = _make_qbo_invoice_mock()
@@ -179,21 +201,14 @@ def test_commercial_nightly_uses_contract_rate_not_fallback(
             "UPDATE jobs SET service_type_id = %s WHERE id = %s",
             ("commercial-nightly", "SS-JOB-0001"),
         )
+    _seed_commercial_agreement(mock_db, price_per_visit=contract_rate)
 
     trigger = dict(sample_triggers["completed_job"])
     trigger["service_type"] = "Commercial Nightly Clean"
 
     auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
-    with patch(
-        "seeding.generators.gen_clients.get_commercial_per_visit_rate",
-        return_value=contract_rate,
-    ) as mock_rate, patch("automations.base.post_slack_message"):
+    with patch("automations.base.post_slack_message"):
         auto.run(trigger)
-
-    mock_rate.assert_called_once()
-    kwargs = mock_rate.call_args.kwargs
-    assert kwargs["client_id"] == "SS-CLIENT-0001"
-    assert kwargs["service_type_id"] == "commercial-nightly"
 
     body = mock_post.call_args[1]["json"]
     assert body["Line"][0]["Amount"] == contract_rate, (
@@ -297,14 +312,10 @@ def test_commercial_nightly_rate_resolver_error_refuses_invoice(
     auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
 
     with patch(
-        "seeding.generators.gen_clients.get_commercial_per_visit_rate",
-        side_effect=ValueError("no matching agreement"),
-    ) as mock_rate, patch(
         "simulation.error_reporter.report_error", return_value=True
     ) as mock_report, patch("automations.base.post_slack_message"):
         auto.run(trigger)
 
-    mock_rate.assert_called_once()
     assert mock_post.call_count == 0, (
         "commercial-nightly with unresolvable rate must not POST an invoice"
     )
