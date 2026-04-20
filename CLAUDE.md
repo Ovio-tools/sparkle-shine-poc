@@ -56,6 +56,7 @@ See @docs/skills/tool-api-patterns.md for rate limits, endpoints, headers, and e
 
 These rules exist because of real bugs. Follow them strictly.
 
+- When troubleshooting runtime issues, auth issues, missing records, or data mismatches, treat Railway as the default source of truth for DB state, env vars, token state, and live tool behavior. Do not start by trusting the local DB or local token files unless the prompt is explicitly about local development, SQLite seeding, or tests.
 - NEVER `import sqlite3` or call `sqlite3.connect()` in new production code. Use `from database.connection import get_connection`.
 - NEVER use integer indexing on database rows (`row[0]`, `fetchone()[0]`). Rows are `RealDictRow` dicts. Always use `row["column_name"]`.
 - NEVER use `?` as a parameter placeholder in PostgreSQL code. Use `%s`.
@@ -71,6 +72,12 @@ These rules exist because of real bugs. Follow them strictly.
 ## Database Patterns (PostgreSQL)
 
 IMPORTANT: All new code must use PostgreSQL via psycopg2. Some legacy modules (`simulation/reconciliation/`, `seeding/`, `setup/`, `demo/`, some `scripts/`, `tests/`) still use SQLite directly. Do not extend that pattern.
+
+### Troubleshooting Source Of Truth
+- For production or production-like diagnosis, verify Railway first: Railway Postgres for data, Railway env for config, Railway logs/runtime for auth and tool behavior.
+- Use local PostgreSQL or SQLite only for local-dev reproduction, tests, seeding flows, or when the prompt is explicitly about local state.
+- If local state disagrees with Railway, assume local drift until Railway proves otherwise.
+- Preferred sequence for diagnosis: `railway status` -> `railway service status --all` -> `railway logs --service <name> --environment production` -> `railway ssh --service <name> --environment production` or `railway connect Postgres`, depending on whether runtime or DB verification is needed.
 
 ### Connection
 - Preferred: `from database.connection import get_connection`

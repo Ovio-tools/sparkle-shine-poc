@@ -27,6 +27,7 @@ Do not assume local `.env`, `token.json`, `.jobber_tokens.json`, or `.quickbooks
 
 - Prefer GitHub-tracked configuration for structure, names, scripts, and intended setup.
 - Prefer Railway for live credentials, runtime behavior, deployed service state, and logs.
+- During troubleshooting, default to Railway as the source of truth for DB state, auth state, env vars, and tool behavior. Do not start with the local DB unless the issue is explicitly local-only.
 - Prefer `railway ssh` over `railway run` when private-network access or production-like execution matters.
 - Treat `railway run` as local execution with Railway environment variables injected.
 - Use `railway connect` for Railway Postgres access instead of assuming local connectivity from `railway run`.
@@ -169,9 +170,10 @@ Before acting on a prompt that touches tools:
 1. Read `CLAUDE.md`
 2. Confirm repo context with `git remote -v` and `gh auth status`
 3. Confirm Railway context with `railway status`
-4. If production behavior matters, use `railway service status --all`
-5. If runtime verification matters, use `railway ssh --service <name> --environment production`
-6. If DB verification matters, use `railway connect Postgres`
+4. If this is troubleshooting, assume Railway is authoritative unless the prompt says local-only
+5. If production behavior matters, use `railway service status --all`
+6. If runtime verification matters, use `railway ssh --service <name> --environment production`
+7. If DB verification matters, use `railway connect Postgres`
 
 ## Railway Deployment
 
