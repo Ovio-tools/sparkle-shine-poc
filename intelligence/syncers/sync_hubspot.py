@@ -9,7 +9,12 @@ from datetime import datetime
 from typing import Optional
 
 from auth import get_client
-from database.mappings import get_canonical_id, register_mapping, generate_id
+from database.mappings import (
+    generate_id,
+    get_canonical_id,
+    register_mapping,
+    register_mapping_on_conn,
+)
 from intelligence.syncers.base_syncer import BaseSyncer, SyncResult
 from seeding.utils.throttler import HUBSPOT
 
@@ -198,8 +203,16 @@ class HubSpotSyncer(BaseSyncer):
             if canonical_id is None:
                 if email_row:
                     canonical_id = email_row["id"]
+                    # Existing client row -- mapping register can stand alone;
+                    # a collision here does not orphan a new row.
+                    register_mapping(canonical_id, "hubspot", hs_id, db_path=self.db_path)
                 else:
                     canonical_id = generate_id("CLIENT", self.db_path)
+                    # Client INSERT and mapping registration must be atomic.
+                    # If register_mapping raises (e.g. collision guard in
+                    # database/mappings.py), the enclosing `with` block
+                    # rolls back the client INSERT so we never leave a
+                    # client row without any tool mapping.
                     with self.db:
                         self.db.execute(
                             """
@@ -216,7 +229,9 @@ class HubSpotSyncer(BaseSyncer):
                                 neighborhood, source, lifetime_value,
                             ),
                         )
-                register_mapping(canonical_id, "hubspot", hs_id, db_path=self.db_path)
+                        register_mapping_on_conn(
+                            self.db, canonical_id, "hubspot", hs_id
+                        )
 
             with self.db:
                 self.db.execute(
@@ -239,6 +254,7 @@ class HubSpotSyncer(BaseSyncer):
 
                 if row:
                     canonical_id = row["id"]
+                    register_mapping(canonical_id, "hubspot", hs_id, db_path=self.db_path)
                 else:
                     canonical_id = generate_id("LEAD", self.db_path)
                     lead_type = client_type_prop if client_type_prop in ("residential", "commercial") else "residential"
@@ -252,7 +268,9 @@ class HubSpotSyncer(BaseSyncer):
                             """,
                             (canonical_id, first_name, last_name, email, lead_type, source),
                         )
-                register_mapping(canonical_id, "hubspot", hs_id, db_path=self.db_path)
+                        register_mapping_on_conn(
+                            self.db, canonical_id, "hubspot", hs_id
+                        )
 
     # ------------------------------------------------------------------ #
     # Deals
@@ -329,7 +347,7 @@ class HubSpotSyncer(BaseSyncer):
                     """,
                     (canonical_id, title, monthly_value, status, close_date),
                 )
-            register_mapping(canonical_id, "hubspot", hs_id, db_path=self.db_path)
+                register_mapping_on_conn(self.db, canonical_id, "hubspot", hs_id)
         else:
             with self.db:
                 self.db.execute(

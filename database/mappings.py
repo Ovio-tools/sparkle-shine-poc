@@ -81,6 +81,46 @@ def generate_id(entity_type: str, db_path: str = "sparkle_shine.db") -> str:
 # Mapping operations
 # ------------------------------------------------------------------ #
 
+def register_mapping_on_conn(
+    conn,
+    canonical_id: str,
+    tool_name: str,
+    tool_specific_id: str,
+    tool_specific_url: Optional[str] = None,
+) -> None:
+    """Same as register_mapping but uses a caller-owned connection.
+
+    The caller is responsible for the transaction (``with conn:``) so the
+    mapping insert can be grouped atomically with other writes -- e.g. the
+    client row INSERT that produced the canonical_id. If this function
+    raises, the enclosing transaction rolls back and the upstream write
+    is undone, preventing orphan rows without a tool mapping.
+    """
+    entity_type = _entity_type_from_canonical(canonical_id)
+    existing = conn.execute(
+        "SELECT canonical_id FROM cross_tool_mapping "
+        "WHERE tool_name = %s AND tool_specific_id = %s AND entity_type = %s",
+        (tool_name, tool_specific_id, entity_type),
+    ).fetchone()
+    if existing is not None and existing["canonical_id"] != canonical_id:
+        raise ValueError(
+            f"Mapping collision: {tool_name}:{tool_specific_id} is already "
+            f"registered to {existing['canonical_id']}, cannot also register to {canonical_id}"
+        )
+    conn.execute(
+        """
+        INSERT INTO cross_tool_mapping
+            (canonical_id, entity_type, tool_name, tool_specific_id, tool_specific_url, synced_at)
+        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
+            tool_specific_id  = excluded.tool_specific_id,
+            tool_specific_url = excluded.tool_specific_url,
+            synced_at         = CURRENT_TIMESTAMP
+        """,
+        (canonical_id, entity_type, tool_name, tool_specific_id, tool_specific_url),
+    )
+
+
 def register_mapping(
     canonical_id: str,
     tool_name: str,
@@ -94,35 +134,13 @@ def register_mapping(
     canonical_id — guards against cross-contaminated mappings before they are written.
     """
     conn = get_connection(db_path)
-    entity_type = _entity_type_from_canonical(canonical_id)
-    # Collision guard: same external ID must not point to two canonical entities.
-    existing = conn.execute(
-        "SELECT canonical_id FROM cross_tool_mapping "
-        "WHERE tool_name = %s AND tool_specific_id = %s AND entity_type = %s",
-        (tool_name, tool_specific_id, entity_type),
-    ).fetchone()
-    if existing is not None:
-        existing_cid = existing["canonical_id"]
-        if existing_cid != canonical_id:
-            conn.close()
-            raise ValueError(
-                f"Mapping collision: {tool_name}:{tool_specific_id} is already "
-                f"registered to {existing_cid}, cannot also register to {canonical_id}"
+    try:
+        with conn:
+            register_mapping_on_conn(
+                conn, canonical_id, tool_name, tool_specific_id, tool_specific_url
             )
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO cross_tool_mapping
-                (canonical_id, entity_type, tool_name, tool_specific_id, tool_specific_url, synced_at)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT(canonical_id, tool_name) DO UPDATE SET
-                tool_specific_id  = excluded.tool_specific_id,
-                tool_specific_url = excluded.tool_specific_url,
-                synced_at         = CURRENT_TIMESTAMP
-            """,
-            (canonical_id, entity_type, tool_name, tool_specific_id, tool_specific_url),
-        )
-    conn.close()
+    finally:
+        conn.close()
 
 
 def get_tool_id(
