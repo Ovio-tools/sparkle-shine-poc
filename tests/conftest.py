@@ -90,6 +90,7 @@ def pg_test_conn():
     init_db()
     conn = _gc()
     tables = [
+        "invoice_quarantine",
         "automation_log", "pending_actions", "poll_state",
         "document_index", "documents", "reviews", "tasks",
         "marketing_interactions", "marketing_campaigns",

@@ -467,6 +467,31 @@ CREATE_TABLES = [
         updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
+
+    # ------------------------------------------------------------------ #
+    # 26. invoice_quarantine — additive hold state for unsafe orphan relinks
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS invoice_quarantine (
+        invoice_id       TEXT PRIMARY KEY REFERENCES invoices(id),
+        client_id        TEXT NOT NULL REFERENCES clients(id),
+        issue_date       TEXT NOT NULL,
+        amount           REAL NOT NULL,
+        qbo_invoice_id   TEXT,
+        quarantine_lane  TEXT NOT NULL
+                            CHECK(quarantine_lane IN ('auto_quarantine','manual_review')),
+        reason_code      TEXT NOT NULL,
+        reason_detail    TEXT,
+        source           TEXT NOT NULL,
+        snapshot_date    TEXT NOT NULL,
+        reviewed_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        reviewed_by      TEXT NOT NULL,
+        released_at      TIMESTAMP,
+        released_by      TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_invoice_quarantine_lane ON invoice_quarantine(quarantine_lane)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_quarantine_reason ON invoice_quarantine(reason_code)",
 ]
 
 # Table name → human label (for __main__ summary only)
@@ -478,6 +503,7 @@ _TABLE_NAMES = [
     "daily_metrics_snapshot", "document_index",
     "poll_state", "automation_log", "pending_actions",
     "won_deals", "gmail_metadata", "sync_skip_list", "oauth_tokens",
+    "invoice_quarantine",
 ]
 
 
