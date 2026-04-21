@@ -125,7 +125,11 @@ class PipedriveSyncer(BaseSyncer):
         canonical_id = get_canonical_id("pipedrive", pd_id, db_path=self.db_path)
 
         title = deal.get("title") or "Untitled Deal"
-        value = float(deal.get("value") or 0)
+        # Pipedrive's deal.value is the annual contract value (seeder convention
+        # in push_pipedrive.py writes monthly_value * 12). Divide by 12 to store
+        # the per-month figure the metrics layer expects in monthly_value.
+        annual_value = float(deal.get("value") or 0)
+        monthly_value = round(annual_value / 12, 2)
         stage_id = deal.get("stage_id")
         pd_status = deal.get("status") or "open"
         won_time = (deal.get("won_time") or "")[:10] or None
@@ -152,7 +156,7 @@ class PipedriveSyncer(BaseSyncer):
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
-                    (canonical_id, title, value, status, decision_date, lost_reason),
+                    (canonical_id, title, monthly_value, status, decision_date, lost_reason),
                 )
             register_mapping(canonical_id, "pipedrive", pd_id, db_path=self.db_path)
         else:
@@ -166,7 +170,7 @@ class PipedriveSyncer(BaseSyncer):
                         notes         = COALESCE(%s, notes)
                     WHERE id = %s
                     """,
-                    (status, value, decision_date, lost_reason, canonical_id),
+                    (status, monthly_value, decision_date, lost_reason, canonical_id),
                 )
 
     # ------------------------------------------------------------------ #

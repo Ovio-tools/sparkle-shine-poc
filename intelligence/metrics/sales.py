@@ -124,7 +124,10 @@ def compute(db, briefing_date: str) -> dict:
         {
             "deal_title": r["title"],
             "stage": "Proposal Sent" if r["status"] == "sent" else "Negotiation",
-            "days_stale": r["days_stale"] or stale_days,
+            # NULL sent_date → days_stale unknown (None). Do NOT coerce to the
+            # threshold; that made every unsent proposal falsely read as
+            # "14 days idle" in the daily briefing.
+            "days_stale": r["days_stale"],
             "value": round(r["annual_value"], 2),
         }
         for r in stale_rows
@@ -157,7 +160,7 @@ def compute(db, briefing_date: str) -> dict:
     proposals_needing_nudge = [
         {
             "deal_title": r["title"],
-            "days_stale": r["days_stale"] or nudge_days,
+            "days_stale": r["days_stale"],
             "value": round(r["annual_value"], 2),
         }
         for r in nudge_rows
