@@ -499,6 +499,86 @@ class TestSalesMetrics(unittest.TestCase):
         )
 
 
+class TestPipedriveSyncerMonthlyValue(unittest.TestCase):
+    """Regression test: Pipedrive deal.value is annual (seeder writes monthly * 12),
+    so the syncer must divide by 12 before storing in commercial_proposals.monthly_value.
+    Previously the syncer stored the annual figure as if it were monthly, which caused
+    the daily briefing to display 12x-inflated annual values in 'proposals_needing_nudge'.
+    """
+
+    def setUp(self):
+        self.db = _make_pg_test_db()
+        from intelligence.syncers.sync_pipedrive import PipedriveSyncer
+        self.syncer = PipedriveSyncer(_TEST_DB_URL)
+
+    def tearDown(self):
+        self.syncer.close()
+        self.db.close()
+
+    def test_insert_divides_pipedrive_value_by_twelve(self):
+        self.syncer._upsert_deal({
+            "id": 90001,
+            "title": "Regression INSERT — Annual 60000",
+            "value": 60000,
+            "stage_id": 10,      # "Proposal Sent" → status "sent"
+            "status": "open",
+        })
+        row = self.db.execute(
+            """
+            SELECT cp.monthly_value
+            FROM commercial_proposals cp
+            JOIN cross_tool_mapping m ON m.canonical_id = cp.id
+            WHERE m.tool_name = 'pipedrive' AND m.tool_specific_id = %s
+            """,
+            ("90001",),
+        ).fetchone()
+        self.assertIsNotNone(row, "Expected an inserted proposal for Pipedrive deal 90001")
+        self.assertAlmostEqual(
+            float(row["monthly_value"]),
+            5000.0,
+            places=2,
+            msg="monthly_value must be annual/12 (60000/12 = 5000), not the annual figure",
+        )
+
+    def test_update_divides_pipedrive_value_by_twelve(self):
+        # Seed an existing mapped proposal, then re-sync with a new annual value.
+        with self.db:
+            self.db.execute(
+                """
+                INSERT INTO commercial_proposals
+                  (id, title, status, monthly_value)
+                VALUES (%s, %s, %s, %s)
+                """,
+                ("SS-PROP-TEST-9999", "Existing Deal", "sent", 1000.0),
+            )
+            self.db.execute(
+                """
+                INSERT INTO cross_tool_mapping
+                    (canonical_id, entity_type, tool_name, tool_specific_id)
+                VALUES (%s, %s, %s, %s)
+                """,
+                ("SS-PROP-TEST-9999", "PROP", "pipedrive", "90002"),
+            )
+
+        self.syncer._upsert_deal({
+            "id": 90002,
+            "title": "Existing Deal",
+            "value": 120000,     # annual
+            "stage_id": 11,      # "Negotiation"
+            "status": "open",
+        })
+        row = self.db.execute(
+            "SELECT monthly_value FROM commercial_proposals WHERE id = %s",
+            ("SS-PROP-TEST-9999",),
+        ).fetchone()
+        self.assertAlmostEqual(
+            float(row["monthly_value"]),
+            10000.0,
+            places=2,
+            msg="UPDATE path must also divide Pipedrive value by 12 (120000/12 = 10000)",
+        )
+
+
 class TestFinancialHealthMetrics(unittest.TestCase):
     """test_financial_health_compute"""
 

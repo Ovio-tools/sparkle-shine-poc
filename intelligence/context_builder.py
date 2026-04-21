@@ -81,13 +81,13 @@ def _load_recent_briefings(
     Returns a list of (iso_date, cleaned_content) tuples, oldest first
     (so Claude reads them in chronological order).
     """
-    pattern = os.path.join(briefings_dir, "briefing_*.md")
+    pattern = os.path.join(briefings_dir, "daily_report_*.md")
     paths = glob.glob(pattern)
 
     dated: list[tuple[str, str]] = []
     for path in paths:
         filename = os.path.basename(path)
-        m = re.match(r"briefing_(\d{4}-\d{2}-\d{2})\.md$", filename)
+        m = re.match(r"daily_report_(\d{4}-\d{2}-\d{2})\.md$", filename)
         if m and m.group(1) < current_date:
             dated.append((m.group(1), path))
 
@@ -422,9 +422,14 @@ def _format_context_document(
     if top_nudges:
         for nd in top_nudges:
             stage_note = f" ({nd['stage']})" if nd.get("stage") else ""
+            days = nd.get("days_stale")
+            idle_suffix = (
+                f"{days} days idle" if isinstance(days, int) and days > 0
+                else "idle duration unknown (no sent_date on record)"
+            )
             lines.append(
                 f"- {nd['deal_title']}{stage_note}: "
-                f"${nd['value']:,.0f}/year, {nd['days_stale']} days idle"
+                f"${nd['value']:,.0f}/year, {idle_suffix}"
             )
         if len(nudge_combined) > 3:
             lines.append(
