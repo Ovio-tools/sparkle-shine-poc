@@ -579,6 +579,166 @@ class TestPipedriveSyncerMonthlyValue(unittest.TestCase):
         )
 
 
+class TestPipedriveSyncerAtomicity(unittest.TestCase):
+    """Regression: the INSERT into commercial_proposals and the register_mapping
+    call must be in the SAME transaction. Earlier code committed the proposal
+    row first, then called register_mapping in a separate connection. If the
+    mapping insert raised (collision guard, transient DB error, etc.), the
+    proposal row persisted without any cross_tool_mapping entry. The next sync
+    allocated a new canonical_id, creating another orphan — producing multiple
+    ghost $32k–$324k rows per Pipedrive deal in production.
+    """
+
+    def setUp(self):
+        self.db = _make_pg_test_db()
+        from intelligence.syncers.sync_pipedrive import PipedriveSyncer
+        self.syncer = PipedriveSyncer(_TEST_DB_URL)
+
+    def tearDown(self):
+        self.syncer.close()
+        self.db.close()
+
+    def test_no_orphan_proposal_when_mapping_insert_fails(self):
+        # Simulate register_mapping_on_conn raising mid-transaction (collision
+        # guard trip, transient DB error, etc.). Before the fix, the proposal
+        # INSERT was in its own `with self.db:` block that committed before
+        # register_mapping was called separately — so a raise here left an
+        # orphan row. With the fix, both writes share one transaction and
+        # the rollback undoes the proposal INSERT.
+        def _boom(*_args, **_kwargs):
+            raise ValueError("simulated mapping failure")
+
+        with unittest.mock.patch(
+            "intelligence.syncers.sync_pipedrive.register_mapping_on_conn",
+            side_effect=_boom,
+        ):
+            with self.assertRaises(ValueError):
+                self.syncer._upsert_deal({
+                    "id": 91001,
+                    "title": "Should never land",
+                    "value": 60000,
+                    "stage_id": 10,
+                    "status": "open",
+                })
+
+        # The proposal row must NOT have been committed.
+        row = self.db.execute(
+            "SELECT COUNT(*) AS n FROM commercial_proposals "
+            "WHERE title = 'Should never land'"
+        ).fetchone()
+        self.assertEqual(
+            row["n"], 0,
+            "Rollback failed: a proposal row was committed even though "
+            "register_mapping raised. This is the orphan factory bug.",
+        )
+
+
+class TestHubSpotSyncerMonthlyValue(unittest.TestCase):
+    """Regression: when a HubSpot deal lacks the monthly_contract_value custom
+    property, the syncer must divide deal.amount (annual) by 12 before storing
+    it in commercial_proposals.monthly_value. Previously the fallback stored
+    amount verbatim, so deals without monthly_contract_value surfaced in the
+    daily briefing at 12x their true annual value.
+    """
+
+    def setUp(self):
+        self.db = _make_pg_test_db()
+        from intelligence.syncers.sync_hubspot import HubSpotSyncer
+        self.syncer = HubSpotSyncer(_TEST_DB_URL)
+
+    def tearDown(self):
+        self.syncer.close()
+        self.db.close()
+
+    @staticmethod
+    def _deal(hs_id, properties):
+        from types import SimpleNamespace
+        return SimpleNamespace(id=hs_id, properties=properties)
+
+    def test_insert_divides_amount_by_twelve_when_monthly_absent(self):
+        self.syncer._upsert_deal(self._deal("80001", {
+            "dealname": "Annual amount only — 60000",
+            "amount": "60000",
+            "dealstage": "contractsent",
+        }))
+        row = self.db.execute(
+            """
+            SELECT cp.monthly_value
+            FROM commercial_proposals cp
+            JOIN cross_tool_mapping m ON m.canonical_id = cp.id
+            WHERE m.tool_name = 'hubspot' AND m.tool_specific_id = %s
+            """,
+            ("80001",),
+        ).fetchone()
+        self.assertIsNotNone(row, "Expected an inserted proposal for HubSpot deal 80001")
+        self.assertAlmostEqual(
+            float(row["monthly_value"]),
+            5000.0,
+            places=2,
+            msg="amount fallback must be divided by 12 (60000/12 = 5000)",
+        )
+
+    def test_insert_uses_monthly_contract_value_when_present(self):
+        # When monthly_contract_value is set, it is already per-month and
+        # must be used verbatim (no division).
+        self.syncer._upsert_deal(self._deal("80002", {
+            "dealname": "Has monthly breakdown",
+            "amount": "60000",
+            "monthly_contract_value": "5000",
+            "dealstage": "contractsent",
+        }))
+        row = self.db.execute(
+            """
+            SELECT cp.monthly_value
+            FROM commercial_proposals cp
+            JOIN cross_tool_mapping m ON m.canonical_id = cp.id
+            WHERE m.tool_name = 'hubspot' AND m.tool_specific_id = %s
+            """,
+            ("80002",),
+        ).fetchone()
+        self.assertAlmostEqual(
+            float(row["monthly_value"]),
+            5000.0,
+            places=2,
+            msg="monthly_contract_value must be used verbatim, not re-divided",
+        )
+
+    def test_update_divides_amount_by_twelve_when_monthly_absent(self):
+        with self.db:
+            self.db.execute(
+                """
+                INSERT INTO commercial_proposals
+                  (id, title, status, monthly_value)
+                VALUES (%s, %s, %s, %s)
+                """,
+                ("SS-PROP-TEST-7777", "Existing HS Deal", "sent", 1000.0),
+            )
+            self.db.execute(
+                """
+                INSERT INTO cross_tool_mapping
+                    (canonical_id, entity_type, tool_name, tool_specific_id)
+                VALUES (%s, %s, %s, %s)
+                """,
+                ("SS-PROP-TEST-7777", "PROP", "hubspot", "80003"),
+            )
+
+        self.syncer._upsert_deal(self._deal("80003", {
+            "dealname": "Existing HS Deal",
+            "amount": "120000",     # annual
+            "dealstage": "decisionmakerboughtin",
+        }))
+        row = self.db.execute(
+            "SELECT monthly_value FROM commercial_proposals WHERE id = %s",
+            ("SS-PROP-TEST-7777",),
+        ).fetchone()
+        self.assertAlmostEqual(
+            float(row["monthly_value"]),
+            10000.0,
+            places=2,
+            msg="UPDATE path must also divide amount by 12 (120000/12 = 10000)",
+        )
+
+
 class TestFinancialHealthMetrics(unittest.TestCase):
     """test_financial_health_compute"""
 

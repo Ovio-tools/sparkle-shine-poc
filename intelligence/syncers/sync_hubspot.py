@@ -327,8 +327,18 @@ class HubSpotSyncer(BaseSyncer):
         props = deal.properties or {}
 
         title = props.get("dealname") or "Untitled Deal"
+        # HubSpot's deal.amount is the annual contract value (matches the seeder
+        # convention: monthly_value * 12). The monthly_contract_value custom
+        # property, when present, is already per-month. When it's absent we
+        # must divide amount by 12 before storing — the metrics layer multiplies
+        # monthly_value * 12 when rendering, so storing the annual figure as
+        # monthly produces 12x-inflated pipeline values in the daily briefing.
         amount = float(props.get("amount") or 0)
-        monthly_value = float(props.get("monthly_contract_value") or amount)
+        monthly_contract = props.get("monthly_contract_value")
+        if monthly_contract:
+            monthly_value = float(monthly_contract)
+        else:
+            monthly_value = round(amount / 12, 2) if amount else 0.0
         stage = (props.get("dealstage") or "").lower()
         close_date = props.get("closedate", "")[:10] if props.get("closedate") else None
         status = _STAGE_STATUS_MAP.get(stage, "draft")
