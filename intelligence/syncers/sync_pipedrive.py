@@ -10,7 +10,11 @@ from datetime import datetime
 from typing import Optional
 
 from auth import get_client
-from database.mappings import get_canonical_id, register_mapping, generate_id
+from database.mappings import (
+    generate_id,
+    get_canonical_id,
+    register_mapping_on_conn,
+)
 from intelligence.syncers.base_syncer import BaseSyncer, SyncResult
 from seeding.utils.throttler import PIPEDRIVE
 
@@ -148,6 +152,13 @@ class PipedriveSyncer(BaseSyncer):
 
         if canonical_id is None:
             canonical_id = generate_id("PROP", self.db_path)
+            # Proposal INSERT and mapping registration must be atomic. If the
+            # mapping insert fails (e.g. collision guard in database/mappings.py),
+            # the enclosing `with` block rolls back the proposal row so we never
+            # leave a commercial_proposals row without a cross_tool_mapping entry.
+            # Prior to this, a failed register_mapping left an orphan row; next
+            # sync saw no mapping, allocated a new canonical_id, and created
+            # another orphan — producing multiple ghost copies per Pipedrive deal.
             with self.db:
                 self.db.execute(
                     """
@@ -158,7 +169,7 @@ class PipedriveSyncer(BaseSyncer):
                     """,
                     (canonical_id, title, monthly_value, status, decision_date, lost_reason),
                 )
-            register_mapping(canonical_id, "pipedrive", pd_id, db_path=self.db_path)
+                register_mapping_on_conn(self.db, canonical_id, "pipedrive", pd_id)
         else:
             with self.db:
                 self.db.execute(
