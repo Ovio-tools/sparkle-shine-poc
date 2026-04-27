@@ -6,6 +6,25 @@ This doc consolidates the rules, patterns, and conventions that apply across the
 
 ---
 
+## Troubleshooting Source Of Truth
+
+When diagnosing a bug, auth issue, missing record, data mismatch, or cross-tool sync problem:
+
+- Treat Railway as the default source of truth for PostgreSQL data, environment variables, token state, and live tool behavior.
+- Check Railway logs, Railway runtime, and Railway Postgres before trusting local DB contents or local token files.
+- Use local SQLite or local Postgres only for local-dev reproduction, tests, seeding, or tasks that are explicitly about local state.
+- If local state and Railway disagree, treat the local environment as drift until Railway proves otherwise.
+
+Preferred diagnostic order:
+
+1. `railway status`
+2. `railway service status --all`
+3. `railway logs --service <name> --environment production`
+4. `railway ssh --service <name> --environment production` for runtime verification
+5. `railway connect Postgres` for DB verification
+
+---
+
 ## Simulation Data Integrity Rule (L5)
 
 In the simulation engine, there is no regeneration step. Data is created once, live, in real time. If a generator produces incorrect data:
