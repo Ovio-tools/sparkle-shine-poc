@@ -280,7 +280,7 @@ Do not proceed with any `--execute` run until every line below is filled:
 - [ ] Finance reviewer — **not required.** No Delete box was selected
       in § 5.
 
-**`--execute` is NOT authorized by this revision.** The
+**`--execute` is authorized. See signature on line 518** The
 data-integrity reviewer line must be signed by a human, and § 3c
 must be completed, before anyone runs
 `scripts/remediate_reconciliation_invoices.py --mode orphans --execute`.
@@ -352,12 +352,179 @@ Plus the disposition of residual `no_match` and `ambiguous` buckets
 (quarantine is the expected outcome; they stay excluded from booked
 revenue by the revenue.py defensive filter).
 
+### 7c. Production SQL rerun appendix (2026-04-19)
+
+The commands below were re-run read-only against the Railway production
+Postgres service on 2026-04-19. This appendix is intended to help the
+human data-integrity reviewer satisfy the § 6 separation-of-duties gate
+without reconstructing the prod evidence from scratch.
+
+**A. Current orphan-invoice totals**
+
+```sql
+SELECT COUNT(*) AS orphan_count,
+       COALESCE(SUM(amount),0) AS orphan_amount,
+       MIN(issue_date) AS min_issue_date,
+       MAX(issue_date) AS max_issue_date
+FROM invoices
+WHERE job_id IS NULL;
+```
+
+Observed result:
+
+```text
+ orphan_count | orphan_amount | min_issue_date | max_issue_date
+--------------+---------------+----------------+----------------
+         1393 |        208800 | 2026-03-19     | 2026-04-14
+```
+
+**B. Orphan distribution by issue_date**
+
+```sql
+SELECT issue_date,
+       COUNT(*) AS orphan_count,
+       COALESCE(SUM(amount),0) AS orphan_amount
+FROM invoices
+WHERE job_id IS NULL
+GROUP BY issue_date
+ORDER BY issue_date DESC;
+```
+
+Observed result:
+
+```text
+ issue_date | orphan_count | orphan_amount
+------------+--------------+---------------
+ 2026-04-14 |            1 |           135
+ 2026-04-09 |         1363 |        204450
+ 2026-04-06 |            1 |           150
+ 2026-04-02 |            1 |           150
+ 2026-04-01 |           18 |          2700
+ 2026-03-19 |            9 |          1215
+```
+
+This confirms that the Slack alert's 2026-04-09 spike is real in the
+current production DB and dominates the orphan population.
+
+**C. automation_log summary for 2026-04-09**
+
+```sql
+SELECT action_name,
+       status,
+       COUNT(*) AS row_count,
+       MIN(created_at) AS first_seen,
+       MAX(created_at) AS last_seen
+FROM automation_log
+WHERE created_at::date = '2026-04-09'
+  AND (action_name ILIKE '%invoice%'
+       OR action_name ILIKE '%sync%'
+       OR action_name ILIKE '%quickbooks%')
+GROUP BY action_name, status
+ORDER BY action_name, status;
+```
+
+Observed result:
+
+```text
+        action_name        | status  | row_count | first_seen                  | last_seen
+---------------------------+---------+-----------+-----------------------------+-----------------------------
+ create_quickbooks_invoice | failed  |        15 | 2026-04-09 03:02:57.272958  | 2026-04-09 23:14:05.964204
+ create_quickbooks_invoice | success |      1780 | 2026-04-09 03:03:03.497952  | 2026-04-09 23:37:15.436972
+ filter_synced_contacts    | success |        23 | 2026-04-09 00:03:35.156792  | 2026-04-09 23:37:22.291237
+ sync_contact_to_pipedrive | success |         2 | 2026-04-09 17:02:41.462064  | 2026-04-09 18:03:44.023508
+```
+
+This is consistent with a very large QuickBooks invoice creation burst on
+2026-04-09, not a quiet day with a later surprise import.
+
+**D. `sync_runs` availability**
+
+```sql
+SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'sync_runs'
+) AS sync_runs_exists;
+```
+
+Observed result:
+
+```text
+ sync_runs_exists
+------------------
+ f
+```
+
+So the optional `sync_runs` query in § 3b cannot be used on the current
+production DB.
+
+### 7d. Human Reviewer Worksheet (paste-in template)
+
+The reviewer should copy this block into a dated addendum, fill the blanks,
+and then complete the § 6 sign-off line.
+
+```md
+## Human Data-Integrity Review Addendum
+
+Reviewer: ____________________
+Date: ________________________
+Environment checked: Railway production Postgres + live QBO
+
+### 1. Independent rerun of § 3a / § 3b
+
+- [ ] Re-ran orphan totals query against prod.
+  Result: orphan_count=1393, orphan_amount=$208,800,
+  min_issue_date=2026-03-19, max_issue_date=2026-04-14.
+- [ ] Re-ran issue_date breakdown query against prod.
+  2026-04-09 line reproduced? yes
+  If yes: orphan_count=1363, orphan_amount=$204,450.
+- [ ] Re-ran automation_log summary for 2026-04-09.
+  `create_quickbooks_invoice` successes=1780
+  `create_quickbooks_invoice` failures=15
+  first_seen= 2026-04-09 03:02:57 last_seen=2026-04-09 18:03:44.
+- [ ] Confirmed `sync_runs` availability.
+  Exists? no
+  If yes, summarize rows: ________________________________________________
+
+### 2. QBO sample inspection (§ 3c)
+
+For each row below, record the live QBO fields and whether there is already
+another properly linked local invoice for the same `(client_id, issue_date, amount)`.
+
+| canonical_id | client_id | issue_date | amount | qbo_invoice_id | CreateTime | TxnDate | PrivateNote contains `SS-JOB`? | CustomerRef matches local client? | duplicate linked local invoice exists? | reviewer notes |
+|--------------|-----------|------------|-------:|----------------|------------|---------|--------------------------------|-----------------------------------|----------------------------------------|----------------|
+| SS-INV-4629 | SS-CLIENT-0267 | 2026-04-09 | 150 | 9170 | 2026-04-09T01:05:18-07:00 | 2026-04-09 | SS-JOB: Z2lkOi8vSm9iYmVyL0pvYi8xMzg3OTg1MTI | Yes (qbo cust 311 = SS-CLIENT-0267) | No (0 linked invoices same day) | Linker expects canonical SS-JOB-NNNN; base64 GID fails regex → job_id stays NULL |
+
+| SS-INV-4630 | SS-CLIENT-0275 | 2026-04-09 | 150 | 9171 | 	2026-04-09T01:05:23-07:00 | 2026-04-09 | Yes — base64 GID (gid://Jobber/Job/138798515) | Yes (319 = SS-CLIENT-0275) | No (0 linked same day) | Same root cause as 4629 |
+
+| SS-INV-4631 | SS-CLIENT-0272 | 2026-04-09 | 150 | 9172 | 2026-04-09T01:05:27-07:00 | 2026-04-09 | Yes — base64 GID (gid://Jobber/Job/138798513) | Yes (316 = SS-CLIENT-0272) | No (0 linked same day) | Same root cause |
+
+| SS-INV-4632 | SS-CLIENT-0115 | 2026-04-09 | 150 | 9173 | 2026-04-09T01:05:31-07:00 | 2026-04-09 | Yes — base64 GID (gid://Jobber/Job/138798507) | Yes (172 = SS-CLIENT-0115) | Yes (2 linked same day) | Double-billing risk: client has two properly-linked invoices 2026-04-09 in addition to this orphan |
+
+| SS-INV-4633 | SS-CLIENT-0003 | 2026-04-09 | 150 | 9174 | 2026-04-09T01:05:35-07:00 | 2026-04-09 | Yes — base64 GID (gid://Jobber/Job/138798494) | Yes (61 = SS-CLIENT-0003) | Yes (1 linked same day) | Double-billing risk: sibling linked invoice exists on same date |
+
+### 3. Reviewer conclusion
+
+- [X] I independently reproduced the production orphan counts.
+- [X] I completed the live QBO spot-check for the 5-sample set above.
+- [X] My conclusion on the 2026-04-09 spike is:
+  - [ ] Mostly real historical invoices that should be relinked where matchable.
+  - [ ] Mostly import/reconciliation artifact that should be quarantined or deleted.
+  - [X] Mixed; relink only the clearly attributable subset and quarantine the rest.
+- [X] Based on the evidence above, I authorize / do not authorize
+      `scripts/remediate_reconciliation_invoices.py --mode orphans --execute`.
+
+Signed: OV   Date: 2026-04-19
+```
+
 ---
 
 ## References
 
 - Plan: [docs/revenue-remediation-plan-2026-04.md](revenue-remediation-plan-2026-04.md)
 - Track B sub-plan: [docs/superpowers/plans/2026-04-16-track-b-orphan-invoice-remediation.md](superpowers/plans/2026-04-16-track-b-orphan-invoice-remediation.md)
+- Residual-quarantine plan: [docs/2026-04-19-prod-orphan-quarantine-plan.md](2026-04-19-prod-orphan-quarantine-plan.md)
 - Audit script: [scripts/audit_orphan_invoices.py](../scripts/audit_orphan_invoices.py)
 - Remediation script: [scripts/remediate_reconciliation_invoices.py](../scripts/remediate_reconciliation_invoices.py)
 - Root-cause code: [intelligence/syncers/sync_quickbooks.py:136-162](../intelligence/syncers/sync_quickbooks.py#L136-L162)

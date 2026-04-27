@@ -110,6 +110,61 @@ def test_orphan_invoice_alert_severity_crosses_critical_threshold(pg_test_conn):
     assert "critical" in matching[0].lower()
 
 
+def _seed_quarantine(conn, invoice_id, client_id, issue_date, amount,
+                     lane="auto_quarantine", reason="NO_NEARBY_COMPLETED_JOB_3D",
+                     released=False):
+    with conn:
+        conn.execute(
+            "INSERT INTO invoice_quarantine "
+            "(invoice_id, client_id, issue_date, amount, quarantine_lane, "
+            "reason_code, source, snapshot_date, reviewed_by, released_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 'test', %s, 'test', %s)",
+            (invoice_id, client_id, issue_date, amount, lane, reason,
+             issue_date, datetime.now(timezone.utc) if released else None),
+        )
+
+
+def test_quarantined_orphans_excluded_from_alert(pg_test_conn):
+    """Unreleased quarantine rows must drop out of the orphan count and the
+    alert text must expose the quarantined total so operators can reconcile
+    the two buckets."""
+    _seed_client(pg_test_conn)
+    # One unaddressed orphan (will drive the alert).
+    _seed_invoice(pg_test_conn, "SS-INV-9501", "SS-CLIENT-9101",
+                  None, 150.0, "2026-04-09")
+    # Two orphans that operators quarantined. These must NOT count.
+    _seed_invoice(pg_test_conn, "SS-INV-9502", "SS-CLIENT-9101",
+                  None, 200.0, "2026-04-09")
+    _seed_invoice(pg_test_conn, "SS-INV-9503", "SS-CLIENT-9101",
+                  None, 300.0, "2026-04-09")
+    _seed_quarantine(pg_test_conn, "SS-INV-9502", "SS-CLIENT-9101",
+                     "2026-04-09", 200.0)
+    _seed_quarantine(pg_test_conn, "SS-INV-9503", "SS-CLIENT-9101",
+                     "2026-04-09", 300.0)
+
+    result = integrity.compute(pg_test_conn, "2026-04-17")
+    assert result["orphan_invoices"]["count"] == 1
+    assert result["orphan_invoices"]["amount"] == pytest.approx(150.0)
+    assert result["orphan_invoices"]["quarantined_count"] == 2
+    assert result["orphan_invoices"]["quarantined_amount"] == pytest.approx(500.0)
+    orphan_alert = next(a for a in result["alerts"] if "job_id IS NULL" in a)
+    assert "excludes 2 quarantined" in orphan_alert
+
+
+def test_released_quarantine_rows_return_to_orphan_count(pg_test_conn):
+    """A quarantine row with released_at set means the operator reversed the
+    hold, so the invoice should flow back into the orphan count."""
+    _seed_client(pg_test_conn)
+    _seed_invoice(pg_test_conn, "SS-INV-9601", "SS-CLIENT-9101",
+                  None, 175.0, "2026-04-09")
+    _seed_quarantine(pg_test_conn, "SS-INV-9601", "SS-CLIENT-9101",
+                     "2026-04-09", 175.0, released=True)
+
+    result = integrity.compute(pg_test_conn, "2026-04-17")
+    assert result["orphan_invoices"]["count"] == 1
+    assert result["orphan_invoices"]["quarantined_count"] == 0
+
+
 def test_integrity_keys_expose_sample_for_operator(pg_test_conn):
     """The sample arrays are consumed by operators running the
     audit script — they must exist (even if empty) so downstream code
