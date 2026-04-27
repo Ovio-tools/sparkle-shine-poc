@@ -85,6 +85,9 @@ def main() -> None:
         f"JOBBER_REFRESH_TOKEN={jobber_tokens.get('refresh_token', '')}",
         f"JOBBER_API_VERSION={env.get('JOBBER_API_VERSION', '2026-03-10')}",
         f"JOBBER_BASE_URL={env.get('JOBBER_BASE_URL', 'https://api.getjobber.com/api/graphql')}",
+        # Set to 1 on every service EXCEPT token-keeper itself. Forces read-only
+        # token mode so consumers don't race against token-keeper.
+        f"JOBBER_TOKEN_KEEPER_ENABLED={env.get('JOBBER_TOKEN_KEEPER_ENABLED', '1')}",
         "",
         "# ─── QuickBooks Online (OAuth 2.0) ───────────────────────────────────────────",
         f"QUICKBOOKS_CLIENT_ID={env.get('QUICKBOOKS_CLIENT_ID', '')}",

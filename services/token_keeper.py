@@ -17,6 +17,7 @@ Railway config:
   - Type: Worker (always-on)
   - Start command: python -m services.token_keeper
 """
+from __future__ import annotations
 
 import json
 import logging
@@ -47,11 +48,49 @@ REFRESH_INTERVAL_SECONDS = 45 * 60
 # If the token expires in < 5 min and we haven't refreshed yet, force it.
 EXPIRY_BUFFER_SECONDS = 300  # 5 minutes
 
-# Max consecutive failures before alerting as critical.
-MAX_CONSECUTIVE_FAILURES = 3
-
 # Sleep between health-check ticks (how often we check if a refresh is needed).
 TICK_INTERVAL_SECONDS = 60  # 1 minute
+
+# Failure-count staircase for Slack alerts. At the 60s tick interval these
+# correspond roughly to ~3 min, ~15 min, ~1 h, ~4 h, and ~24 h of sustained
+# failure. We alert exactly once at each step instead of on every tick, so a
+# multi-hour Jobber outage produces ~5 messages in #automation-failure rather
+# than dozens.
+_ALERT_AT_FAILURE_COUNTS: frozenset[int] = frozenset({3, 15, 60, 240, 1440})
+
+# Body length captured in error messages and logs. Long enough to read a
+# maintenance page or an OAuth error JSON, short enough not to flood Slack.
+_BODY_EXCERPT_CHARS = 300
+
+
+# ------------------------------------------------------------------ #
+# Errors
+# ------------------------------------------------------------------ #
+
+
+class JobberRefreshFailure(RuntimeError):
+    """Refresh failed. Carries enough context to triage from Slack/logs alone.
+
+    `transient=True` means "Jobber's side, retry naturally" — 2xx with non-JSON
+    body (maintenance / CDN error page), 5xx server errors, or network errors.
+    `transient=False` means "the refresh-token chain is likely broken" — 4xx
+    auth/grant errors. Operators should re-authenticate only for the latter.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        transient: bool,
+        status: int | None = None,
+        content_type: str | None = None,
+        body_excerpt: str = "",
+    ):
+        super().__init__(message)
+        self.transient = transient
+        self.status = status
+        self.content_type = content_type
+        self.body_excerpt = body_excerpt
 
 
 # ------------------------------------------------------------------ #
@@ -106,32 +145,95 @@ def _save_jobber_tokens(token_data: dict) -> None:
 # ------------------------------------------------------------------ #
 
 def _refresh_token(refresh_token: str) -> dict:
-    """Exchange a refresh token for a new access + refresh token pair."""
-    from credentials import get_credential
+    """Exchange a refresh token for a new access + refresh token pair.
 
+    Captures HTTP status, Content-Type, and a body excerpt before parsing JSON,
+    so any failure surfaces enough context in Slack/logs to triage without
+    rerunning the call. Raises JobberRefreshFailure with classification.
+    """
     client_id = os.getenv("JOBBER_CLIENT_ID")
     client_secret = os.getenv("JOBBER_CLIENT_SECRET")
 
     if not client_id or not client_secret:
-        raise RuntimeError(
+        raise JobberRefreshFailure(
             "JOBBER_CLIENT_ID / JOBBER_CLIENT_SECRET not set. "
-            "Cannot refresh Jobber token."
+            "Cannot refresh Jobber token.",
+            transient=False,
         )
 
-    resp = requests.post(
-        _TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-        timeout=15,
+    try:
+        resp = requests.post(
+            _TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=15,
+        )
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise JobberRefreshFailure(
+            f"Network error contacting Jobber OAuth endpoint: {exc}",
+            transient=True,
+        ) from exc
+
+    status = resp.status_code
+    content_type = resp.headers.get("Content-Type", "")
+    body = resp.text or ""
+    body_excerpt = body[:_BODY_EXCERPT_CHARS]
+
+    logger.info(
+        "[token_keeper] Jobber refresh response: HTTP %d, Content-Type=%r, body_len=%d",
+        status, content_type, len(body),
     )
-    resp.raise_for_status()
-    data = resp.json()
-    data["expires_at"] = time.time() + data.get("expires_in", 3600)
-    return data
+
+    if 200 <= status < 300:
+        if "json" not in content_type.lower() or not body.strip():
+            # Most common during Jobber maintenance windows: a load balancer
+            # returns 200 with an HTML error page or empty body.
+            raise JobberRefreshFailure(
+                f"Jobber refresh returned HTTP {status} with non-JSON body "
+                f"(Content-Type={content_type!r}, body={body_excerpt!r}). "
+                "Most likely Jobber API is in scheduled maintenance — "
+                "check https://www.jobberstatus.net/.",
+                transient=True,
+                status=status,
+                content_type=content_type,
+                body_excerpt=body_excerpt,
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise JobberRefreshFailure(
+                f"Jobber refresh returned HTTP {status} but JSON decode failed: {exc}. "
+                f"Content-Type={content_type!r}, body={body_excerpt!r}",
+                transient=True,
+                status=status,
+                content_type=content_type,
+                body_excerpt=body_excerpt,
+            ) from exc
+        data["expires_at"] = time.time() + data.get("expires_in", 3600)
+        return data
+
+    if 500 <= status < 600:
+        raise JobberRefreshFailure(
+            f"Jobber refresh returned HTTP {status} (server error): {body_excerpt}",
+            transient=True,
+            status=status,
+            content_type=content_type,
+            body_excerpt=body_excerpt,
+        )
+
+    # 4xx: refresh token rejected, app deauthorized, or bad client credentials.
+    # The chain is broken on Jobber's side; retrying without re-auth is futile.
+    raise JobberRefreshFailure(
+        f"Jobber refresh returned HTTP {status}: {body_excerpt}",
+        transient=False,
+        status=status,
+        content_type=content_type,
+        body_excerpt=body_excerpt,
+    )
 
 
 def _needs_refresh(tokens: dict) -> bool:
@@ -178,60 +280,73 @@ class TokenKeeper:
                 "[token_keeper] No refresh token in DB. "
                 "Run `python -m auth.jobber_auth` to bootstrap."
             )
-            _alert_slack(
-                "No Jobber refresh token in DB. "
-                "Run `python -m auth.jobber_auth` to re-authenticate."
-            )
+            if self._consecutive_failures + 1 in _ALERT_AT_FAILURE_COUNTS:
+                _alert_slack(
+                    "No Jobber refresh token in DB. "
+                    "Run `python -m auth.jobber_auth` to re-authenticate.",
+                    severity="critical",
+                )
+            self._consecutive_failures += 1
             return False
 
         try:
             new_tokens = _refresh_token(tokens["refresh_token"])
-            _save_jobber_tokens(new_tokens)
-            self._consecutive_failures = 0
-            self._last_refresh_time = time.time()
-
-            expires_in = new_tokens.get("expires_in", 3600)
-            logger.info(
-                "[token_keeper] Refreshed Jobber token successfully. "
-                "New token expires in %d seconds.",
-                expires_in,
-            )
-            return True
-
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
-            body = exc.response.text[:300] if exc.response is not None else str(exc)
-            msg = f"Jobber token refresh failed: HTTP {status} \u2014 {body}"
-            logger.error("[token_keeper] %s", msg)
-            self._consecutive_failures += 1
-
-            if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                _alert_slack(
-                    f"CRITICAL: Jobber token refresh has failed "
-                    f"{self._consecutive_failures} times in a row. "
-                    f"Last error: HTTP {status}. "
-                    f"The token chain is likely broken. "
-                    f"Run `python -m auth.jobber_auth` to re-authenticate.",
-                    severity="critical",
-                )
-            else:
-                _alert_slack(msg)
-            return False
-
         except Exception as exc:
-            msg = f"Jobber token refresh failed: {exc}"
-            logger.error("[token_keeper] %s", msg)
+            logger.error("[token_keeper] Jobber token refresh failed: %s", exc)
             self._consecutive_failures += 1
-
-            if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                _alert_slack(
-                    f"CRITICAL: Jobber token refresh has failed "
-                    f"{self._consecutive_failures} times in a row. "
-                    f"Last error: {exc}. "
-                    f"Run `python -m auth.jobber_auth` to re-authenticate.",
-                    severity="critical",
-                )
+            if self._consecutive_failures in _ALERT_AT_FAILURE_COUNTS:
+                self._post_failure_alert(exc)
             return False
+
+        _save_jobber_tokens(new_tokens)
+        prior_failures = self._consecutive_failures
+        self._consecutive_failures = 0
+        self._last_refresh_time = time.time()
+
+        expires_in = new_tokens.get("expires_in", 3600)
+        logger.info(
+            "[token_keeper] Refreshed Jobber token successfully. "
+            "New token expires in %d seconds.",
+            expires_in,
+        )
+
+        # Only post a recovery message if we'd previously alerted on this
+        # streak. Below the staircase floor, recovery is silent so brief
+        # blips don't generate noise.
+        if prior_failures >= min(_ALERT_AT_FAILURE_COUNTS):
+            _alert_slack(
+                f"Jobber token refresh recovered after {prior_failures} consecutive failures. "
+                "The token chain is healthy again.",
+                severity="info",
+            )
+        return True
+
+    def _post_failure_alert(self, exc: Exception) -> None:
+        """Post a Slack alert with severity / wording derived from the failure type."""
+        transient = isinstance(exc, JobberRefreshFailure) and exc.transient
+        if transient:
+            label = "WARNING"
+            severity = "warning"
+            kind = (
+                "Jobber API may be in maintenance or returning a non-JSON error page"
+            )
+            action = (
+                "Token-keeper will keep retrying. "
+                "Check Jobber's status page at https://www.jobberstatus.net/ before re-authenticating"
+            )
+        else:
+            label = "CRITICAL"
+            severity = "critical"
+            kind = "Token chain likely broken (refresh token rejected by Jobber)"
+            action = (
+                "Run `python -m auth.jobber_auth` to re-authenticate "
+                "after confirming Jobber is operational"
+            )
+        _alert_slack(
+            f"{label}: Jobber token refresh has failed {self._consecutive_failures} "
+            f"times in a row. {kind}. Last error: {exc}. {action}.",
+            severity=severity,
+        )
 
     def _should_refresh_now(self, tokens: dict) -> bool:
         """Determine if we should refresh right now."""
