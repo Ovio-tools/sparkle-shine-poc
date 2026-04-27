@@ -21,12 +21,28 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+from database.connection import table_exists
+
 
 # Anything over this many "still missing an invoice" is treated as critical.
 # The automation runner should keep this at 0; a handful may appear while
 # jobs complete late in the day and the 5-min sync cycle catches up.
 _STALE_JOB_CRITICAL_THRESHOLD = 5
 _ORPHAN_INVOICE_CRITICAL_THRESHOLD = 50
+
+# SQL fragment excluding invoices that were intentionally quarantined by
+# scripts/quarantine_residual_orphan_invoices.py. A quarantined row is an
+# operator-classified orphan that we have deliberately decided not to
+# relink — it should not drive the alert. Released rows (released_at IS
+# NOT NULL) flow back into the count so a mistaken quarantine resurfaces.
+_QUARANTINE_EXCLUSION = """
+    AND NOT EXISTS (
+        SELECT 1
+        FROM invoice_quarantine q
+        WHERE q.invoice_id = invoices.id
+          AND q.released_at IS NULL
+    )
+"""
 
 
 def compute(db, briefing_date: str) -> dict:
@@ -49,13 +65,21 @@ def compute(db, briefing_date: str) -> dict:
                            - timedelta(hours=24))
 
     # ────────────────────────────────────────────────────────────────
-    # 1. Orphan invoices — job_id IS NULL
+    # 1. Orphan invoices — job_id IS NULL, minus operator-classified
+    #    quarantine rows so the alert reflects only the unaddressed
+    #    bucket. The quarantine table is created by
+    #    scripts/quarantine_residual_orphan_invoices.py, so environments
+    #    that haven't run it (local dev, fresh test DBs) simply fall
+    #    back to the legacy count.
     # ────────────────────────────────────────────────────────────────
+    quarantine_filter = _QUARANTINE_EXCLUSION if table_exists(db, "invoice_quarantine") else ""
+
     orphan_row = db.execute(
-        """
+        f"""
         SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0.0) AS total
         FROM invoices
         WHERE job_id IS NULL
+          {quarantine_filter}
         """
     ).fetchone()
     orphan_count = orphan_row["cnt"] or 0
@@ -63,15 +87,31 @@ def compute(db, briefing_date: str) -> dict:
 
     orphan_sample = [
         dict(r) for r in db.execute(
-            """
+            f"""
             SELECT id, client_id, amount, issue_date
             FROM invoices
             WHERE job_id IS NULL
+              {quarantine_filter}
             ORDER BY issue_date DESC, id DESC
             LIMIT 5
             """
         ).fetchall()
     ]
+
+    quarantined_count = 0
+    quarantined_amount = 0.0
+    if quarantine_filter:
+        quarantined_row = db.execute(
+            """
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(i.amount), 0.0) AS total
+            FROM invoice_quarantine q
+            JOIN invoices i ON i.id = q.invoice_id
+            WHERE q.released_at IS NULL
+              AND i.job_id IS NULL
+            """
+        ).fetchone()
+        quarantined_count = quarantined_row["cnt"] or 0
+        quarantined_amount = float(quarantined_row["total"] or 0.0)
 
     # ────────────────────────────────────────────────────────────────
     # 2. Payments whose invoice_id no longer exists in invoices.
@@ -171,10 +211,17 @@ def compute(db, briefing_date: str) -> dict:
 
     if orphan_count > 0:
         severity = "critical" if orphan_count >= _ORPHAN_INVOICE_CRITICAL_THRESHOLD else "warning"
+        quarantine_note = (
+            f" (excludes {quarantined_count} quarantined, "
+            f"${quarantined_amount:,.0f})"
+            if quarantined_count > 0
+            else ""
+        )
         alerts.append(
-            f"{orphan_count} invoice(s) totalling ${orphan_amount:,.0f} are not "
-            f"linked to any job (job_id IS NULL) — these are excluded from "
-            f"booked revenue and need Track B remediation [{severity}]"
+            f"{orphan_count} unaddressed invoice(s) totalling ${orphan_amount:,.0f} "
+            f"are not linked to any job (job_id IS NULL) — these are excluded "
+            f"from booked revenue and need Track B remediation"
+            f"{quarantine_note} [{severity}]"
         )
 
     if dangling_count > 0:
@@ -189,6 +236,8 @@ def compute(db, briefing_date: str) -> dict:
             "count": orphan_count,
             "amount": round(orphan_amount, 2),
             "sample": orphan_sample,
+            "quarantined_count": quarantined_count,
+            "quarantined_amount": round(quarantined_amount, 2),
         },
         "payments_missing_invoice_link": {
             "count": dangling_count,
