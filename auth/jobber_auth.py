@@ -58,7 +58,22 @@ def _save_tokens(data: dict) -> None:
 # ------------------------------------------------------------------ #
 
 def _refresh_token(refresh_token: str) -> dict:
-    """Exchange a refresh token for a new access token. Returns updated token dict."""
+    """Exchange a refresh token for a new access token. Returns updated token dict.
+
+    Refuses to run when JOBBER_TOKEN_KEEPER_ENABLED=1. In that mode the
+    services/token_keeper.py worker is the sole owner of the rotating refresh
+    token; any other call here would race against it and break the chain on
+    Jobber's side. The guard catches accidental imports from preflight scripts,
+    one-off remediation scripts, or future code that doesn't know the contract.
+    """
+    if _is_token_keeper_mode():
+        raise RuntimeError(
+            "auth.jobber_auth._refresh_token called while JOBBER_TOKEN_KEEPER_ENABLED=1. "
+            "Refresh is owned by services/token_keeper.py — calling it here would break "
+            "the rotating refresh-token chain. If you need a one-off bootstrap, unset "
+            "the env var temporarily."
+        )
+
     client_id = get_credential("JOBBER_CLIENT_ID") if os.getenv("JOBBER_CLIENT_ID") else None
     client_secret = get_credential("JOBBER_CLIENT_SECRET") if os.getenv("JOBBER_CLIENT_SECRET") else None
 

@@ -141,7 +141,22 @@ def check_jobber_token() -> TokenCheck:
 
 
 def _jobber_try_refresh(tokens: dict) -> TokenCheck:
-    """Attempt a Jobber token refresh. Returns a TokenCheck reflecting the result."""
+    """Attempt a Jobber token refresh. Returns a TokenCheck reflecting the result.
+
+    When JOBBER_TOKEN_KEEPER_ENABLED=1, the preflight is read-only: refreshing
+    here would race against the dedicated token-keeper worker and break the
+    rotating refresh-token chain. We report "expired" so the intelligence
+    runner skips this cycle's Jobber syncer; token-keeper will refresh within
+    its next ~60s tick.
+    """
+    if os.getenv("JOBBER_TOKEN_KEEPER_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+        return TokenCheck(
+            "Jobber", "expired",
+            "Access token expired or about to. Skipping refresh — "
+            "token-keeper service is the sole owner.",
+            action="Wait for the next token-keeper tick (~60s); no manual action needed",
+        )
+
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
         return TokenCheck(

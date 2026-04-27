@@ -58,5 +58,28 @@ class TestGetJobberTokenFallback(unittest.TestCase):
                 self.assertEqual(token, "at_fallback")
 
 
+class TestRefreshTokenKeeperModeGuard(unittest.TestCase):
+    """_refresh_token must refuse to run when token-keeper owns the chain."""
+
+    def test_refuses_to_run_when_keeper_mode_enabled(self):
+        """JOBBER_TOKEN_KEEPER_ENABLED=1 -> refresh raises before any HTTP call."""
+        with patch.dict(os.environ, {"JOBBER_TOKEN_KEEPER_ENABLED": "1"}, clear=True):
+            with patch("requests.post") as mock_post:
+                with self.assertRaises(RuntimeError) as ctx:
+                    jobber_auth._refresh_token("rt_anything")
+                mock_post.assert_not_called()
+        self.assertIn("token_keeper", str(ctx.exception).lower())
+
+    def test_refuses_with_truthy_aliases(self):
+        """Accepts the same truthy values as _is_token_keeper_mode (1/true/yes)."""
+        for val in ("1", "true", "TRUE", "yes"):
+            with self.subTest(value=val):
+                with patch.dict(os.environ, {"JOBBER_TOKEN_KEEPER_ENABLED": val}, clear=True):
+                    with patch("requests.post") as mock_post:
+                        with self.assertRaises(RuntimeError):
+                            jobber_auth._refresh_token("rt_anything")
+                        mock_post.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
