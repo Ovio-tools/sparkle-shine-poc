@@ -256,7 +256,9 @@ class JobberSyncer(BaseSyncer):
 
     def _upsert_client(self, node: dict) -> None:
         jobber_id = node["id"]
-        canonical_id = get_canonical_id("jobber", jobber_id, db_path=self.db_path)
+        canonical_id = get_canonical_id(
+            "jobber", jobber_id, entity_type="CLIENT", db_path=self.db_path
+        )
 
         emails = node.get("emails") or []
         primary_email = next(
@@ -348,11 +350,19 @@ class JobberSyncer(BaseSyncer):
 
     def _upsert_job(self, node: dict) -> None:
         jobber_id = node["id"]
-        canonical_id = get_canonical_id("jobber", jobber_id, db_path=self.db_path)
+        canonical_id = get_canonical_id(
+            "jobber", jobber_id, entity_type="JOB", db_path=self.db_path
+        )
 
         client_jobber_id = (node.get("client") or {}).get("id")
+        # entity_type filter is critical: a Jobber client tool_specific_id can
+        # appear on multiple cross_tool_mapping rows (e.g. CLIENT and PROP).
+        # Without this filter we may pick up a SS-PROP-* row, then violate the
+        # jobs_client_id_fkey FK to clients(id) on insert.
         client_canonical = (
-            get_canonical_id("jobber", client_jobber_id, db_path=self.db_path)
+            get_canonical_id(
+                "jobber", client_jobber_id, entity_type="CLIENT", db_path=self.db_path
+            )
             if client_jobber_id else None
         )
         if client_canonical is None:
@@ -495,11 +505,15 @@ class JobberSyncer(BaseSyncer):
 
     def _upsert_recurring(self, node: dict) -> None:
         jobber_id = node["id"]
-        canonical_id = get_canonical_id("jobber", jobber_id, db_path=self.db_path)
+        canonical_id = get_canonical_id(
+            "jobber", jobber_id, entity_type="RECUR", db_path=self.db_path
+        )
 
         client_jobber_id = (node.get("client") or {}).get("id")
         client_canonical = (
-            get_canonical_id("jobber", client_jobber_id, db_path=self.db_path)
+            get_canonical_id(
+                "jobber", client_jobber_id, entity_type="CLIENT", db_path=self.db_path
+            )
             if client_jobber_id else None
         )
         if client_canonical is None:

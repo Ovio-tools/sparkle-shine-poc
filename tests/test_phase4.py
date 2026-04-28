@@ -579,6 +579,125 @@ class TestPipedriveSyncerMonthlyValue(unittest.TestCase):
         )
 
 
+class TestPipedriveSyncerProposalLinkage(unittest.TestCase):
+    """Regression: when minting a new SS-PROP, the syncer must populate
+    commercial_proposals.lead_id (or client_id) by resolving the deal's
+    Pipedrive person to its existing canonical mapping. Otherwise rows are
+    born orphaned and only get healed at win-time via new_client_onboarding.
+    """
+
+    def setUp(self):
+        self.db = _make_pg_test_db()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO leads (id, first_name, last_name, email, lead_type, source, status) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 'new') ON CONFLICT DO NOTHING",
+                ("SS-LEAD-0901", "Sarah", "Chen", "sarah@example.com", "commercial", "test"),
+            )
+            self.db.execute(
+                "INSERT INTO clients (id, client_type, first_name, last_name, email, status) "
+                "VALUES (%s, %s, %s, %s, %s, 'active') ON CONFLICT DO NOTHING",
+                ("SS-CLIENT-0902", "commercial", "Bob", "Builder", "bob@example.com"),
+            )
+            self.db.execute(
+                "INSERT INTO cross_tool_mapping (canonical_id, entity_type, tool_name, tool_specific_id) "
+                "VALUES (%s, 'LEAD', 'pipedrive_person', %s)",
+                ("SS-LEAD-0901", "70901"),
+            )
+            self.db.execute(
+                "INSERT INTO cross_tool_mapping (canonical_id, entity_type, tool_name, tool_specific_id) "
+                "VALUES (%s, 'CLIENT', 'pipedrive_person', %s)",
+                ("SS-CLIENT-0902", "70902"),
+            )
+        from intelligence.syncers.sync_pipedrive import PipedriveSyncer
+        self.syncer = PipedriveSyncer(_TEST_DB_URL)
+
+    def tearDown(self):
+        self.syncer.close()
+        self.db.close()
+
+    def _row_for_pd_id(self, pd_id: str):
+        return self.db.execute(
+            "SELECT cp.id, cp.lead_id, cp.client_id "
+            "FROM commercial_proposals cp "
+            "JOIN cross_tool_mapping m ON m.canonical_id = cp.id "
+            "WHERE m.tool_name = 'pipedrive' AND m.tool_specific_id = %s",
+            (pd_id,),
+        ).fetchone()
+
+    def test_links_lead_when_person_maps_to_ss_lead(self):
+        # Pipedrive returns person_id as a dict with a 'value' key
+        self.syncer._upsert_deal({
+            "id": 91001,
+            "title": "New commercial deal",
+            "value": 12000,
+            "stage_id": 8,  # Qualified
+            "status": "open",
+            "person_id": {"value": 70901, "name": "Sarah Chen"},
+        })
+        row = self._row_for_pd_id("91001")
+        self.assertIsNotNone(row, "proposal row must exist")
+        self.assertEqual(row["lead_id"], "SS-LEAD-0901")
+        self.assertIsNone(row["client_id"])
+
+    def test_links_client_when_person_maps_to_ss_client(self):
+        self.syncer._upsert_deal({
+            "id": 91002,
+            "title": "Existing client deal",
+            "value": 60000,
+            "stage_id": 11,  # Negotiation
+            "status": "open",
+            "person_id": {"value": 70902, "name": "Bob Builder"},
+        })
+        row = self._row_for_pd_id("91002")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["lead_id"])
+        self.assertEqual(row["client_id"], "SS-CLIENT-0902")
+
+    def test_no_linkage_when_person_unmapped(self):
+        """Orphan path: person has no canonical → both NULL (heals at win-time)."""
+        self.syncer._upsert_deal({
+            "id": 91003,
+            "title": "Orphan deal",
+            "value": 24000,
+            "stage_id": 9,
+            "status": "open",
+            "person_id": {"value": 79999, "name": "Unknown"},
+        })
+        row = self._row_for_pd_id("91003")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["lead_id"])
+        self.assertIsNone(row["client_id"])
+
+    def test_no_linkage_when_person_id_is_none(self):
+        self.syncer._upsert_deal({
+            "id": 91004,
+            "title": "Person-less deal",
+            "value": 12000,
+            "stage_id": 7,
+            "status": "open",
+            "person_id": None,
+        })
+        row = self._row_for_pd_id("91004")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["lead_id"])
+        self.assertIsNone(row["client_id"])
+
+    def test_handles_scalar_person_id(self):
+        """Some Pipedrive responses return person_id as a bare integer."""
+        self.syncer._upsert_deal({
+            "id": 91005,
+            "title": "Scalar person deal",
+            "value": 18000,
+            "stage_id": 8,
+            "status": "open",
+            "person_id": 70901,
+        })
+        row = self._row_for_pd_id("91005")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["lead_id"], "SS-LEAD-0901")
+
+
 class TestPipedriveSyncerAtomicity(unittest.TestCase):
     """Regression: the INSERT into commercial_proposals and the register_mapping
     call must be in the SAME transaction. Earlier code committed the proposal

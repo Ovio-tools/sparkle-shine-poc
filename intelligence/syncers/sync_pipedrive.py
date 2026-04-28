@@ -152,6 +152,11 @@ class PipedriveSyncer(BaseSyncer):
 
         if canonical_id is None:
             canonical_id = generate_id("PROP", self.db_path)
+            # Resolve the deal's Pipedrive person → canonical so we can link
+            # the new proposal to the existing lead/client row. Without this
+            # the row is born with NULL client_id/lead_id and only gets healed
+            # downstream at win-time via new_client_onboarding's orphan path.
+            lead_id, client_id = self._resolve_proposal_linkage(deal)
             # Proposal INSERT and mapping registration must be atomic. If the
             # mapping insert fails (e.g. collision guard in database/mappings.py),
             # the enclosing `with` block rolls back the proposal row so we never
@@ -163,11 +168,15 @@ class PipedriveSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     INSERT INTO commercial_proposals
-                        (id, title, monthly_value, status, decision_date, notes)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (id, title, monthly_value, status, decision_date, notes,
+                         lead_id, client_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
-                    (canonical_id, title, monthly_value, status, decision_date, lost_reason),
+                    (
+                        canonical_id, title, monthly_value, status, decision_date,
+                        lost_reason, lead_id, client_id,
+                    ),
                 )
                 register_mapping_on_conn(self.db, canonical_id, "pipedrive", pd_id)
         else:
@@ -183,6 +192,32 @@ class PipedriveSyncer(BaseSyncer):
                     """,
                     (status, monthly_value, decision_date, lost_reason, canonical_id),
                 )
+
+    def _resolve_proposal_linkage(self, deal: dict) -> tuple[Optional[str], Optional[str]]:
+        """Return (lead_id, client_id) for a new commercial_proposals row.
+
+        Looks up the deal's Pipedrive person → existing canonical mapping.
+        SS-LEAD-* → lead_id; SS-CLIENT-* → client_id; otherwise both NULL
+        (the orphan case that new_client_onboarding heals at win-time).
+        """
+        person_field = deal.get("person_id")
+        if isinstance(person_field, dict):
+            person_pd_id = person_field.get("value")
+        else:
+            person_pd_id = person_field
+        if person_pd_id is None:
+            return None, None
+
+        canonical = get_canonical_id(
+            "pipedrive_person", str(person_pd_id), db_path=self.db_path
+        )
+        if canonical is None:
+            return None, None
+        if canonical.startswith("SS-LEAD-"):
+            return canonical, None
+        if canonical.startswith("SS-CLIENT-"):
+            return None, canonical
+        return None, None
 
     # ------------------------------------------------------------------ #
     # Activities (open + recent completed) -- used for stale-deal detection

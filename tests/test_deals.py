@@ -338,14 +338,18 @@ class TestAdvanceDeal(_DealSqliteCompatCase):
         """Deal in Negotiation (stage_id=11) + advance fires → _complete_won_deal called once."""
         now = datetime.utcnow()
         sct = (now - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+        # Pipedrive returns option IDs (e.g. "26") for enum custom fields.
         negotiation_deal = {
             "id": 200,
             "stage_id": 11,  # Negotiation
             "stage_change_time": sct,
             "update_time": sct,
-            self.gen._client_type_field: "residential",
+            self.gen._client_type_field: "26",
             self.gen._emv_field: None,
         }
+        # Pre-populate the option-mapping cache so _build_contract doesn't try
+        # a real Pipedrive fetch.
+        self.gen._client_type_label_by_id = {"26": "residential", "27": "commercial"}
         with patch.object(self.gen, "_complete_won_deal") as mock_won:
             with patch("random.random", return_value=0.01):
                 result = self.gen._advance_deal(negotiation_deal, dry_run=False)
@@ -593,6 +597,105 @@ class TestExecute(_DealSqliteCompatCase):
                 result = self.gen.execute(dry_run=False)
         self.assertFalse(result.success)
         self.assertIn("pipedrive fetch failed", result.message)
+
+
+class TestClientTypeTranslation(unittest.TestCase):
+    """_build_contract must translate Pipedrive enum option IDs to labels.
+
+    Pipedrive stores enum custom-field values as option IDs internally and
+    returns those IDs (as strings) on read. Without translation, won_deals
+    rows store "27" instead of "commercial" and operations.py mis-routes.
+
+    Pure unit tests — bypasses DealGenerator.__init__ to avoid the broken
+    SQLite test fixture (init_db_sqlite uses Postgres-only DDL).
+    """
+
+    def setUp(self):
+        # Load the real Pipedrive field keys from tool_ids.json so we exercise
+        # the same lookup the production code uses.
+        import json
+        from pathlib import Path
+        from simulation.generators.deals import DealGenerator
+        tool_ids = json.loads(
+            Path(_PROJECT_ROOT, "config", "tool_ids.json").read_text()
+        )
+        deal_fields = tool_ids["pipedrive"]["deal_fields"]
+        self.gen = object.__new__(DealGenerator)
+        self.gen._client_type_field = deal_fields["Client Type"]
+        self.gen._emv_field = deal_fields["Estimated Monthly Value"]
+        self.gen._client_type_label_by_id = None
+
+    def _deal(self, raw_client_type, emv=2500):
+        return {
+            "id": 1,
+            "stage_id": 11,
+            self.gen._client_type_field: raw_client_type,
+            self.gen._emv_field: emv,
+        }
+
+    def test_translates_commercial_option_id(self):
+        self.gen._client_type_label_by_id = {"26": "residential", "27": "commercial"}
+        contract = self.gen._build_contract(self._deal("27"))
+        self.assertEqual(contract["contract_type"], "commercial")
+        self.assertIn(
+            contract["service_frequency"],
+            {"nightly_clean", "weekend_deep_clean", "one_time_project"},
+        )
+
+    def test_translates_residential_option_id(self):
+        self.gen._client_type_label_by_id = {"26": "residential", "27": "commercial"}
+        contract = self.gen._build_contract(self._deal("26", emv=200))
+        self.assertEqual(contract["contract_type"], "residential")
+
+    def test_unknown_option_id_falls_back_to_raw_string(self):
+        """Unknown option ID is preserved verbatim so the failure surfaces downstream
+        rather than silently defaulting to a wrong client_type."""
+        self.gen._client_type_label_by_id = {"26": "residential"}
+        contract = self.gen._build_contract(self._deal("99"))
+        self.assertEqual(contract["contract_type"], "99")
+
+    def test_missing_client_type_defaults_to_residential(self):
+        self.gen._client_type_label_by_id = {}
+        deal = {"id": 1, "stage_id": 11, self.gen._emv_field: 200}
+        contract = self.gen._build_contract(deal)
+        self.assertEqual(contract["contract_type"], "residential")
+
+    def test_ensure_options_caches_after_first_fetch(self):
+        from unittest.mock import MagicMock
+        mock_session = MagicMock()
+        mock_session.get.return_value.raise_for_status = MagicMock()
+        mock_session.get.return_value.json.return_value = {
+            "data": [
+                {"key": "unrelated", "options": []},
+                {
+                    "key": self.gen._client_type_field,
+                    "options": [
+                        {"id": 26, "label": "residential"},
+                        {"id": 27, "label": "commercial"},
+                    ],
+                },
+            ]
+        }
+        with patch("simulation.generators.deals.get_client", return_value=mock_session):
+            mapping = self.gen._ensure_client_type_options()
+            again = self.gen._ensure_client_type_options()
+        self.assertEqual(mapping, {"26": "residential", "27": "commercial"})
+        self.assertIs(again, mapping)
+        self.assertEqual(mock_session.get.call_count, 1)
+
+    def test_ensure_options_handles_fetch_error(self):
+        from unittest.mock import MagicMock
+        mock_session = MagicMock()
+        mock_session.get.side_effect = Exception("connection refused")
+        with patch("simulation.generators.deals.get_client", return_value=mock_session):
+            with self.assertLogs("simulation.deals", level="WARNING"):
+                mapping = self.gen._ensure_client_type_options()
+        self.assertEqual(mapping, {})
+        # Cached as empty so subsequent calls don't re-fetch
+        with patch("simulation.generators.deals.get_client") as mock_again:
+            mapping_again = self.gen._ensure_client_type_options()
+        self.assertEqual(mapping_again, {})
+        mock_again.assert_not_called()
 
 
 if __name__ == "__main__":

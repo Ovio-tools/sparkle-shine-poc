@@ -501,7 +501,93 @@ class NewClientOnboarding(BaseAutomation):
                 client_type=client_type,
             )
 
-        return None
+        # Proposal has neither a client_id nor a lead_id linkage. Mint a new
+        # SS-CLIENT-XXXX and write it back to commercial_proposals so future
+        # runs short-circuit at the row["client_id"] check above. Returning the
+        # SS-PROP-* ID here would propagate the proposal canonical through every
+        # downstream tool mapping and break FK constraints in the syncers.
+        return self._create_client_from_orphan_proposal(
+            proposal_id=proposal_id,
+            deal_id=deal_id,
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            client_type=client_type,
+        )
+
+    def _create_client_from_orphan_proposal(
+        self,
+        proposal_id: str,
+        deal_id: str,
+        first_name: str,
+        last_name: str,
+        email: str,
+        client_type: str,
+    ) -> str:
+        """
+        Mint a new SS-CLIENT-XXXX for a won commercial proposal that has no
+        linked client_id or lead_id.
+
+        Steps:
+          1. Allocate the next sequential SS-CLIENT-XXXX (across both clients
+             and cross_tool_mapping, same pattern as the mint-new branch above).
+          2. Insert the client row (ON CONFLICT DO NOTHING for re-run safety).
+          3. Update commercial_proposals.client_id so the linkage exists for
+             reporting and so future onboarding runs resolve the same client.
+          4. Return the new client canonical ID.
+        """
+        if self.dry_run:
+            print(
+                f"[DRY RUN] Would mint SS-CLIENT-XXXX for orphan proposal "
+                f"{proposal_id} (deal_id={deal_id})"
+            )
+            return proposal_id
+
+        row_c = self.db.execute(
+            "SELECT id FROM clients WHERE id LIKE 'SS-CLIENT-%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        row_m = self.db.execute(
+            "SELECT canonical_id FROM cross_tool_mapping "
+            "WHERE canonical_id LIKE 'SS-CLIENT-%' ORDER BY canonical_id DESC LIMIT 1"
+        ).fetchone()
+
+        candidates = []
+        if row_c:
+            candidates.append(row_c["id"])
+        if row_m:
+            candidates.append(row_m["canonical_id"])
+
+        next_n = (int(max(candidates).split("-")[-1]) + 1) if candidates else 1
+        client_id = f"SS-CLIENT-{next_n:04d}"
+
+        try:
+            self.db.execute(
+                """
+                INSERT INTO clients
+                    (id, client_type, first_name, last_name, email, status)
+                VALUES (%s, %s, %s, %s, %s, 'active')
+                ON CONFLICT DO NOTHING
+                """,
+                (client_id, client_type, first_name, last_name, email),
+            )
+            self.db.execute(
+                "UPDATE commercial_proposals SET client_id = %s WHERE id = %s",
+                (client_id, proposal_id),
+            )
+            self.db.commit()
+        except Exception as exc:
+            self.db.rollback()
+            print(
+                f"[WARN] Could not mint client for orphan proposal "
+                f"{proposal_id}: {exc}"
+            )
+            raise
+
+        print(
+            f"[INFO] Linked orphan proposal {proposal_id} → minted {client_id} "
+            f"(deal_id={deal_id}, {first_name} {last_name})"
+        )
+        return client_id
 
     def _promote_lead_to_client(
         self,

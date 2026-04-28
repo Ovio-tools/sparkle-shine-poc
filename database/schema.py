@@ -420,7 +420,9 @@ CREATE_TABLES = [
     """
     CREATE TABLE IF NOT EXISTS won_deals (
         canonical_id      TEXT PRIMARY KEY,
-        client_type       TEXT NOT NULL,
+        client_type       TEXT NOT NULL
+                          CONSTRAINT won_deals_client_type_chk
+                          CHECK (client_type IN ('residential', 'commercial', 'one-time')),
         service_frequency TEXT NOT NULL,
         contract_value    REAL,
         start_date        TEXT NOT NULL,
@@ -524,14 +526,38 @@ def init_db_sqlite(db_path: str) -> None:
 
     Used by simulation generators and tests that need a local SQLite DB
     rather than the PostgreSQL instance pointed to by DATABASE_URL.
+
+    SQLite doesn't support `ALTER TABLE … ADD COLUMN IF NOT EXISTS …`, so
+    those statements are translated to plain ADD COLUMN and duplicate-column
+    errors are swallowed (the column is already there, that's the point).
     """
+    import re
     import sqlite3 as _sqlite3
+
+    add_col_if_not_exists = re.compile(
+        r"^\s*ALTER\s+TABLE\s+\S+\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+",
+        re.IGNORECASE,
+    )
+
     conn = _sqlite3.connect(db_path)
     conn.row_factory = _sqlite3.Row
-    with conn:
+    try:
         for statement in CREATE_TABLES:
-            conn.execute(statement)
-    conn.close()
+            translated = add_col_if_not_exists.sub(
+                lambda m: m.group(0).replace(" IF NOT EXISTS ", " ").replace(
+                    " if not exists ", " "
+                ),
+                statement,
+            )
+            try:
+                conn.execute(translated)
+                conn.commit()
+            except _sqlite3.OperationalError as exc:
+                if "duplicate column name" in str(exc).lower():
+                    continue
+                raise
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
