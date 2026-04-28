@@ -24,6 +24,7 @@ import subprocess
 import sys
 import unittest
 import unittest.mock
+from unittest.mock import MagicMock, patch
 
 # ── Path wiring: make project root importable regardless of cwd ────────────────
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -856,6 +857,165 @@ class TestHubSpotSyncerMonthlyValue(unittest.TestCase):
             places=2,
             msg="UPDATE path must also divide amount by 12 (120000/12 = 10000)",
         )
+
+
+class TestHubSpotSyncerProposalLinkage(unittest.TestCase):
+    """Sibling of TestPipedriveSyncerProposalLinkage. When minting a new
+    SS-PROP, the HubSpot syncer must populate commercial_proposals.lead_id
+    or client_id by resolving the deal's associated contact -> existing
+    canonical mapping. HubSpot's deal-search response doesn't embed contacts,
+    so the syncer falls back to a per-deal basic_api fetch with associations.
+    """
+
+    def setUp(self):
+        self.db = _make_pg_test_db()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO leads (id, first_name, last_name, email, lead_type, source, status) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 'new') ON CONFLICT DO NOTHING",
+                ("SS-LEAD-0801", "Sarah", "Chen", "sarah@example.com", "commercial", "test"),
+            )
+            self.db.execute(
+                "INSERT INTO clients (id, client_type, first_name, last_name, email, status) "
+                "VALUES (%s, %s, %s, %s, %s, 'active') ON CONFLICT DO NOTHING",
+                ("SS-CLIENT-0802", "commercial", "Bob", "Builder", "bob@example.com"),
+            )
+            self.db.execute(
+                "INSERT INTO cross_tool_mapping (canonical_id, entity_type, tool_name, tool_specific_id) "
+                "VALUES (%s, 'LEAD', 'hubspot', %s)",
+                ("SS-LEAD-0801", "60801"),
+            )
+            self.db.execute(
+                "INSERT INTO cross_tool_mapping (canonical_id, entity_type, tool_name, tool_specific_id) "
+                "VALUES (%s, 'CLIENT', 'hubspot', %s)",
+                ("SS-CLIENT-0802", "60802"),
+            )
+        from intelligence.syncers.sync_hubspot import HubSpotSyncer
+        self.syncer = HubSpotSyncer(_TEST_DB_URL)
+
+    def tearDown(self):
+        self.syncer.close()
+        self.db.close()
+
+    @staticmethod
+    def _deal_with_associations(hs_id, properties, contact_ids):
+        """SDK-style search-response object with embedded associations."""
+        from types import SimpleNamespace
+        assoc = SimpleNamespace(
+            contacts=SimpleNamespace(
+                results=[SimpleNamespace(id=cid) for cid in contact_ids]
+            )
+        )
+        return SimpleNamespace(id=hs_id, properties=properties, associations=assoc)
+
+    @staticmethod
+    def _deal_no_associations(hs_id, properties):
+        from types import SimpleNamespace
+        return SimpleNamespace(id=hs_id, properties=properties, associations=None)
+
+    def _row_for_hs_id(self, hs_id):
+        return self.db.execute(
+            "SELECT cp.id, cp.lead_id, cp.client_id "
+            "FROM commercial_proposals cp "
+            "JOIN cross_tool_mapping m ON m.canonical_id = cp.id "
+            "WHERE m.tool_name = 'hubspot' AND m.tool_specific_id = %s",
+            (hs_id,),
+        ).fetchone()
+
+    def test_links_lead_when_associations_embedded(self):
+        """Search response with embedded contacts -> no extra API call needed."""
+        deal = self._deal_with_associations(
+            "81001",
+            {"dealname": "Embedded assoc deal", "amount": "12000", "dealstage": "qualifiedtobuy"},
+            ["60801"],
+        )
+        # No basic_api call should fire when associations are embedded.
+        with patch("intelligence.syncers.sync_hubspot.get_client") as mock_get_client:
+            self.syncer._upsert_deal(deal)
+            mock_get_client.assert_not_called()
+        row = self._row_for_hs_id("81001")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["lead_id"], "SS-LEAD-0801")
+        self.assertIsNone(row["client_id"])
+
+    def test_links_client_via_basic_api_fallback(self):
+        """Search response without associations -> falls back to basic_api fetch."""
+        deal = self._deal_no_associations(
+            "81002",
+            {"dealname": "Fallback fetch deal", "amount": "60000", "dealstage": "decisionmakerboughtin"},
+        )
+        from types import SimpleNamespace
+        full_deal = self._deal_with_associations("81002", deal.properties, ["60802"])
+        mock_client = MagicMock()
+        mock_client.crm.deals.basic_api.get_by_id.return_value = full_deal
+        with patch("intelligence.syncers.sync_hubspot.get_client", return_value=mock_client):
+            self.syncer._upsert_deal(deal)
+        mock_client.crm.deals.basic_api.get_by_id.assert_called_once_with(
+            deal_id="81002", associations=["contacts"]
+        )
+        row = self._row_for_hs_id("81002")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["lead_id"])
+        self.assertEqual(row["client_id"], "SS-CLIENT-0802")
+
+    def test_no_linkage_when_contact_unmapped(self):
+        deal = self._deal_with_associations(
+            "81003",
+            {"dealname": "Orphan deal", "amount": "24000", "dealstage": "qualifiedtobuy"},
+            ["69999"],  # not in cross_tool_mapping
+        )
+        self.syncer._upsert_deal(deal)
+        row = self._row_for_hs_id("81003")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["lead_id"])
+        self.assertIsNone(row["client_id"])
+
+    def test_no_linkage_when_no_contacts(self):
+        """Deal with no associated contacts -> orphan; both NULL."""
+        deal = self._deal_no_associations(
+            "81004",
+            {"dealname": "Person-less deal", "amount": "12000", "dealstage": "qualifiedtobuy"},
+        )
+        full_deal = self._deal_with_associations("81004", deal.properties, [])
+        mock_client = MagicMock()
+        mock_client.crm.deals.basic_api.get_by_id.return_value = full_deal
+        with patch("intelligence.syncers.sync_hubspot.get_client", return_value=mock_client):
+            self.syncer._upsert_deal(deal)
+        row = self._row_for_hs_id("81004")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["lead_id"])
+        self.assertIsNone(row["client_id"])
+
+    def test_basic_api_failure_falls_back_to_orphan(self):
+        """If the associations fetch fails, the proposal is still inserted (orphan).
+        Failures must not block the rest of the sync — heal at win-time instead."""
+        deal = self._deal_no_associations(
+            "81005",
+            {"dealname": "API-error deal", "amount": "18000", "dealstage": "qualifiedtobuy"},
+        )
+        mock_client = MagicMock()
+        mock_client.crm.deals.basic_api.get_by_id.side_effect = Exception("boom")
+        with patch("intelligence.syncers.sync_hubspot.get_client", return_value=mock_client):
+            self.syncer._upsert_deal(deal)
+        row = self._row_for_hs_id("81005")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["lead_id"])
+        self.assertIsNone(row["client_id"])
+
+    def test_dict_shaped_associations(self):
+        """Some HubSpot SDK paths return associations as dicts, not objects."""
+        from types import SimpleNamespace
+        deal = SimpleNamespace(
+            id="81006",
+            properties={"dealname": "Dict assoc", "amount": "12000", "dealstage": "qualifiedtobuy"},
+            associations={"contacts": {"results": [{"id": "60801"}]}},
+        )
+        with patch("intelligence.syncers.sync_hubspot.get_client") as mock_get_client:
+            self.syncer._upsert_deal(deal)
+            mock_get_client.assert_not_called()
+        row = self._row_for_hs_id("81006")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["lead_id"], "SS-LEAD-0801")
 
 
 class TestFinancialHealthMetrics(unittest.TestCase):
