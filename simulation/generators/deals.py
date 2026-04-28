@@ -138,6 +138,11 @@ class DealGenerator:
         self._service_type_field = fields["Service Type"]
         self._emv_field          = fields["Estimated Monthly Value"]
 
+        # Pipedrive returns enum custom-field values as option IDs (e.g. "27"),
+        # not labels. Lazily fetched on first translation; cached for the
+        # generator's lifetime, including on fetch failure (empty mapping).
+        self._client_type_label_by_id: Optional[dict[str, str]] = None
+
         with get_connection() as conn:
             self._ensure_schema(conn)
 
@@ -372,7 +377,9 @@ class DealGenerator:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS won_deals (
                 canonical_id      TEXT PRIMARY KEY,
-                client_type       TEXT NOT NULL,
+                client_type       TEXT NOT NULL
+                                  CONSTRAINT won_deals_client_type_chk
+                                  CHECK (client_type IN ('residential', 'commercial', 'one-time')),
                 service_frequency TEXT NOT NULL,
                 contract_value    REAL,
                 start_date        TEXT NOT NULL,
@@ -427,9 +434,49 @@ class DealGenerator:
         weights = [SERVICE_TYPE_WEIGHTS[k] for k in pool]
         return random.choices(pool, weights=weights, k=1)[0]
 
+    def _ensure_client_type_options(self) -> dict[str, str]:
+        """Return {option_id_str: label} for the Pipedrive Client Type field.
+
+        Pipedrive returns enum custom-field values as option IDs on read, but
+        accepts labels on write (which is why push_pipedrive.py never noticed).
+        We fetch the field metadata once per generator instance to translate.
+        On any failure the mapping is cached as empty so callers fall back to
+        the raw value rather than re-fetching every advance.
+        """
+        if self._client_type_label_by_id is not None:
+            return self._client_type_label_by_id
+
+        mapping: dict[str, str] = {}
+        try:
+            client = get_client("pipedrive")
+            resp = client.get(
+                "https://api.pipedrive.com/v1/dealFields",
+                params={"start": 0, "limit": 500},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            for f in resp.json().get("data") or []:
+                if isinstance(f, dict) and f.get("key") == self._client_type_field:
+                    mapping = {
+                        str(o["id"]): o["label"]
+                        for o in (f.get("options") or [])
+                        if "id" in o and "label" in o
+                    }
+                    break
+        except Exception as exc:
+            logger.warning("Failed to fetch Pipedrive Client Type options: %s", exc)
+
+        self._client_type_label_by_id = mapping
+        return mapping
+
     def _build_contract(self, deal: dict) -> dict:
         """Build the contract dict when a deal advances to Won."""
-        client_type = deal.get(self._client_type_field) or "residential"
+        raw = deal.get(self._client_type_field)
+        if raw is None:
+            client_type = "residential"
+        else:
+            options = self._ensure_client_type_options()
+            client_type = options.get(str(raw), str(raw))
         emv_raw = deal.get(self._emv_field)
         try:
             emv = float(emv_raw) if emv_raw is not None else 0.0
