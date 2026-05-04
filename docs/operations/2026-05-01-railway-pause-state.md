@@ -2,6 +2,8 @@
 
 This file is the runbook for **resuming** the Sparkle & Shine POC after a temporary pause that began on 2026-05-01. Do not delete it during the pause. Move it to `docs/operations/archive/` only after the project is fully resumed and verified.
 
+> ⚠️ **Read the [Incident: 2026-05-01 to 2026-05-04 worker auto-redeploy](#incident-2026-05-01-to-2026-05-04-worker-auto-redeploy) section before resuming.** The original pause plan missed Railway's "Auto Deploy on Push" hook. Pushing the snapshot file to `main` resurrected `simulation-engine` and `token-keeper` ~16-25 minutes after they were stopped, and they ran for ~54 hours generating data and Slack alerts before being caught. The fix (disconnecting the GitHub repo from those two services) means resume now requires **reconnecting the repo** before redeploying — not just clicking redeploy.
+
 ## Pause metadata
 
 | Field | Value |
@@ -251,14 +253,16 @@ TBD
 
 Pause in this exact order. Postgres stays running.
 
-- [ ] **1. sales-outreach** → Settings → Deploy → clear "Cron Schedule" field (currently `*/30 * * * *`). Save.
-- [ ] **2. automation-runner** → Settings → Deploy → clear "Cron Schedule" field (currently `*/5 * * * *`). Save.
-- [ ] **3. intelligence-daily** → Settings → Deploy → clear "Cron Schedule" field (currently `0 11 * * 1-5`). Save.
-- [ ] **4. intelligence-weekly** → Settings → Deploy → clear "Cron Schedule" field (currently `0 13 * * 0`). Save.
-- [ ] **5. simulation-engine** → Deployments → latest deployment (`a0a4fc19-...`) → "Remove" (this triggers SIGTERM; the engine handles checkpoint save in `simulation/engine.py:100-101`).
-- [ ] **6. token-keeper** → Deployments → latest deployment (`0b1fad75-...`) → "Remove". (Last to stop because it underpins Jobber auth for everything else.)
+- [X] **1. sales-outreach** → Settings → Deploy → clear "Cron Schedule" field (currently `*/30 * * * *`). Save.
+- [X] **2. automation-runner** → Settings → Deploy → clear "Cron Schedule" field (currently `*/5 * * * *`). Save.
+- [X] **3. intelligence-daily** → Settings → Deploy → clear "Cron Schedule" field (currently `0 11 * * 1-5`). Save.
+- [X] **4. intelligence-weekly** → Settings → Deploy → clear "Cron Schedule" field (currently `0 13 * * 0`). Save.
+- [X] **5. simulation-engine** → Deployments → latest deployment (`a0a4fc19-...`) → "Remove" (this triggers SIGTERM; the engine handles checkpoint save in `simulation/engine.py:100-101`).
+- [X] **6. token-keeper** → Deployments → latest deployment (`0b1fad75-...`) → "Remove". (Last to stop because it underpins Jobber auth for everything else.)
 
 **Do not** delete services, do not change service environment variables, do not modify custom config file paths. The pause should leave each service definition fully intact so resume is a one-field paste.
+
+- [X] **7. Disconnect GitHub repo from `simulation-engine` and `token-keeper`** (added 2026-05-04 after the auto-redeploy incident — see incident section below). Settings → Source → "Disconnect Repo". This is required because Railway has no toggle to disable "Auto Deploy" while keeping the repo connected. Without this step, any push to `main` will redeploy the workers and revive the simulation. **Recommended:** also disconnect the 4 cron services for the same reason — a push to `main` triggers a one-shot run on redeploy (which is how the cron services briefly fired on 2026-05-01 21:27/21:29 even though their schedules were cleared).
 
 ## Post-pause verification (~30 minutes after step 6)
 
@@ -282,19 +286,27 @@ SELECT tool_name, updated_at FROM oauth_tokens WHERE tool_name IN ('jobber','qui
 ```
 Both `updated_at` values must be within the last hour.
 
-### Step 2 — Resume token-keeper first
+### Step 2 — Reconnect GitHub repo to the disconnected services
 
-Trigger a redeploy from the latest commit on `main` (or the long-lived branch). Watch logs:
+Per the 2026-05-04 incident, `simulation-engine` and `token-keeper` had their GitHub source disconnected to prevent auto-redeploy on push. Before they can deploy, reconnect:
+- `simulation-engine` → Settings → Source → "Connect Repo" → select `Ovio-tools/sparkle-shine-poc` → branch `main` → custom config file `/railway.worker.toml`
+- `token-keeper` → same as above
+
+Also reconnect any cron services you disconnected during the pause as a precaution. Their custom config file is `/railway.toml`.
+
+### Step 3 — Resume token-keeper first
+
+Trigger a redeploy from the latest commit on `main` (Railway will auto-deploy once the repo is connected, but verify it did). Watch logs:
 ```bash
 railway logs --service token-keeper --environment production -f
 ```
 You should see one full Jobber refresh tick within the first few minutes. If it 401s, the token push from Step 1 didn't take. Fix and re-verify before continuing.
 
-### Step 3 — Resume simulation-engine
+### Step 4 — Resume simulation-engine
 
-Trigger a redeploy. Confirm in logs that the engine resumes from its last checkpoint rather than starting from scratch. The checkpoint is preserved in Postgres (per `simulation/checkpoint.py` and the `poll_state` discipline).
+Trigger a redeploy (or wait for the auto-deploy from Step 2 to complete). Confirm in logs that the engine resumes from its last checkpoint rather than starting from scratch. The checkpoint is preserved in Postgres (per `simulation/checkpoint.py` and the `poll_state` discipline).
 
-### Step 4 — Restore cron schedules
+### Step 5 — Restore cron schedules
 
 Restore in this order (least-to-most external-facing):
 1. automation-runner → set cron to `*/5 * * * *`
@@ -302,15 +314,15 @@ Restore in this order (least-to-most external-facing):
 3. intelligence-weekly → set cron to `0 13 * * 0`
 4. sales-outreach → set cron to `*/30 * * * *` (last — this resumes outbound activity)
 
-### Step 5 — Verify
+### Step 6 — Verify
 
 - [ ] First automation-runner tick (within 5 minutes of restoring its cron) completes without 401s or QBO errors
 - [ ] Next morning's daily briefing posts to Slack `#daily-briefing` (channel ID `C0AML3Q8PSM` per pause-time tool_ids.json)
 - [ ] `cross_tool_mapping` audit (Section A above) returns the same numbers as at pause-time, plus any normal growth
 
-### Step 6 — Archive this file
+### Step 7 — Archive this file
 
-Once Step 5 passes for two consecutive days:
+Once Step 6 passes for two consecutive days:
 ```bash
 git mv docs/operations/2026-05-01-railway-pause-state.md docs/operations/archive/
 git commit -m "ops: archive 2026-05-01 Railway pause runbook after successful resume"
@@ -349,6 +361,47 @@ If during the pause one or more SaaS tool accounts becomes inaccessible and a ne
 - **Google Workspace** — no pusher. `setup/populate_workspace.py` regenerates content via LLM. Drive file IDs and Calendar event IDs will all be new — no system code currently hardcodes them outside `config/tool_ids.json`.
 - **Jobber and QuickBooks** — OAuth-based. Full reconnect flow + `setup/configure_tools.py` is sufficient.
 - **HubSpot, Pipedrive, Asana, Mailchimp** — pushers exist; the re-seed is mechanical once `tool_ids.json` is regenerated.
+
+## Incident: 2026-05-01 to 2026-05-04 worker auto-redeploy
+
+**Summary:** The original pause plan didn't account for Railway's GitHub auto-deploy hook. Pushing this snapshot file to `main` resurrected `simulation-engine` and `token-keeper` minutes after the pause checklist was completed. They ran undetected for ~54 hours, generating data and `#automation-failure` alerts.
+
+### Timeline (UTC)
+
+| Time | Event |
+|---|---|
+| 2026-05-01 21:21:03 | `simulation-engine` SIGTERM — graceful "Engine stopped." |
+| 2026-05-01 21:21:49 | `token-keeper` SIGTERM — "Stopping Container" |
+| 2026-05-01 21:24-21:29 | All 4 cron services completed their final scheduled or in-flight runs (intelligence-daily/weekly each posted one final briefing to Slack) |
+| 2026-05-01 ~21:35 | Snapshot file (`docs/operations/2026-05-01-railway-pause-state.md`) committed and pushed to `origin/main` (commit `50fdb5c`) |
+| 2026-05-01 21:37:37 | **`token-keeper` auto-redeployed** by Railway in response to the GitHub push |
+| 2026-05-01 21:46:36 | **`simulation-engine` auto-redeployed** |
+| 2026-05-01 → 2026-05-04 | Both workers ran continuously. `simulation-engine` generated jobs, contacts, payments etc. for 54 hours. `automation-runner` was correctly paused so the Jobber→QuickBooks invoice-creation pipeline didn't run. The simulation's own daily reconciliation sweep ([simulation/engine.py:539](../../simulation/engine.py#L539)) detected this gap and posted "13 completed jobs have no invoices" alerts to `#automation-failure` daily. |
+| 2026-05-04 ~03:35 | User noticed the alerts and re-stopped both workers; **disconnected the GitHub repo** from `simulation-engine` and `token-keeper` to prevent another auto-redeploy |
+
+### Root cause
+
+Railway services connected to GitHub auto-deploy on every push to the watched branch (`main` here). The pause plan removed the deployments but left the GitHub source connection intact. Railway has no UI toggle to disable auto-deploy while keeping the repo connected, so the only way to stop it is to disconnect the source entirely.
+
+This affected the workers visibly because they're long-running. It also affected the **cron services** invisibly: each cron service got a new deployment ID after the push, and Railway's first-deploy behavior runs the service's start command once on deploy. That's why `intelligence-daily` and `intelligence-weekly` each fired once at 21:27 and 21:29 even though their schedules were cleared, posting one final daily and weekly briefing to Slack. They didn't continue firing because the cron schedule (cleared) is the gate for subsequent firings.
+
+### Data impact
+
+`simulation-engine` ran for 54 hours generating new SS-* records (contacts, jobs, payments, tasks). The simulation is designed to be continuous and reproducible (random.seed(42) per CLAUDE.md), so these records are valid simulated data — just produced during a window the user thought was paused. No corruption, no manual cleanup required. Resume will pick up from the latest checkpoint, not 2026-05-01.
+
+The `#automation-failure` alerts were correct given the state — the simulation was running and the automation-runner wasn't, so completed jobs genuinely lacked invoices. They were not false positives.
+
+### Fix applied
+
+User disconnected the GitHub repo from both `simulation-engine` and `token-keeper` on 2026-05-04. Cron services were NOT disconnected as of this writing — they remain at risk of one-shot firings if `main` is pushed during the pause. Recommendation in pause checklist Step 7: disconnect them too as a precaution.
+
+### Resume implications
+
+The Resume runbook above already accounts for this — see Step 2 ("Reconnect GitHub repo"). Without that step, redeploying via Railway dashboard will fail because there's no source to deploy from.
+
+### Lesson for future pauses
+
+Railway's pause story has two layers: deployment state (controlled by removing deployments) **and** auto-deploy triggers (controlled by source/GitHub connection). Pausing without addressing both layers leaves a back door. A future pause plan should disconnect the repo from every compute service before pushing any commits, not just the always-on workers.
 
 ## Out-of-scope during pause
 
