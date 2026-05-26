@@ -545,6 +545,172 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
         self.assertNotIn("SS-LEAD-0002", committed_ids)
 
 
+class TestNewClientSetupSSPropResolution(unittest.TestCase):
+    """SS-PROP-* canonical_ids in won_deals must be resolved via
+    commercial_proposals.client_id (or lead_id) before lookup. Looking up
+    SS-PROP-* directly in leads/clients always fails — that's the bug.
+    """
+
+    def _make_db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE won_deals (
+                canonical_id TEXT PRIMARY KEY,
+                client_type TEXT NOT NULL,
+                service_frequency TEXT NOT NULL,
+                contract_value REAL,
+                start_date TEXT NOT NULL,
+                crew_assignment TEXT,
+                pipedrive_deal_id INTEGER
+            );
+            CREATE TABLE leads (
+                id TEXT PRIMARY KEY, first_name TEXT, last_name TEXT,
+                company_name TEXT, email TEXT, phone TEXT,
+                lead_type TEXT, source TEXT, status TEXT DEFAULT 'new',
+                estimated_value REAL,
+                created_at TEXT DEFAULT (datetime('now')),
+                last_activity_at TEXT
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT,
+                first_name TEXT, last_name TEXT, company_name TEXT,
+                email TEXT, phone TEXT, address TEXT,
+                neighborhood TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                acquisition_source TEXT, first_service_date TEXT,
+                last_service_date TEXT, lifetime_value REAL DEFAULT 0,
+                notes TEXT, created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE commercial_proposals (
+                id TEXT PRIMARY KEY, lead_id TEXT, client_id TEXT,
+                title TEXT, square_footage INTEGER, service_scope TEXT,
+                price_per_visit REAL, frequency TEXT, monthly_value REAL,
+                status TEXT, sent_date TEXT, decision_date TEXT,
+                notes TEXT, start_date TEXT, crew_assignment TEXT,
+                stage_change_time TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT
+            );
+        """)
+        return conn
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_residential_ss_prop_resolves_via_proposals_to_clients(
+        self, mock_gql, mock_get_tool_id, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        """A residential won deal whose canonical_id is SS-PROP-* must look up
+        through commercial_proposals.client_id and find the customer in the
+        clients table — not crash with "No leads row for SS-PROP-…"."""
+        from simulation.generators.operations import NewClientSetupGenerator
+
+        conn = self._make_db()
+        # Won deal recorded with the proposal's canonical_id, not the client's
+        conn.execute(
+            "INSERT INTO won_deals VALUES (?,?,?,?,?,?,?)",
+            ("SS-PROP-0001", "residential", "biweekly_recurring",
+             150.0, "2026-03-02", "Crew A", 999),
+        )
+        # Proposal links SS-PROP-0001 → SS-CLIENT-0517 (already converted)
+        conn.execute(
+            "INSERT INTO commercial_proposals "
+            "(id, lead_id, client_id, status) VALUES (?,?,?,?)",
+            ("SS-PROP-0001", None, "SS-CLIENT-0517", "won"),
+        )
+        # Client record exists with full address + contact info
+        conn.execute(
+            "INSERT INTO clients "
+            "(id, client_type, first_name, last_name, email, phone, address) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("SS-CLIENT-0517", "residential", "Bob", "Jones",
+             "bob@example.com", "5125550517", "2401 Westlake Dr, Austin, TX"),
+        )
+        conn.commit()
+
+        mock_get_tool_id.return_value = None
+        mock_gen_id.side_effect = ["SS-RECUR-0517"]
+        mock_gql.side_effect = [
+            {"data": {"clientCreate":   {"client":     {"id": "GQL-CLIENT-517"}, "userErrors": []}}},
+            {"data": {"propertyCreate": {"properties": [{"id": "GQL-PROP-517"}], "userErrors": []}}},
+            {"data": {"__type":         {"inputFields": [{"name": "recurrences"}]}}},
+            {"data": {"jobCreate":      {"job":        {"id": "GQL-JOB-517"},   "userErrors": []}}},
+        ]
+
+        # Reset recurrence-field cache so introspect call is made
+        import simulation.generators.operations as ops_mod
+        ops_mod._recurrence_field_checked = False
+        ops_mod._recurrence_field_cache = None
+
+        gen = NewClientSetupGenerator(db_path=":memory:")
+        with _patched_ops_db(conn):
+            result = gen.execute(dry_run=False)
+
+        self.assertTrue(
+            result.success,
+            msg=f"expected success, got message: {result.message}",
+        )
+        self.assertIn("1", result.message)
+
+        # Mapping should be registered against the PROPOSAL canonical_id
+        # (so won_deals -> cross_tool_mapping check excludes it next tick)
+        mock_reg_map.assert_any_call(
+            "SS-PROP-0001", "jobber", "GQL-CLIENT-517", db_path=":memory:"
+        )
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations.register_mapping")
+    @patch("simulation.generators.operations.generate_id")
+    @patch("simulation.generators.operations.get_tool_id")
+    @patch("simulation.generators.operations._gql")
+    def test_ss_prop_with_no_linkage_fails_with_clear_message(
+        self, mock_gql, mock_get_tool_id, mock_gen_id, mock_reg_map, mock_get_client
+    ):
+        """SS-PROP-* with NULL lead_id AND NULL client_id should fail with an
+        error that names the proposal — not silently look up the SS-PROP id in
+        leads. The outer save-point loop isolates the failure from other deals.
+        """
+        from simulation.generators.operations import NewClientSetupGenerator
+
+        conn = self._make_db()
+        conn.execute(
+            "INSERT INTO won_deals VALUES (?,?,?,?,?,?,?)",
+            ("SS-PROP-0062", "residential", "monthly_recurring",
+             165.0, "2026-05-11", "Crew A", 264),
+        )
+        conn.execute(
+            "INSERT INTO commercial_proposals "
+            "(id, lead_id, client_id, status) VALUES (?,?,?,?)",
+            ("SS-PROP-0062", None, None, "won"),
+        )
+        conn.commit()
+
+        mock_get_tool_id.return_value = None
+        gen = NewClientSetupGenerator(db_path=":memory:")
+        with _patched_ops_db(conn):
+            result = gen.execute(dry_run=False)
+
+        # Outer loop isolates the failure, so result.success is False with a
+        # message reporting the failure — not an unhandled exception.
+        self.assertFalse(result.success)
+        # Must NOT spuriously claim "No leads row" — the error should name the
+        # proposal and the missing linkage.
+        # (We don't assert the exact text but we do assert it doesn't fall
+        # through to the leads-lookup branch.)
+        mock_gql.assert_not_called()
+
+
 class TestJobSchedulingGeneratorQueueFn(unittest.TestCase):
     """queue_fn is called with correct fire_at times after creating each job."""
 

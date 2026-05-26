@@ -582,26 +582,49 @@ class NewClientSetupGenerator:
         crew_assignment = deal["crew_assignment"] or "Crew A"
         pipedrive_deal_id = deal.get("pipedrive_deal_id")
 
-        # 1. Look up client info from the appropriate table
-        if client_type == "commercial":
+        # 1. Resolve canonical_id to the linked lead/client ID.
+        # won_deals stores SS-PROP-* for proposals and SS-LEAD-* for direct leads;
+        # SS-PROP-* must be resolved through commercial_proposals to reach the
+        # actual customer record (SS-CLIENT-* post-conversion, SS-LEAD-* pre-).
+        lookup_id = canonical_id
+        if canonical_id.startswith("SS-PROP-"):
+            prop_row = conn.execute(
+                "SELECT lead_id, client_id FROM commercial_proposals WHERE id = %s",
+                (canonical_id,),
+            ).fetchone()
+            if prop_row is None:
+                raise RuntimeError(f"No commercial_proposals row for {canonical_id}")
+            prop_row = dict(prop_row)
+            lookup_id = prop_row["client_id"] or prop_row["lead_id"]
+            if lookup_id is None:
+                raise RuntimeError(
+                    f"Proposal {canonical_id} has no client_id or lead_id linkage"
+                )
+
+        # 2. Look up the customer record in clients (post-conversion) or leads.
+        if lookup_id.startswith("SS-CLIENT-"):
             row = conn.execute(
-                "SELECT * FROM clients WHERE id = %s", (canonical_id,)
+                "SELECT * FROM clients WHERE id = %s", (lookup_id,)
             ).fetchone()
             if row is None:
-                raise RuntimeError(f"No clients row for {canonical_id}")
+                raise RuntimeError(
+                    f"No clients row for {lookup_id} (canonical={canonical_id})"
+                )
             row = dict(row)
             name = row.get("company_name") or f"{row.get('first_name','')} {row.get('last_name','')}".strip()
             email = row.get("email", "")
             phone = row.get("phone", "")
-            address = row.get("address", "Austin, TX")
+            address = row.get("address") or "Austin, TX"
         else:
             row = conn.execute(
-                "SELECT * FROM leads WHERE id = %s", (canonical_id,)
+                "SELECT * FROM leads WHERE id = %s", (lookup_id,)
             ).fetchone()
             if row is None:
-                raise RuntimeError(f"No leads row for {canonical_id}")
+                raise RuntimeError(
+                    f"No leads row for {lookup_id} (canonical={canonical_id})"
+                )
             row = dict(row)
-            name = f"{row.get('first_name','')} {row.get('last_name','')}".strip()
+            name = row.get("company_name") or f"{row.get('first_name','')} {row.get('last_name','')}".strip()
             email = row.get("email", "")
             phone = row.get("phone", "")
             address = "Austin, TX"  # leads table has no address column
