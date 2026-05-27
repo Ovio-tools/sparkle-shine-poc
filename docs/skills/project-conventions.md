@@ -33,13 +33,13 @@ In the simulation engine, there is no regeneration step. Data is created once, l
 - **Do NOT write one-off SQL patches** to fix simulation-generated records. This creates invisible divergence between what the code produces and what the database contains.
 - **The only acceptable SQL patches** are for historical data created by the Phase 2 seeding scripts, which cannot be regenerated without resetting all 8 tools.
 
-If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong amounts), the fix is: (1) fix the generator, (2) write a migration script that updates the affected records in SQLite AND the corresponding tool records via API, (3) commit the migration script so the fix is documented and reproducible.
+If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong amounts), the fix is: (1) fix the generator, (2) write a migration script that updates the affected records in Postgres AND the corresponding tool records via API, (3) commit the migration script under `scripts/archive/` so the fix is documented and reproducible.
 
 ---
 
 ## Automation Boundary Rules (L21)
 
-The simulation engine and the automation runner (`automations/runner.py`) share the same SaaS tools and SQLite database. These rules prevent them from creating duplicate records or desynchronizing state.
+The simulation engine and the automation runner (`automations/runner.py`) share the same SaaS tools and PostgreSQL database. These rules prevent them from creating duplicate records or desynchronizing state.
 
 **Rule 1: Never write to the `poll_state` table.**
 The automation runner uses `poll_state` timestamps to track what it has already processed. If the simulation writes to `poll_state`, the runner's watermarks desync -- it will either skip events or reprocess old ones. The simulation injects events at the source tool's API and lets the runner discover them through normal polling.
@@ -63,7 +63,7 @@ When the simulation creates a HubSpot SQL contact, it registers `link(canonical_
 
 ```python
 # Database access
-from database.schema import ...          # NOT from db.schema
+from database.connection import get_connection, column_exists, table_exists, get_column_names
 from database.mappings import generate_id, link, lookup, reverse_lookup, find_unmapped
 
 # Auth (CONFIRMED: use get_client exclusively)
@@ -120,7 +120,7 @@ from simulation.error_reporter import report_error
 |------|---------|---------|
 | Canonical ID | `canonical_id` | `"SS-CLIENT-0047"` |
 | Tool-specific ID | `{tool}_id` | `hubspot_id`, `pipedrive_id`, `jobber_id` |
-| Database connection | `db` | `db = sqlite3.connect(self.db_path)` |
+| Database connection | `conn` | `with get_connection() as conn:` |
 | API session | `session` | `session = requests.Session()` |
 
 ---
@@ -131,7 +131,7 @@ Every runner, pusher, generator, and automation supports a `--dry-run` flag. Whe
 
 - Log what WOULD happen (at INFO level)
 - Do NOT make any API calls
-- Do NOT write to SQLite
+- Do NOT write to Postgres
 - Do NOT post to Slack
 - Return results as if the operation succeeded (for testing downstream logic)
 
@@ -204,77 +204,119 @@ except Exception as e:
 
 ---
 
-## SQLite Patterns
+## PostgreSQL Patterns
 
-### Always Use Parameterized Queries
+### Get a Connection via `database.connection`
 
 ```python
-# BAD: SQL injection risk, breaks on apostrophes in names
-db.execute(f"INSERT INTO clients (name) VALUES ('{name}')")
+from database.connection import get_connection
+
+with get_connection() as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT canonical_id FROM clients WHERE status = %s", ("active",))
+        rows = cur.fetchall()
+    conn.commit()
+```
+
+`get_connection()` reads `DATABASE_URL` from the environment and returns a psycopg2 connection with `RealDictCursor` row factory. Never call `psycopg2.connect()` directly — go through `get_connection()` so connection settings stay consistent.
+
+### Always Use `%s` Placeholders (Never `?`)
+
+```python
+# BAD: SQL injection risk
+cur.execute(f"INSERT INTO clients (name) VALUES ('{name}')")
+
+# BAD: `?` is SQLite syntax, will raise on Postgres
+cur.execute("INSERT INTO clients (name) VALUES (?)", (name,))
 
 # GOOD
-db.execute("INSERT INTO clients (name) VALUES (?)", (name,))
+cur.execute("INSERT INTO clients (name) VALUES (%s)", (name,))
 ```
 
-### Always Commit After Writes
+### Access Rows by Column Name
+
+Rows from `get_connection()` are `RealDictRow` objects (dict-like). Never use integer indexing.
 
 ```python
-db.execute("INSERT INTO ...", (...))
-db.commit()  # don't forget this
+# BAD
+cur.execute("SELECT canonical_id, status FROM clients WHERE id = %s", (id,))
+row = cur.fetchone()
+canonical_id = row[0]  # breaks: RealDictRow is not indexed by position
+
+# GOOD
+canonical_id = row["canonical_id"]
+
+# For scalar queries, alias the column:
+cur.execute("SELECT COUNT(*) AS cnt FROM clients")
+count = cur.fetchone()["cnt"]
 ```
 
-### Wrap Multi-Step Operations in Try/Rollback
+### Commit After Writes; Rollback on Failure
 
 ```python
-try:
-    db.execute("INSERT INTO clients ...", (...))
-    db.execute("INSERT INTO cross_tool_mapping ...", (...))
-    db.commit()
-except Exception:
-    db.rollback()
-    raise
+with get_connection() as conn:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO clients ...", (...))
+            cur.execute("INSERT INTO cross_tool_mapping ...", (...))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 ```
 
-### Close Connections
+The `with` block on the connection does NOT auto-commit. Always call `conn.commit()` explicitly or the writes are lost when the block exits.
+
+### Upserts: `ON CONFLICT`
 
 ```python
-db = sqlite3.connect(self.db_path)
-try:
-    # do work
-finally:
-    db.close()
+# BAD: SQLite-only syntax
+cur.execute("INSERT OR REPLACE INTO ... VALUES (...)")
+cur.execute("INSERT OR IGNORE INTO ... VALUES (...)")
+
+# GOOD: Postgres
+cur.execute("""
+    INSERT INTO cross_tool_mapping (canonical_id, tool_name, tool_id)
+    VALUES (%s, %s, %s)
+    ON CONFLICT (canonical_id, tool_name) DO UPDATE SET tool_id = EXCLUDED.tool_id
+""", (canonical_id, tool_name, tool_id))
 ```
 
-### Date/Time Storage
-
-Store all timestamps as ISO 8601 strings in UTC:
+### Dates and Times: Use SQL Functions Where Possible
 
 ```python
-from datetime import datetime
-now = datetime.utcnow().isoformat()  # "2026-03-27T14:30:00.000000"
+# Current timestamp (server-side, timezone-aware)
+cur.execute("INSERT INTO events (created_at) VALUES (CURRENT_TIMESTAMP)")
+
+# Current date
+cur.execute("SELECT * FROM jobs WHERE scheduled_date = CURRENT_DATE")
+
+# Date arithmetic
+cur.execute("SELECT * FROM invoices WHERE due_date < CURRENT_DATE - INTERVAL '60 days'")
+
+# Or use the helper for parameterized intervals
+from database.connection import date_subtract_sql
+cur.execute(f"SELECT * FROM invoices WHERE due_date < {date_subtract_sql(60)}")
 ```
 
-Store dates as `YYYY-MM-DD`:
+When a timestamp needs to come from Python (e.g., a value from an upstream tool), pass a `datetime` object — psycopg2 adapts it correctly:
 
 ```python
-from datetime import date
-today = date.today().isoformat()  # "2026-03-27"
+from datetime import datetime, timezone
+cur.execute("INSERT INTO events (created_at) VALUES (%s)", (datetime.now(timezone.utc),))
 ```
 
-### Avoid SQLite-Specific Functions (Railway Prep)
-
-These will break when migrating to PostgreSQL:
+### Schema Inspection: Don't Use `PRAGMA` or `sqlite_master`
 
 ```python
-# AVOID (SQLite-specific)
-db.execute("SELECT datetime('now')")
-db.execute("INSERT OR REPLACE INTO ...")
+# BAD: SQLite-only
+cur.execute("PRAGMA table_info(clients)")
+cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
 
-# USE INSTEAD
-from datetime import datetime
-now = datetime.utcnow().isoformat()
-db.execute("INSERT INTO ... VALUES (...)", (...))
-# Handle upserts with: SELECT first, then INSERT or UPDATE
+# GOOD: use helpers from database.connection
+from database.connection import column_exists, table_exists, get_column_names
+if not column_exists("clients", "churn_reason"):
+    cur.execute("ALTER TABLE clients ADD COLUMN churn_reason TEXT")
 ```
 
 ---
@@ -314,7 +356,7 @@ RUN_INTEGRATION=1 python tests/test_simulation.py -v
 
 1. **Correctness:** Does the code produce the right output?
 2. **Narrative consistency:** Do the numbers match the business story? (Less important for simulation tests since we're generating forward, but still relevant for the intelligence layer.)
-3. **Cross-tool consistency:** Does the SQLite record match the tool record?
+3. **Cross-tool consistency:** Does the Postgres record match the tool record?
 4. **Error handling:** Does the code handle failures gracefully?
 
 ### Test Data Cleanup
@@ -445,7 +487,7 @@ Add deal progression and won-deal completion (Step 3)
 Wire error reporter to Slack #automation-failure (Step 8)
 ```
 
-Do not commit `.env`, token JSON files, or `sparkle_shine.db`. These are already in `.gitignore`.
+Do not commit `.env` or token JSON files (`.jobber_tokens.json`, `.quickbooks_tokens.json`, `token.json`). These are already in `.gitignore`.
 
 ---
 

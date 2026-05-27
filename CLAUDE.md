@@ -11,7 +11,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 ## Tech Stack
 
 - **Language:** Python 3.11+ (Railway/Nixpacks default is 3.11; avoid macOS system Python 3.9 for local dev)
-- **Database:** PostgreSQL via psycopg2 (production/simulation/automations/intelligence), SQLite (seeding, setup, tests)
+- **Database:** PostgreSQL via psycopg2 for every running service (simulation, automations, intelligence, reconciliation, token-keeper) and for local dev. SQLite only appears in offline tooling that never runs on Railway: original `seeding/` generators, `setup/populate_workspace.py`, `demo/smoke_test.py`, and in-memory test fixtures (`tests/sqlite_compat.py` plus a handful of unit-test files that use `sqlite3.connect(":memory:")`).
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
 - **Deployment:** Railway (`railway.toml` in repo root, 6 services — start commands configured per-service on dashboard via wrapper scripts; always-on workers should use `/railway.worker.toml` as their custom config file)
@@ -71,11 +71,11 @@ These rules exist because of real bugs. Follow them strictly.
 
 ## Database Patterns (PostgreSQL)
 
-IMPORTANT: All new code must use PostgreSQL via psycopg2. Some legacy modules (`simulation/reconciliation/`, `seeding/`, `setup/`, `demo/`, some `scripts/`, `tests/`) still use SQLite directly. Do not extend that pattern.
+IMPORTANT: All new code must use PostgreSQL via psycopg2. SQLite only appears in offline tooling (`seeding/`, `setup/populate_workspace.py`, `demo/smoke_test.py`) and in-memory test fixtures — none of which run as a Railway service. Do not extend that pattern.
 
 ### Troubleshooting Source Of Truth
 - For production or production-like diagnosis, verify Railway first: Railway Postgres for data, Railway env for config, Railway logs/runtime for auth and tool behavior.
-- Use local PostgreSQL or SQLite only for local-dev reproduction, tests, seeding flows, or when the prompt is explicitly about local state.
+- Use local PostgreSQL only for local-dev reproduction, tests, seeding flows, or when the prompt is explicitly about local state.
 - If local state disagrees with Railway, assume local drift until Railway proves otherwise.
 - Preferred sequence for diagnosis: `railway status` -> `railway service status --all` -> `railway logs --service <name> --environment production` -> `railway ssh --service <name> --environment production` or `railway connect Postgres`, depending on whether runtime or DB verification is needed.
 
@@ -124,7 +124,8 @@ sparkle-shine-poc/
 ├── services/        # token_keeper.py (Jobber OAuth refresh — sole owner of rotating refresh tokens)
 ├── setup/           # configure_tools.py, populate_workspace.py (one-time tool provisioning)
 ├── demo/            # audit/, fixes/, hardening/, scenarios/, tuning/, walkthrough/, smoke_test.py
-├── scripts/         # migrate_to_postgres.py, extract_railway_env.py, backfill_pipedrive_orgs.py, etc.
+├── scripts/         # extract_railway_env.py, pg_health_check.py, railway_db.py, setup_*.py, start_*.sh, etc.
+│                    #   One-shot remediation/migration scripts live in scripts/archive/.
 ├── tests/           # test_phase{1,2,4}.py, test_phase5_operations.py, test_simulation.py, test_deals.py,
 │                    #   test_error_reporter.py, smoke_test_phase3.py, test_automations/ (7 module tests)
 ├── docs/skills/     # 5 skill docs for Claude Code sessions
@@ -182,9 +183,6 @@ python -m simulation.engine --dry-run
 python seeding/utils/validator.py
 python seeding/generators/gen_anomalies.py
 python -c "from database.mappings import find_unmapped; print(find_unmapped('jobber', 'CLIENT'))"
-
-# PostgreSQL migration
-python scripts/migrate_to_postgres.py
 ```
 
 Resume an interrupted push by re-running the pusher. Checkpoints handle it.
