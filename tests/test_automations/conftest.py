@@ -371,6 +371,25 @@ def _clear_slack_channel_cache():
     _sn._channel_id_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _install_jobber_field_cache():
+    """Pre-populate simulation.jobber_utils.JOBBER_FIELD_CACHE so the
+    onboarding automation does not issue an unmocked GraphQL introspection
+    POST during jobCreate (which would consume one of the session's
+    side_effect responses)."""
+    from simulation import jobber_utils
+    jobber_utils.JOBBER_FIELD_CACHE["assigned_users"] = "assignedUsers"
+    jobber_utils.JOBBER_FIELD_CACHE["timeframe_end"] = "endAt"
+    jobber_utils.JOBBER_FIELD_CACHE["recurrence"] = "recurrences"
+    jobber_utils._field_discovery_done = True
+    yield
+    jobber_utils.JOBBER_FIELD_CACHE.update({
+        "assigned_users": None, "timeframe_end": None, "recurrence": None,
+    })
+    jobber_utils._field_discovery_done = False
+    jobber_utils._field_warned.clear()
+
+
 # ── Realistic trigger events ──────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")

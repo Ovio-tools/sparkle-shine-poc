@@ -29,6 +29,12 @@ from database.schema import get_connection                                      
 from database.mappings import find_unmapped                                            # noqa: E402
 from seeding.utils.checkpoint import CheckpointIterator, load_checkpoint, clear_checkpoint  # noqa: E402
 from seeding.utils.throttler import JOBBER                                             # noqa: E402
+from simulation.jobber_utils import (                                                  # noqa: E402
+    build_job_create_input,
+    expected_duration,
+    get_recurrence_field,
+)
+from simulation.jobber_user_pool import UserPool, load_user_pool_from_config          # noqa: E402
 
 _DB_PATH = os.path.join(_PROJECT_ROOT, "sparkle_shine.db")
 JOBBER_API_URL = "https://api.getjobber.com/api/graphql"
@@ -213,26 +219,6 @@ mutation RecurringJobCreate($input: JobCreateAttributes!) {
 }
 """
 
-# Introspect JobCreateAttributes to discover recurrence field names
-_JOB_CREATE_ATTRS_QUERY = """
-query JobCreateAttrs {
-  __type(name: "JobCreateAttributes") {
-    fields: inputFields {
-      name
-      type {
-        name
-        kind
-        ofType {
-          name
-          kind
-        }
-      }
-    }
-  }
-}
-"""
-
-
 # ---------------------------------------------------------------------------
 # Input builders
 # ---------------------------------------------------------------------------
@@ -291,24 +277,55 @@ def _property_input(c: dict) -> dict:
     return {"properties": [{"address": prop}]}
 
 
-def _job_input(j: dict, jobber_property_id: str) -> dict:
-    """Build a JobCreateAttributes dict from a SQLite jobs row and Jobber property ID."""
-    inp: dict = {
-        "propertyId": jobber_property_id,
-        "title": j["service_type_id"].replace("-", " ").title(),
-        "invoicing": {
+_user_pool_singleton: Optional[UserPool] = None
+_user_pool_loaded: bool = False
+
+
+def _get_user_pool() -> Optional[UserPool]:
+    """Lazily load the Jobber user pool from config/tool_ids.json (cached)."""
+    global _user_pool_singleton, _user_pool_loaded
+    if _user_pool_loaded:
+        return _user_pool_singleton
+    _user_pool_loaded = True
+    tool_ids_path = os.path.join(_PROJECT_ROOT, "config", "tool_ids.json")
+    try:
+        with open(tool_ids_path) as f:
+            tool_ids = json.load(f)
+    except FileNotFoundError:
+        return None
+    _user_pool_singleton = load_user_pool_from_config(tool_ids)
+    return _user_pool_singleton
+
+
+def _job_input(
+    j: dict,
+    jobber_property_id: str,
+    session: requests.Session,
+) -> dict:
+    """Build a JobCreateAttributes dict from a jobs row and Jobber property ID.
+
+    Delegates payload shape (endAt + assignedUsers) to simulation.jobber_utils
+    so the seeder stays consistent with the live simulation engine.
+    """
+    duration = j.get("duration_minutes_actual") or expected_duration(
+        j["service_type_id"], "regular",
+    )
+    start_iso = j["scheduled_date"] if j.get("scheduled_date") else None
+
+    extra = {"instructions": j["notes"][:500]} if j.get("notes") else None
+    return build_job_create_input(
+        property_id=jobber_property_id,
+        title=j["service_type_id"].replace("-", " ").title(),
+        invoicing={
             "invoicingType": "FIXED_PRICE",
             "invoicingSchedule": "ON_COMPLETION",
         },
-    }
-
-    if j["scheduled_date"]:
-        inp["timeframe"] = {"startAt": j["scheduled_date"]}
-
-    if j.get("notes"):
-        inp["instructions"] = j["notes"][:500]
-
-    return inp
+        start_iso=start_iso,
+        duration_minutes=duration,
+        user_pool=_get_user_pool(),
+        session=session,
+        extra=extra,
+    )
 
 
 # Frequency mapping: SQLite → Jobber RecurrenceInput frequency enum values
@@ -323,6 +340,7 @@ def _recurring_job_input(
     agreement: dict,
     jobber_property_id: str,
     recurrence_field: Optional[str],
+    session: requests.Session,
 ) -> dict:
     """
     Build a JobCreateAttributes dict for a recurring agreement.
@@ -333,60 +351,32 @@ def _recurring_job_input(
     """
     freq_config = _FREQ_MAP.get(agreement["frequency"])
     title = agreement["service_type_id"].replace("-", " ").title()
+    duration = expected_duration(agreement["service_type_id"], "regular")
+    start_iso = agreement["start_date"] if agreement.get("start_date") else None
+    extra = {recurrence_field: freq_config} if (recurrence_field and freq_config) else None
 
-    inp: dict = {
-        "propertyId": jobber_property_id,
-        "title": f"Recurring: {title}",
-        "invoicing": {
+    return build_job_create_input(
+        property_id=jobber_property_id,
+        title=f"Recurring: {title}",
+        invoicing={
             "invoicingType": "FIXED_PRICE",
             "invoicingSchedule": "ON_COMPLETION",
         },
-    }
-
-    if agreement["start_date"]:
-        inp["timeframe"] = {"startAt": agreement["start_date"]}
-
-    if recurrence_field and freq_config:
-        inp[recurrence_field] = freq_config
-
-    return inp
+        start_iso=start_iso,
+        duration_minutes=duration,
+        user_pool=_get_user_pool(),
+        session=session,
+        extra=extra,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Schema introspection (one-time, cached in process)
+# Schema introspection (delegated to simulation.jobber_utils for consistency)
 # ---------------------------------------------------------------------------
-
-_recurrence_field_cache: Optional[str] = None
-_recurrence_field_checked = False
-
 
 def _discover_recurrence_field(session: requests.Session) -> Optional[str]:
-    """
-    Introspect JobCreateAttributes to find the recurrence input field, if any.
-    Returns the field name (e.g. 'recurrences', 'repeat', 'schedule') or None.
-    Caches the result for the lifetime of the process.
-    """
-    global _recurrence_field_cache, _recurrence_field_checked
-    if _recurrence_field_checked:
-        return _recurrence_field_cache
-
-    _recurrence_field_checked = True
-    try:
-        resp = _gql(session, _JOB_CREATE_ATTRS_QUERY, {})
-        fields = resp.get("data", {}).get("__type", {}).get("fields", []) or []
-        candidates = {"recurrences", "recurrence", "repeat", "repeats", "schedule", "schedules"}
-        for f in fields:
-            if f["name"] in candidates:
-                _recurrence_field_cache = f["name"]
-                print(f"[push_jobber] Recurrence field discovered: '{f['name']}'")
-                break
-        else:
-            print("[push_jobber] No recurrence field found on JobCreateAttributes — "
-                  "recurring agreements will be pushed as one-time jobs.")
-    except Exception as exc:
-        print(f"[push_jobber] Schema introspection for recurrence field failed: {exc}")
-
-    return _recurrence_field_cache
+    """Back-compat shim around simulation.jobber_utils.get_recurrence_field."""
+    return get_recurrence_field(session)
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +622,7 @@ def _push_agreements(
             skipped += 1
             continue
 
-        inp = _recurring_job_input(agreement, jobber_property_id, recurrence_field)
+        inp = _recurring_job_input(agreement, jobber_property_id, recurrence_field, session)
         resp = _gql(session, _RECURRING_JOB_CREATE_MUTATION, {"input": inp})
         top_errors = resp.get("errors", [])
         if top_errors:
@@ -708,7 +698,7 @@ def _push_jobs(
             continue
 
         resp = _gql(session, _JOB_CREATE_MUTATION, {
-            "input": _job_input(job, jobber_property_id)
+            "input": _job_input(job, jobber_property_id, session)
         })
         top_errors = resp.get("errors", [])
         if top_errors:
@@ -939,7 +929,7 @@ def run_dry_run() -> None:
 
         print(f"\n--- Job mutation: {job['id']} ---")
         resp = _gql(session, _JOB_CREATE_MUTATION, {
-            "input": _job_input(job, jobber_property_id)
+            "input": _job_input(job, jobber_property_id, session)
         })
         print(json.dumps(resp, indent=2))
 

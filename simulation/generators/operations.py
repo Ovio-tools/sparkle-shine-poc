@@ -22,6 +22,12 @@ from database.mappings import generate_id, get_tool_id, get_tool_url, register_m
 from intelligence.logging_config import setup_logging
 from seeding.utils.throttler import JOBBER as throttler
 from simulation.config import CREW_CAPACITY, DAILY_VOLUMES, JOB_VARIETY
+from simulation.jobber_user_pool import UserPool
+from simulation.jobber_utils import (
+    build_job_create_input,
+    expected_duration as _expected_duration,
+    get_recurrence_field as _get_recurrence_field,
+)
 
 logger = setup_logging("simulation.operations")
 
@@ -65,8 +71,6 @@ _FREQ_TO_SERVICE_ID = {
     "one_time_move_in_out": "move-in-out",
     "one_time_project":     "commercial-nightly",
 }
-
-_DURATION_MAP = {st["id"]: st["duration_minutes"] for st in SERVICE_TYPES}
 
 _JOBBER_FREQ_MAP = {
     "weekly":   {"type": "WEEKLY",  "interval": 1},
@@ -149,15 +153,6 @@ query ClientProperties($id: EncodedId!) {
 }
 """
 
-_JOB_CREATE_ATTRS_QUERY = """
-query JobCreateAttrs {
-  __type(name: "JobCreateAttributes") {
-    inputFields { name }
-  }
-}
-"""
-
-
 # ── Module-level helpers ──────────────────────────────────────────────────────
 
 def _gql(session, query: str, variables: dict) -> dict:
@@ -193,18 +188,6 @@ def _add_business_days(d: date, n: int) -> date:
         if result.weekday() < 5:
             n -= 1
     return result
-
-
-def _expected_duration(service_type_id: str, job_type: str) -> int:
-    """Return expected job duration in minutes.
-
-    Source: config/business.py SERVICE_TYPES[n]["duration_minutes"].
-    deep_clean uses the deep-clean service type duration (210 min) regardless
-    of the base service_type_id. Default 120 if service_type_id not found.
-    """
-    if job_type == "deep_clean":
-        return _DURATION_MAP.get("deep-clean", 210)
-    return _DURATION_MAP.get(service_type_id, 120)
 
 
 def _adjusted_rating_distribution(crew_name: str, day_of_week: int) -> list[tuple[int, float]]:
@@ -423,39 +406,6 @@ def _fillin_candidates(
     return [dict(row) for row in rows]
 
 
-# ── Recurrence field discovery (cached) ──────────────────────────────────────
-
-_recurrence_field_cache: Optional[str] = None
-_recurrence_field_checked: bool = False
-
-
-def _get_recurrence_field(session) -> Optional[str]:
-    """Introspect Jobber schema to find the recurrence input field name on JobCreateAttributes.
-
-    Returns the field name (e.g. 'recurrences') or None if not found.
-    Result is cached for the lifetime of the process.
-    """
-    global _recurrence_field_cache, _recurrence_field_checked
-    if _recurrence_field_checked:
-        return _recurrence_field_cache
-    try:
-        data = _gql(session, _JOB_CREATE_ATTRS_QUERY, {})
-        fields = (
-            data.get("data", {})
-            .get("__type", {})
-            .get("inputFields", [])
-        )
-        field_names = {f["name"] for f in fields}
-        for candidate in ("recurrences", "repeat", "schedule", "recurrence"):
-            if candidate in field_names:
-                _recurrence_field_cache = candidate
-                break
-        _recurrence_field_checked = True
-    except Exception:
-        logger.warning("Failed to introspect Jobber recurrence field; will retry next call")
-    return _recurrence_field_cache
-
-
 # ── Property ID helper (lazy fetch + register) ────────────────────────────────
 
 def _get_or_fetch_property_id(canonical_id: str, session, db_path: str) -> Optional[str]:
@@ -509,8 +459,9 @@ class NewClientSetupGenerator:
     is wrapped in its own try/except so a single failure does not abort the rest.
     """
 
-    def __init__(self, db_path: str = "sparkle_shine.db"):
+    def __init__(self, db_path: str = "sparkle_shine.db", user_pool: Optional[UserPool] = None):
         self.db_path = db_path
+        self._user_pool = user_pool
 
     def _ensure_schema(self, conn) -> None:
         """Add client_type column to recurring_agreements if not present."""
@@ -752,18 +703,21 @@ class NewClientSetupGenerator:
         day_of_week_name = _DOW_NAMES[day_of_week_int]
 
         # jobCreate with recurrence
-        job_input: dict = {
-            "propertyId": jobber_property_id or "",
-            "title": f"Recurring: {service_type_id.replace('-', ' ').title()}",
-            "invoicing": {
+        freq_config = _JOBBER_FREQ_MAP.get(recur_frequency)
+        extra = {recur_field: freq_config} if recur_field and freq_config else None
+        job_input = build_job_create_input(
+            property_id=jobber_property_id or "",
+            title=f"Recurring: {service_type_id.replace('-', ' ').title()}",
+            invoicing={
                 "invoicingType": "FIXED_PRICE",
                 "invoicingSchedule": "ON_COMPLETION",
             },
-            "timeframe": {"startAt": start_date.isoformat()},
-        }
-        freq_config = _JOBBER_FREQ_MAP.get(recur_frequency)
-        if recur_field and freq_config:
-            job_input[recur_field] = freq_config
+            start_iso=start_date.isoformat(),
+            duration_minutes=_expected_duration(service_type_id, "regular"),
+            user_pool=self._user_pool,
+            session=session,
+            extra=extra,
+        )
 
         resp = _gql(session, _JOB_CREATE, {"input": job_input})
         errs = _gql_user_errors(resp, "jobCreate")
@@ -791,15 +745,18 @@ class NewClientSetupGenerator:
         self, deal, canonical_id, service_type_id, service_frequency,
         start_date, crew_id, contract_value, jobber_property_id, session, conn,
     ) -> None:
-        job_input: dict = {
-            "propertyId": jobber_property_id or "",
-            "title": service_type_id.replace("-", " ").title(),
-            "invoicing": {
+        job_input = build_job_create_input(
+            property_id=jobber_property_id or "",
+            title=service_type_id.replace("-", " ").title(),
+            invoicing={
                 "invoicingType": "FIXED_PRICE",
                 "invoicingSchedule": "ON_COMPLETION",
             },
-            "timeframe": {"startAt": start_date.isoformat()},
-        }
+            start_iso=start_date.isoformat(),
+            duration_minutes=_expected_duration(service_type_id, "regular"),
+            user_pool=self._user_pool,
+            session=session,
+        )
         resp = _gql(session, _JOB_CREATE, {"input": job_input})
         errs = _gql_user_errors(resp, "jobCreate")
         if errs:
@@ -834,9 +791,15 @@ class JobSchedulingGenerator:
                   None in tests that don't need the queue.
     """
 
-    def __init__(self, db_path: str = "sparkle_shine.db", queue_fn: Optional[Callable] = None):
+    def __init__(
+        self,
+        db_path: str = "sparkle_shine.db",
+        queue_fn: Optional[Callable] = None,
+        user_pool: Optional[UserPool] = None,
+    ):
         self.db_path = db_path
         self._queue_fn = queue_fn
+        self._user_pool = user_pool
 
     def execute(self, dry_run: bool = False) -> GeneratorResult:
         today = date.today()
@@ -940,15 +903,18 @@ class JobSchedulingGenerator:
                                 agreement["id"], agreement["client_id"],
                             )
                             continue
-                        job_input = {
-                            "propertyId": property_id,
-                            "title": agreement["service_type_id"].replace("-", " ").title(),
-                            "invoicing": {
+                        job_input = build_job_create_input(
+                            property_id=property_id,
+                            title=agreement["service_type_id"].replace("-", " ").title(),
+                            invoicing={
                                 "invoicingType": "FIXED_PRICE",
                                 "invoicingSchedule": "ON_COMPLETION",
                             },
-                            "timeframe": {"startAt": today.isoformat()},
-                        }
+                            start_iso=scheduled_dt.isoformat(),
+                            duration_minutes=duration,
+                            user_pool=self._user_pool,
+                            session=session,
+                        )
                         resp = _gql(session, _JOB_CREATE, {"input": job_input})
                         errs = _gql_user_errors(resp, "jobCreate")
                         if errs:
@@ -1065,15 +1031,18 @@ class JobSchedulingGenerator:
                                 client["company_name"],
                             )
                             continue
-                        job_input = {
-                            "propertyId": property_id,
-                            "title": f"Commercial Nightly Clean - {client['company_name']}",
-                            "invoicing": {
+                        job_input = build_job_create_input(
+                            property_id=property_id,
+                            title=f"Commercial Nightly Clean - {client['company_name']}",
+                            invoicing={
                                 "invoicingType": "FIXED_PRICE",
                                 "invoicingSchedule": "ON_COMPLETION",
                             },
-                            "timeframe": {"startAt": today.isoformat()},
-                        }
+                            start_iso=scheduled_dt.isoformat(),
+                            duration_minutes=duration,
+                            user_pool=self._user_pool,
+                            session=session,
+                        )
                         resp = _gql(session, _JOB_CREATE, {"input": job_input})
                         errs = _gql_user_errors(resp, "jobCreate")
                         if errs:
@@ -1347,15 +1316,18 @@ class JobSchedulingGenerator:
                             if property_id is None:
                                 continue
 
-                            job_input = {
-                                "propertyId": property_id,
-                                "title": fill_title,
-                                "invoicing": {
+                            job_input = build_job_create_input(
+                                property_id=property_id,
+                                title=fill_title,
+                                invoicing={
                                     "invoicingType": "FIXED_PRICE",
                                     "invoicingSchedule": "ON_COMPLETION",
                                 },
-                                "timeframe": {"startAt": today.isoformat()},
-                            }
+                                start_iso=scheduled_dt.isoformat(),
+                                duration_minutes=duration,
+                                user_pool=self._user_pool,
+                                session=session,
+                            )
                             resp = _gql(session, _JOB_CREATE, {"input": job_input})
                             errs = _gql_user_errors(resp, "jobCreate")
                             if errs:
@@ -1461,8 +1433,9 @@ class JobCompletionGenerator:
       92% completed, 3% cancelled, 2% no-show, 3% rescheduled
     """
 
-    def __init__(self, db_path: str = "sparkle_shine.db"):
+    def __init__(self, db_path: str = "sparkle_shine.db", user_pool: Optional[UserPool] = None):
         self.db_path = db_path
+        self._user_pool = user_pool
 
     def _ensure_schema(self, conn) -> None:
         """Add churn_risk column to clients if not present."""
@@ -1641,15 +1614,22 @@ class JobCompletionGenerator:
                 f"Cannot reschedule job {job_id}: no Jobber property ID for client "
                 f"{job['client_id']}"
             )
-        job_input = {
-            "propertyId": property_id,
-            "title": service_type_id.replace("-", " ").title(),
-            "invoicing": {
+        # Land the rescheduled job at the crew's normal window start so the
+        # Jobber calendar block doesn't pile at 00:00.
+        scheduled_dt = _assign_scheduled_time(crew_id, [], tomorrow)
+        duration = _expected_duration(service_type_id, "regular")
+        job_input = build_job_create_input(
+            property_id=property_id,
+            title=service_type_id.replace("-", " ").title(),
+            invoicing={
                 "invoicingType": "FIXED_PRICE",
                 "invoicingSchedule": "ON_COMPLETION",
             },
-            "timeframe": {"startAt": tomorrow.isoformat()},
-        }
+            start_iso=scheduled_dt.isoformat(),
+            duration_minutes=duration,
+            user_pool=self._user_pool,
+            session=session,
+        )
         resp = _gql(session, _JOB_CREATE, {"input": job_input})
         errs = _gql_user_errors(resp, "jobCreate")
         if errs:
