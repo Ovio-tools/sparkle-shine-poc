@@ -347,15 +347,25 @@ class HubSpotSyncer(BaseSyncer):
 
         if canonical_id is None:
             canonical_id = generate_id("PROP", self.db_path)
+            # Resolve the deal's associated contact -> existing canonical so
+            # the new proposal is born linked, not orphaned. Sibling of the
+            # Pipedrive syncer fix; HubSpot's deal-search response does NOT
+            # embed contacts, so this triggers a per-deal API call (rare —
+            # only on the INSERT path).
+            lead_id, client_id = self._resolve_proposal_linkage(deal, hs_id)
             with self.db:
                 self.db.execute(
                     """
                     INSERT INTO commercial_proposals
-                        (id, title, monthly_value, status, decision_date)
-                    VALUES (%s, %s, %s, %s, %s)
+                        (id, title, monthly_value, status, decision_date,
+                         lead_id, client_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
-                    (canonical_id, title, monthly_value, status, close_date),
+                    (
+                        canonical_id, title, monthly_value, status, close_date,
+                        lead_id, client_id,
+                    ),
                 )
                 register_mapping_on_conn(self.db, canonical_id, "hubspot", hs_id)
         else:
@@ -370,6 +380,68 @@ class HubSpotSyncer(BaseSyncer):
                     """,
                     (status, monthly_value, close_date, canonical_id),
                 )
+
+    def _resolve_proposal_linkage(self, deal, hs_id: str) -> tuple[Optional[str], Optional[str]]:
+        """Return (lead_id, client_id) for a new commercial_proposals row.
+
+        Walks the HubSpot deal -> associated contact -> existing canonical
+        mapping. SS-LEAD-* -> lead_id; SS-CLIENT-* -> client_id; otherwise
+        both NULL (the orphan case that new_client_onboarding heals at
+        win-time). Tries the embedded associations from the search response
+        first (rarely populated); falls back to a per-deal basic_api fetch.
+        """
+        contact_ids = self._extract_contact_ids(deal)
+        if not contact_ids:
+            contact_ids = self._fetch_associated_contact_ids(hs_id)
+        for cid in contact_ids:
+            canonical = get_canonical_id("hubspot", str(cid), db_path=self.db_path)
+            if canonical is None:
+                continue
+            if canonical.startswith("SS-LEAD-"):
+                return canonical, None
+            if canonical.startswith("SS-CLIENT-"):
+                return None, canonical
+        return None, None
+
+    @staticmethod
+    def _extract_contact_ids(deal) -> list[str]:
+        """Extract associated contact IDs from a HubSpot deal SDK object.
+
+        Handles both the dict and attribute-style shapes the SDK uses for
+        association payloads. Returns [] if no contacts are embedded.
+        """
+        assoc = getattr(deal, "associations", None)
+        if assoc is None:
+            return []
+        contacts = (
+            assoc.get("contacts") if isinstance(assoc, dict)
+            else getattr(assoc, "contacts", None)
+        )
+        if contacts is None:
+            return []
+        results = (
+            contacts.get("results") if isinstance(contacts, dict)
+            else getattr(contacts, "results", None)
+        ) or []
+        return [str(r["id"] if isinstance(r, dict) else getattr(r, "id"))
+                for r in results
+                if (isinstance(r, dict) and r.get("id")) or getattr(r, "id", None)]
+
+    def _fetch_associated_contact_ids(self, hs_id: str) -> list[str]:
+        """Fetch the deal with associations=['contacts'] and return contact IDs."""
+        try:
+            client = get_client("hubspot")
+            HUBSPOT.wait()
+            full = client.crm.deals.basic_api.get_by_id(
+                deal_id=hs_id,
+                associations=["contacts"],
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Could not fetch HubSpot associations for deal %s: %s", hs_id, exc
+            )
+            return []
+        return self._extract_contact_ids(full)
 
 
 # ------------------------------------------------------------------ #
