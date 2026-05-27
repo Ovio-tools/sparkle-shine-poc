@@ -180,6 +180,35 @@ def _gql_user_errors(data: dict, mutation_key: str) -> list:
     )
 
 
+class _JobberCatchupSkip(Exception):
+    """Raised in the Pass 1c catch-up loop when a past-due scheduled job
+    cannot be progressed in Jobber (no mapping, missing session, jobClose
+    raises, or jobClose returns userErrors). The loop catches this and
+    leaves the Postgres row as 'scheduled' so the next catch-up tick can
+    retry once the upstream condition is resolved — preventing Postgres
+    from drifting ahead of Jobber and producing phantom 'completed jobs
+    with no invoice' alerts in the reconciler."""
+
+
+def _catchup_close_in_jobber(session, jobber_job_id) -> None:
+    """jobClose for the catch-up path. Raises _JobberCatchupSkip on any
+    failure so the caller can roll back its savepoint and leave PG alone."""
+    if not jobber_job_id:
+        raise _JobberCatchupSkip("no Jobber mapping")
+    if session is None:
+        raise _JobberCatchupSkip("no Jobber session")
+    try:
+        resp = _gql(session, _JOB_CLOSE, {
+            "jobId": jobber_job_id,
+            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
+        })
+    except Exception as exc:
+        raise _JobberCatchupSkip(f"jobClose request failed: {exc}") from exc
+    errs = _gql_user_errors(resp, "jobClose")
+    if errs:
+        raise _JobberCatchupSkip(f"jobClose userErrors: {errs}")
+
+
 def _add_business_days(d: date, n: int) -> date:
     """Return d + n business days (skipping Saturday=5, Sunday=6)."""
     result = d
@@ -1133,17 +1162,12 @@ class JobSchedulingGenerator:
                             # Use a plausible completion time on the original date
                             completed_at = f"{oj['scheduled_date']}T{random.randint(10,17):02d}:{random.randint(0,59):02d}:00"
 
-                            # Close in Jobber if we have a mapping and a session
+                            # Close in Jobber first; raise _JobberCatchupSkip
+                            # to abandon this row entirely when the close cannot
+                            # land, so Postgres never advances past Jobber.
                             if not dry_run:
                                 jobber_job_id = get_tool_id(oj["id"], "jobber", db_path=self.db_path)
-                                if jobber_job_id and catchup_session:
-                                    try:
-                                        _gql(catchup_session, _JOB_CLOSE, {
-                                            "jobId": jobber_job_id,
-                                            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
-                                        })
-                                    except Exception as e:
-                                        logger.warning("Catch-up Jobber close failed for %s: %s", oj["id"], e)
+                                _catchup_close_in_jobber(catchup_session, jobber_job_id)
 
                             conn.execute("""
                                 UPDATE jobs
@@ -1171,14 +1195,7 @@ class JobSchedulingGenerator:
                             # cancelled or no-show
                             if not dry_run:
                                 jobber_job_id = get_tool_id(oj["id"], "jobber", db_path=self.db_path)
-                                if jobber_job_id and catchup_session:
-                                    try:
-                                        _gql(catchup_session, _JOB_CLOSE, {
-                                            "jobId": jobber_job_id,
-                                            "input": {"modifyIncompleteVisitsBy": "COMPLETE_PAST_DESTROY_FUTURE"},
-                                        })
-                                    except Exception as e:
-                                        logger.warning("Catch-up Jobber close failed for %s: %s", oj["id"], e)
+                                _catchup_close_in_jobber(catchup_session, jobber_job_id)
                             conn.execute(
                                 "UPDATE jobs SET status = %s WHERE id = %s",
                                 (outcome, oj["id"]),
@@ -1186,6 +1203,31 @@ class JobSchedulingGenerator:
 
                         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                         results.append(("ok_catchup", oj["id"]))
+                    except _JobberCatchupSkip as skip:
+                        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                        logger.warning(
+                            "Catch-up: leaving %s as 'scheduled' — %s",
+                            oj["id"], skip,
+                        )
+                        results.append(("skipped_orphan", oj["id"], str(skip)))
+                        try:
+                            from simulation.error_reporter import report_error
+                            report_error(
+                                f"Catch-up could not progress job {oj['id']}: {skip}. "
+                                "Job remains 'scheduled' in Postgres; verify the Jobber "
+                                "mapping and API health, or run "
+                                "scripts/remediate_reconciliation_invoices.py once the "
+                                "upstream condition is resolved.",
+                                tool_name="jobber",
+                                context=(
+                                    f"job={oj['id']}, "
+                                    f"scheduled_date={oj.get('scheduled_date')}"
+                                ),
+                                severity="warning",
+                            )
+                        except Exception:
+                            pass
                     except Exception as e:
                         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
                         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
