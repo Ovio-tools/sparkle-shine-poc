@@ -195,5 +195,71 @@
       "cal_014": "ahsbf5qukhf196evepgu48nklg",
       "cal_015": "m01hv7d3gta698c0efjs199o20"
     }
+  },
+  "jobber": {
+    "user_pool": [
+      "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY1NA==",
+      "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY3Mw==",
+      "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY3MA==",
+      "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY5MA==",
+      "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY5Mw==",
+      "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY5OA==",
+      "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjcwMg=="
+    ],
+    "excluded_from_pool": [
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvMzgwMTkwMw==",
+        "name": "Tools ",
+        "email": "hello@oviodigital.com",
+        "excluded_reason": "matched 'tools'"
+      }
+    ],
+    "users_seen": [
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY1NA==",
+        "name": "Maria Gonzalez",
+        "email": "maria.gonzalez@oviodigital.com"
+      },
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY3Mw==",
+        "name": "Darnell Washington",
+        "email": "darnell.washington@oviodigital.com"
+      },
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY3MA==",
+        "name": "Claudia Ramirez",
+        "email": "claudia.ramirez@oviodigital.com"
+      },
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY5MA==",
+        "name": "Patricia Nguyen",
+        "email": "patricia.nguyen@oviodigital.com"
+      },
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY5Mw==",
+        "name": "Kevin Okafor",
+        "email": "kevin.okafor@oviodigital.com"
+      },
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjY5OA==",
+        "name": "Sandra Flores",
+        "email": "sandra.flores@oviodigital.com"
+      },
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvNDAyMjcwMg==",
+        "name": "Travis Coleman",
+        "email": "travis.coleman@oviodigital.com"
+      },
+      {
+        "id": "Z2lkOi8vSm9iYmVyL1VzZXIvMzgwMTkwMw==",
+        "name": "Tools ",
+        "email": "hello@oviodigital.com"
+      }
+    ],
+    "crew_size_tiers": {
+      "small_max": 90,
+      "medium_max": 150
+    },
+    "endAt_jitter_minutes": 5
   }
 }
