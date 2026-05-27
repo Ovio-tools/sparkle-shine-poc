@@ -29,6 +29,7 @@ from typing import Optional
 
 from intelligence.logging_config import setup_logging
 from simulation.config import DAILY_VOLUMES
+from simulation.jobber_user_pool import UserPool, load_user_pool_from_config
 from simulation.variation import get_adjusted_volume, get_next_event_delay, should_event_happen
 
 logger = setup_logging(__name__)
@@ -87,6 +88,7 @@ class SimulationEngine:
         self._resume_incomplete_day = False
         self._fresh_start = True
         self.day_runtime_budget_seconds = DEFAULT_DAY_RUNTIME_BUDGET_SECONDS
+        self.user_pool: Optional[UserPool] = self._load_user_pool()
 
         # --date wins: seed RNG and skip checkpoint (L7)
         if target_date is not None:
@@ -99,6 +101,30 @@ class SimulationEngine:
         self._register_generators()
         signal.signal(signal.SIGTERM, self.handle_shutdown)
         signal.signal(signal.SIGINT, self.handle_shutdown)
+
+    def _load_user_pool(self) -> Optional[UserPool]:
+        """Load the Jobber assignedUsers pool from config/tool_ids.json.
+
+        Returns None (with a WARN) when the jobber block or user_pool list
+        is absent — runtime then creates jobs without assignedUsers, which
+        the soft-fail in build_job_create_input tolerates.
+        """
+        path = Path(__file__).resolve().parent.parent / "config" / "tool_ids.json"
+        try:
+            with open(path) as f:
+                tool_ids = json.load(f)
+        except FileNotFoundError:
+            logger.warning("config/tool_ids.json missing; jobs will have no assignedUsers")
+            return None
+        pool = load_user_pool_from_config(tool_ids)
+        if pool is None:
+            logger.warning(
+                "Jobber user_pool missing in tool_ids.json; "
+                "jobs will be created without assignedUsers"
+            )
+            return None
+        logger.info("Loaded Jobber user pool with %d users", pool.size)
+        return pool
 
     def register(self, name: str, generator) -> None:
         """Register a generator instance under the given event name."""
@@ -121,9 +147,9 @@ class SimulationEngine:
                 JobSchedulingGenerator,
                 JobCompletionGenerator,
             )
-            self.register("new_client_setup", NewClientSetupGenerator(self.db_path))
-            self.register("job_scheduling",   JobSchedulingGenerator(self.db_path, queue_fn=self.queue_timed_event))
-            self.register("job_completion",   JobCompletionGenerator(self.db_path))
+            self.register("new_client_setup", NewClientSetupGenerator(self.db_path, user_pool=self.user_pool))
+            self.register("job_scheduling",   JobSchedulingGenerator(self.db_path, queue_fn=self.queue_timed_event, user_pool=self.user_pool))
+            self.register("job_completion",   JobCompletionGenerator(self.db_path, user_pool=self.user_pool))
         except ImportError:
             logger.warning("OperationsGenerators not found — skipping")
 

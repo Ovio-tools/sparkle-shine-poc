@@ -112,6 +112,38 @@ def test_jobber_client_created(
     assert mock_clients.jobber.post.call_count >= 1
 
 
+@patch("automations.new_client_onboarding.requests.post")
+@patch("automations.new_client_onboarding.create_tasks", return_value=["gid-1"])
+def test_jobber_jobcreate_includes_endAt_and_assignedUsers(
+    _mock_tasks, _mock_requests, auto, mock_clients, sample_triggers, monkeypatch
+):
+    """jobCreate input must carry endAt + assignedUsers when the pool is configured."""
+    _mock_requests.return_value = _make_qbo_post_mock()
+
+    # Pre-load a user pool so build_job_create_input picks users.
+    from simulation.jobber_user_pool import UserPool
+    monkeypatch.setattr(
+        "automations.new_client_onboarding._user_pool",
+        lambda: UserPool(["u1", "u2", "u3"]),
+    )
+
+    auto.run(sample_triggers["won_deal"])
+
+    # Find the jobCreate call body among the three Jobber POSTs.
+    job_create_body = None
+    for call in mock_clients.jobber.post.call_args_list:
+        kwargs = call.kwargs or {}
+        body = kwargs.get("json") or (call.args[1] if len(call.args) > 1 else None)
+        if body and "jobCreate" in body.get("query", ""):
+            job_create_body = body
+            break
+    assert job_create_body is not None, "jobCreate POST not found"
+    job_input = job_create_body["variables"]["input"]
+    assert "endAt" in job_input["timeframe"], job_input
+    assert isinstance(job_input.get("assignedUsers"), list)
+    assert len(job_input["assignedUsers"]) >= 1
+
+
 @patch("automations.new_client_onboarding.create_tasks", return_value=["gid-1"])
 def test_quickbooks_customer_created(
     _mock_tasks, auto, mock_clients, sample_triggers

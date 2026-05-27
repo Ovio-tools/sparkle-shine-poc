@@ -18,6 +18,30 @@ from unittest.mock import MagicMock, patch, call
 from tests.sqlite_compat import sqlite_get_column_names, wrap_sqlite_connection
 
 
+def _install_jobber_field_cache(
+    *,
+    assigned_users="assignedUsers",
+    timeframe_end="endAt",
+    recurrence="recurrences",
+):
+    """Pre-populate simulation.jobber_utils.JOBBER_FIELD_CACHE so the test
+    skips schema introspection on the next jobCreate call."""
+    from simulation import jobber_utils
+    jobber_utils.JOBBER_FIELD_CACHE["assigned_users"] = assigned_users
+    jobber_utils.JOBBER_FIELD_CACHE["timeframe_end"] = timeframe_end
+    jobber_utils.JOBBER_FIELD_CACHE["recurrence"] = recurrence
+    jobber_utils._field_discovery_done = True
+
+
+def _reset_jobber_field_cache():
+    from simulation import jobber_utils
+    jobber_utils.JOBBER_FIELD_CACHE.update({
+        "assigned_users": None, "timeframe_end": None, "recurrence": None,
+    })
+    jobber_utils._field_discovery_done = False
+    jobber_utils._field_warned.clear()
+
+
 @contextmanager
 def _patched_ops_db(conn):
     with patch(
@@ -387,18 +411,17 @@ class TestNewClientSetupGeneratorRecurring(unittest.TestCase):
         mock_get_tool_id.return_value = None
 
         # _gql returns for: clientCreate, propertyCreate, jobCreate (recurring)
+        # Schema introspection lives in simulation.jobber_utils now and is
+        # pre-installed via _install_jobber_field_cache below.
         mock_gql.side_effect = [
             {"data": {"clientCreate": {"client": {"id": "GQL-CLIENT-1"}, "userErrors": []}}},
             {"data": {"propertyCreate": {"properties": [{"id": "GQL-PROP-1"}], "userErrors": []}}},
-            {"data": {"__type": {"inputFields": [{"name": "recurrences"}]}}},  # introspect
             {"data": {"jobCreate": {"job": {"id": "GQL-JOB-1"}, "userErrors": []}}},
         ]
         mock_gen_id.side_effect = ["SS-RECUR-9999"]
 
-        # Reset recurrence field cache so introspect _gql call is made
-        import simulation.generators.operations as ops_mod
-        ops_mod._recurrence_field_checked = False
-        ops_mod._recurrence_field_cache = None
+        self.addCleanup(_reset_jobber_field_cache)
+        _install_jobber_field_cache()
 
         gen = NewClientSetupGenerator(db_path=":memory:")
 
@@ -489,14 +512,14 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
         mock_get_tool_id.return_value = None
         mock_gen_id.side_effect = ["SS-RECUR-0001", "SS-RECUR-0003"]
 
+        # Schema introspection is pre-installed in jobber_utils — operations.py
+        # no longer issues __type queries through this _gql mock.
         success_response = [
             {"data": {"clientCreate": {"client": {"id": "GQL-C-OK"}, "userErrors": []}}},
             {"data": {"propertyCreate": {"properties": [{"id": "GQL-P-OK"}], "userErrors": []}}},
-            {"data": {"__type": {"inputFields": [{"name": "recurrences"}]}}},
             {"data": {"jobCreate": {"job": {"id": "GQL-J-OK"}, "userErrors": []}}},
         ]
-        # Client 1: success (4 calls), Client 2: raises on clientCreate,
-        # Client 3: success (3 calls — recurrence field already cached after client 1)
+        # Client 1: success (3 calls), Client 2: raises on clientCreate, Client 3: success
         client3_responses = [
             {"data": {"clientCreate": {"client": {"id": "GQL-C-OK"}, "userErrors": []}}},
             {"data": {"propertyCreate": {"properties": [{"id": "GQL-P-OK"}], "userErrors": []}}},
@@ -505,20 +528,19 @@ class TestNewClientSetupErrorIsolation(unittest.TestCase):
         call_count = [0]
         def side_effect(*args, **kwargs):
             call_count[0] += 1
-            # Calls 1-4: client 1 (success)
-            if call_count[0] <= 4:
+            # Calls 1-3: client 1 (success)
+            if call_count[0] <= 3:
                 return success_response[call_count[0] - 1]
-            # Call 5: client 2 clientCreate → raises
-            if call_count[0] == 5:
+            # Call 4: client 2 clientCreate → raises
+            if call_count[0] == 4:
                 raise RuntimeError("Simulated Jobber error for client 2")
-            # Calls 6+: client 3 (success, 3 calls — recurrence cached)
-            return client3_responses[call_count[0] - 6]
+            # Calls 5+: client 3 (success, 3 calls)
+            return client3_responses[call_count[0] - 5]
 
         mock_gql.side_effect = side_effect
 
-        import simulation.generators.operations as ops_mod
-        ops_mod._recurrence_field_checked = False
-        ops_mod._recurrence_field_cache = None
+        self.addCleanup(_reset_jobber_field_cache)
+        _install_jobber_field_cache()
 
         gen = NewClientSetupGenerator(db_path=":memory:")
 
@@ -644,14 +666,11 @@ class TestNewClientSetupSSPropResolution(unittest.TestCase):
         mock_gql.side_effect = [
             {"data": {"clientCreate":   {"client":     {"id": "GQL-CLIENT-517"}, "userErrors": []}}},
             {"data": {"propertyCreate": {"properties": [{"id": "GQL-PROP-517"}], "userErrors": []}}},
-            {"data": {"__type":         {"inputFields": [{"name": "recurrences"}]}}},
             {"data": {"jobCreate":      {"job":        {"id": "GQL-JOB-517"},   "userErrors": []}}},
         ]
 
-        # Reset recurrence-field cache so introspect call is made
-        import simulation.generators.operations as ops_mod
-        ops_mod._recurrence_field_checked = False
-        ops_mod._recurrence_field_cache = None
+        self.addCleanup(_reset_jobber_field_cache)
+        _install_jobber_field_cache()
 
         gen = NewClientSetupGenerator(db_path=":memory:")
         with _patched_ops_db(conn):

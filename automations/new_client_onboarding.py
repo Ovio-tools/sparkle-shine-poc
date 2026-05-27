@@ -29,6 +29,8 @@ from automations.base import BaseAutomation
 from automations.utils.assignees import get_assignee_email
 from automations.utils.asana_tasks import create_tasks
 from automations.utils.id_resolver import MappingNotFoundError, register_mapping
+from simulation.jobber_user_pool import load_user_pool_from_config
+from simulation.jobber_utils import build_job_create_input, expected_duration
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -38,6 +40,52 @@ _JOBBER_GQL_URL = "https://api.getjobber.com/api/graphql"
 
 _OFFICE_MANAGER_EMAIL = get_assignee_email("office_manager")
 _CREW_LEAD_EMAIL      = get_assignee_email("crew_lead")
+
+# Map Pipedrive free-text service_type values to canonical SERVICE_TYPES ids
+# so the duration tier maps correctly. Unknown values fall back to
+# "std-residential" (120 min, 2-user tier).
+_SERVICE_TYPE_TO_CANONICAL = {
+    "weekly":            "recurring-weekly",
+    "biweekly":          "recurring-biweekly",
+    "monthly":           "recurring-monthly",
+    "one-time":          "std-residential",
+    "deep clean":        "deep-clean",
+    "move-in":           "move-in-out",
+    "move-out":          "move-in-out",
+    "commercial":        "commercial-nightly",
+    "commercial nightly": "commercial-nightly",
+}
+
+
+def _canonical_service_type(raw: str) -> str:
+    """Map a free-text service type string to a canonical SERVICE_TYPES id."""
+    if not raw:
+        return "std-residential"
+    needle = raw.strip().lower()
+    for key, canonical in _SERVICE_TYPE_TO_CANONICAL.items():
+        if key in needle:
+            return canonical
+    return "std-residential"
+
+
+_user_pool_cache = None
+_user_pool_loaded = False
+
+
+def _user_pool():
+    """Lazy-load the Jobber user pool for the onboarding automation."""
+    global _user_pool_cache, _user_pool_loaded
+    if _user_pool_loaded:
+        return _user_pool_cache
+    _user_pool_loaded = True
+    tool_ids_path = os.path.join(_PROJECT_ROOT, "config", "tool_ids.json")
+    try:
+        with open(tool_ids_path) as f:
+            tool_ids = json.load(f)
+    except FileNotFoundError:
+        return None
+    _user_pool_cache = load_user_pool_from_config(tool_ids)
+    return _user_pool_cache
 
 # QBO sandbox Net 30 term ID (standard in all QBO sandboxes)
 _QBO_NET30_TERM_ID = "3"
@@ -793,17 +841,24 @@ class NewClientOnboarding(BaseAutomation):
             )
             return (jobber_client_id, None)
 
-        # Create job
-        job_input: dict = {
-            "propertyId": jobber_property_id,
-            "title": ctx["service_type"] or "Cleaning Service",
-            "invoicing": {
+        # Create job. Crew_id isn't in ctx — the simulation's scheduling
+        # generator will assign the real crew on the next tick; here we just
+        # use the duration-tier-based pick from the user pool.
+        canonical_service = _canonical_service_type(ctx.get("service_type") or "")
+        duration_minutes = expected_duration(canonical_service, "regular")
+        start_iso = ctx["close_date"].isoformat() if ctx.get("close_date") else None
+        job_input = build_job_create_input(
+            property_id=jobber_property_id,
+            title=ctx["service_type"] or "Cleaning Service",
+            invoicing={
                 "invoicingType": "FIXED_PRICE",
                 "invoicingSchedule": "ON_COMPLETION",
             },
-        }
-        if ctx["close_date"]:
-            job_input["timeframe"] = {"startAt": ctx["close_date"].isoformat()}
+            start_iso=start_iso,
+            duration_minutes=duration_minutes,
+            user_pool=_user_pool(),
+            session=session,
+        )
 
         job_resp = session.post(
             _JOBBER_GQL_URL,
