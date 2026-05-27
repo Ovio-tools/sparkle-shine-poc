@@ -11,7 +11,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 ## Tech Stack
 
 - **Language:** Python 3.11+ (Railway/Nixpacks default is 3.11; avoid macOS system Python 3.9 for local dev)
-- **Database:** PostgreSQL via psycopg2 (production/simulation/automations/intelligence), SQLite (seeding, setup, tests)
+- **Database:** PostgreSQL via psycopg2 for every running service (simulation, automations, intelligence, reconciliation, token-keeper). SQLite is only used in offline tooling that never runs on Railway: original `seeding/` generators, `setup/populate_workspace.py`, `demo/smoke_test.py`, test-doubles under `tests/sqlite_compat.py`, `scripts/migrate_to_postgres.py`, and a handful of legacy one-off scripts under `scripts/`.
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
 - **Deployment:** Railway (`railway.toml` in repo root, 6 services — start commands configured per-service on dashboard via wrapper scripts; always-on workers should use `/railway.worker.toml` as their custom config file)
@@ -71,7 +71,7 @@ These rules exist because of real bugs. Follow them strictly.
 
 ## Database Patterns (PostgreSQL)
 
-IMPORTANT: All new code must use PostgreSQL via psycopg2. Some legacy modules (`simulation/reconciliation/`, `seeding/`, `setup/`, `demo/`, some `scripts/`, `tests/`) still use SQLite directly. Do not extend that pattern.
+IMPORTANT: All new code must use PostgreSQL via psycopg2. SQLite still appears in offline tooling (`seeding/`, `setup/`, `demo/`, some `scripts/`, `tests/sqlite_compat.py`) — none of these run as a Railway service. Do not extend that pattern. Note: `simulation/reconciliation/` is PostgreSQL despite older docs that may suggest otherwise.
 
 ### Troubleshooting Source Of Truth
 - For production or production-like diagnosis, verify Railway first: Railway Postgres for data, Railway env for config, Railway logs/runtime for auth and tool behavior.
@@ -120,7 +120,7 @@ sparkle-shine-poc/
 ├── automations/     # 8 workflow modules + runner.py, triggers.py, base.py, state.py, utils/
 ├── intelligence/    # syncers/, metrics/ (6 modules), context_builder, briefing_generator, weekly_report,
 │                    #   slack_publisher, runner.py, documents/doc_search.py
-├── seeding/         # generators/ (data into SQLite) + pushers/ (SQLite to APIs) + utils/
+├── seeding/         # one-time historical data prep: generators/ build a local SQLite snapshot; pushers/ then push that snapshot to the SaaS tools. Live runtime does NOT use this path.
 ├── services/        # token_keeper.py (Jobber OAuth refresh — sole owner of rotating refresh tokens)
 ├── setup/           # configure_tools.py, populate_workspace.py (one-time tool provisioning)
 ├── demo/            # audit/, fixes/, hardening/, scenarios/, tuning/, walkthrough/, smoke_test.py
