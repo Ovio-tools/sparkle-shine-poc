@@ -122,8 +122,12 @@ class AsanaSyncer(BaseSyncer):
             errors.append(f"project {project_name} fetch error: {exc}")
             return 0
 
-        for task in task_iter:
-            ASANA.wait()
+        page_size = opts["limit"]
+        for i, task in enumerate(task_iter):
+            # The SDK paginates internally; throttle once per page fetch, not per item.
+            # The wait before get_tasks_for_project covers page 1; this covers pages 2+.
+            if i > 0 and i % page_size == 0:
+                ASANA.wait()
             try:
                 self._upsert_task(task, project_name)
                 count += 1
