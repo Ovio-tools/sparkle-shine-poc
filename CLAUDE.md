@@ -56,6 +56,7 @@ See @docs/skills/tool-api-patterns.md for rate limits, endpoints, headers, and e
 
 These rules exist because of real bugs. Follow them strictly.
 
+- When investigating or troubleshooting, default to GitHub-tracked repo state for intended code/config behavior and Railway for live DB state, env vars, deployed runtime, logs, auth state, and token behavior.
 - When troubleshooting runtime issues, auth issues, missing records, or data mismatches, treat Railway as the default source of truth for DB state, env vars, token state, and live tool behavior. Do not start by trusting the local DB or local token files unless the prompt is explicitly about local development, SQLite seeding, or tests.
 - NEVER `import sqlite3` or call `sqlite3.connect()` in new production code. Use `from database.connection import get_connection`.
 - NEVER use integer indexing on database rows (`row[0]`, `fetchone()[0]`). Rows are `RealDictRow` dicts. Always use `row["column_name"]`.
@@ -74,6 +75,7 @@ These rules exist because of real bugs. Follow them strictly.
 IMPORTANT: All new code must use PostgreSQL via psycopg2. SQLite still appears in offline tooling (`seeding/`, `setup/`, `demo/`, some `scripts/`, `tests/sqlite_compat.py`) — none of these run as a Railway service. Do not extend that pattern. Note: `simulation/reconciliation/` is PostgreSQL despite older docs that may suggest otherwise.
 
 ### Troubleshooting Source Of Truth
+- For investigation and troubleshooting, default first to GitHub-tracked repository state for intended behavior, then to Railway for live runtime truth.
 - For production or production-like diagnosis, verify Railway first: Railway Postgres for data, Railway env for config, Railway logs/runtime for auth and tool behavior.
 - Use local PostgreSQL or SQLite only for local-dev reproduction, tests, seeding flows, or when the prompt is explicitly about local state.
 - If local state disagrees with Railway, assume local drift until Railway proves otherwise.
