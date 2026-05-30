@@ -9,13 +9,19 @@ Each function:
   4. Returns a list of event dicts for the caller to act on.
 """
 import json
+import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import requests
 
 from automations.state import get_last_poll, update_last_poll
+from seeding.utils.throttler import JOBBER
+from simulation.jobber_utils import extract_job_visit_details
+
+logger = logging.getLogger(__name__)
 
 # Jobber GraphQL endpoint
 _JOBBER_GRAPHQL_URL = os.getenv(
@@ -25,6 +31,10 @@ _JOBBER_GRAPHQL_URL = os.getenv(
 _TOOL_IDS_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "config", "tool_ids.json"
 )
+
+_JOBBER_POLL_TIMEOUT_SECONDS = 30
+_JOBBER_POLL_MAX_RETRIES = 3
+_JOBBER_POLL_BASE_BACKOFF_SECONDS = 2
 
 
 def _load_pipedrive_deal_fields() -> dict:
@@ -46,6 +56,57 @@ def _default_since() -> str:
     """Default lookback: 24 hours ago, formatted as ISO-8601 UTC."""
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     return since.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _post_jobber_graphql(session, payload: dict) -> requests.Response:
+    """
+    Execute a Jobber GraphQL POST with throttling and transient retry/backoff.
+
+    The Jobber completed-jobs poll is especially sensitive to brief upstream
+    slowdowns because it may need to walk multiple pages before it reaches the
+    last processed watermark. Retrying timeouts/5xx/429s here prevents a
+    single slow page from turning into an automation failure.
+    """
+    backoff = _JOBBER_POLL_BASE_BACKOFF_SECONDS
+    last_exc: Exception | None = None
+
+    for attempt in range(1, _JOBBER_POLL_MAX_RETRIES + 1):
+        try:
+            JOBBER.wait()
+            resp = session.post(
+                _JOBBER_GRAPHQL_URL,
+                json=payload,
+                timeout=_JOBBER_POLL_TIMEOUT_SECONDS,
+            )
+            if resp.status_code in (429, 500, 502, 503, 504):
+                resp.raise_for_status()
+            return resp
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.HTTPError,
+        ) as exc:
+            retryable = True
+            if isinstance(exc, requests.HTTPError):
+                status = exc.response.status_code if exc.response is not None else None
+                retryable = status in (429, 500, 502, 503, 504)
+            if not retryable or attempt >= _JOBBER_POLL_MAX_RETRIES:
+                raise
+
+            last_exc = exc
+            logger.warning(
+                "Jobber completed-jobs poll transient failure (%s), retry %d/%d in %ds",
+                exc,
+                attempt,
+                _JOBBER_POLL_MAX_RETRIES,
+                backoff,
+            )
+            time.sleep(backoff)
+            backoff *= 2
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Jobber completed-jobs poll failed without an exception")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,9 +209,12 @@ def poll_pipedrive_won_deals(clients: Any, db) -> list:
 # 2. Jobber: completed jobs
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Jobber enforces a 10,000-point requested-cost ceiling. With nested
+# visits(first: 5) + assignedUsers, `first: 3` is the largest page size that
+# stays below that ceiling on API version 2026-03-10.
 _JOBBER_COMPLETED_JOBS_QUERY = """
 query CompletedJobs($after: String, $filter: JobFilterAttributes) {
-  jobs(after: $after, filter: $filter, first: 50) {
+  jobs(after: $after, filter: $filter, first: 3) {
     nodes {
       id
       title
@@ -166,9 +230,19 @@ query CompletedJobs($after: String, $filter: JobFilterAttributes) {
           calendarRule
         }
       }
-      visits(first: 1) {
+      visits(first: 5) {
         nodes {
           duration
+          startAt
+          endAt
+          completedAt
+          assignedUsers {
+            nodes {
+              id
+              name { full }
+              email { raw }
+            }
+          }
         }
       }
     }
@@ -187,7 +261,7 @@ def poll_jobber_completed_jobs(clients: Any, db) -> list:
 
     Returns a list of dicts with keys:
         job_id, client_id, service_type, duration_minutes,
-        crew, completion_notes, is_recurring
+        crew, jobber_assigned_users, completion_notes, is_recurring
     """
     state = get_last_poll(db, "jobber", "completed_job")
     since = state["last_processed_timestamp"] if state else _default_since()
@@ -196,8 +270,9 @@ def poll_jobber_completed_jobs(clients: Any, db) -> list:
     events = []
     latest_timestamp = since
     cursor = None
+    stop_paging = False
 
-    while True:
+    while not stop_paging:
         variables: dict = {
             "filter": {
                 # "completedAtOrAfter" is not a valid field in Jobber's
@@ -216,7 +291,7 @@ def poll_jobber_completed_jobs(clients: Any, db) -> list:
             "query": _JOBBER_COMPLETED_JOBS_QUERY,
             "variables": variables,
         }
-        resp = session.post(_JOBBER_GRAPHQL_URL, json=payload, timeout=20)
+        resp = _post_jobber_graphql(session, payload)
         resp.raise_for_status()
         body = resp.json()
 
@@ -227,20 +302,17 @@ def poll_jobber_completed_jobs(clients: Any, db) -> list:
 
         for job in nodes:
             completed_at = job.get("completedAt") or ""
-            # Skip jobs completed before (or at) our last-poll window.
+            # Jobber returns requires_invoicing jobs newest-first. Once we hit
+            # the stored watermark, the rest of this page and all following
+            # pages are older and can be skipped entirely.
             if completed_at <= since:
-                continue
+                stop_paging = True
+                break
             if completed_at > latest_timestamp:
                 latest_timestamp = completed_at
 
-            # Duration lives on Visit, not Job.
-            visit_nodes = (job.get("visits") or {}).get("nodes") or []
-            first_visit = visit_nodes[0] if visit_nodes else {}
-            raw_duration = first_visit.get("duration") or 0
-            duration_minutes = round(raw_duration / 60) if raw_duration else None
-            # Crew is not available without an extra nested connection (cost).
-            # Leave as None; the automation handles missing crew gracefully.
-            crew = None
+            visit_details = extract_job_visit_details(job)
+            duration_minutes = visit_details["duration_minutes"]
 
             # Recurring: non-null recurrenceSchedule means it's a recurring job.
             recurrence = (job.get("visitSchedule") or {}).get("recurrenceSchedule")
@@ -251,12 +323,15 @@ def poll_jobber_completed_jobs(clients: Any, db) -> list:
                 "client_id": str((job.get("client") or {}).get("id", "")),
                 "service_type": job.get("title") or job.get("jobType", ""),
                 "duration_minutes": duration_minutes,
-                "crew": crew,
+                "crew": None,
+                "jobber_assigned_users": visit_details["jobber_assigned_users"],
                 "completion_notes": job.get("instructions", ""),
                 "is_recurring": is_recurring,
             })
 
         page_info = jobs_data.get("pageInfo", {}) or {}
+        if stop_paging:
+            break
         if page_info.get("hasNextPage"):
             cursor = page_info.get("endCursor")
         else:

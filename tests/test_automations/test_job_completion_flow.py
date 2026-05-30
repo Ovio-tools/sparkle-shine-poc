@@ -40,6 +40,24 @@ def _make_qbo_invoice_mock(invoice_id="qbo-inv-123"):
     return m
 
 
+def _make_jobber_invoice_mock(invoice_id="jobber-inv-123"):
+    m = MagicMock()
+    m.raise_for_status.return_value = None
+    m.json.return_value = {
+        "data": {
+            "invoiceCreate": {
+                "invoice": {
+                    "id": invoice_id,
+                    "invoiceNumber": "SS-INV-0001",
+                    "invoiceStatus": "draft",
+                },
+                "userErrors": [],
+            }
+        }
+    }
+    return m
+
+
 def _seed_commercial_agreement(
     db,
     *,
@@ -69,6 +87,18 @@ def _seed_commercial_agreement(
                 "monday,tuesday,wednesday,thursday,friday",
             ),
         )
+
+
+@pytest.fixture(autouse=True)
+def _patch_jobber_invoice_writeback(mock_clients):
+    def _post(*args, **kwargs):
+        payload = kwargs.get("json") or {}
+        query = payload.get("query") or ""
+        if "invoiceCreate" not in query:
+            raise AssertionError(f"Unexpected Jobber GraphQL query in test: {query}")
+        return _make_jobber_invoice_mock()
+
+    mock_clients.jobber.post.side_effect = _post
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,6 +159,96 @@ def test_invoice_created_commercial_net30(mock_post, mock_db, mock_clients):
     txn  = date.fromisoformat(body["TxnDate"])
     due  = date.fromisoformat(body["DueDate"])
     assert (due - txn).days == 30, "Commercial invoice must be Net-30"
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_jobber_writeback_creates_draft_invoice_and_mapping(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock(invoice_id="qbo-inv-999")
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message"):
+        auto.run(sample_triggers["completed_job"])
+
+    mock_clients.jobber.post.assert_called_once()
+    payload = mock_clients.jobber.post.call_args.kwargs["json"]
+    jobber_input = payload["variables"]["input"]
+    assert jobber_input["clientId"] == "301"
+    assert jobber_input["jobId"] == "601"
+    assert jobber_input["invoiceNumber"].startswith("SS-INV-")
+    assert jobber_input["markSent"] is False
+    assert jobber_input["allowReviewRequest"] is False
+    assert jobber_input["tax"]["taxCalculationMethod"] == "EXCLUSIVE"
+    assert jobber_input["lineItems"][0]["category"] == "SERVICE"
+    assert "qbo-inv-999" in jobber_input["lineItems"][0]["description"]
+
+    inv = mock_db.execute(
+        "SELECT id FROM invoices ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert inv is not None
+
+    mapping = mock_db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name = 'jobber'",
+        (inv["id"],),
+    ).fetchone()
+    assert mapping is not None
+    assert mapping["tool_specific_id"] == "jobber-inv-123"
+
+    log = mock_db.execute(
+        "SELECT status, action_target FROM automation_log "
+        "WHERE action_name = 'create_jobber_invoice_writeback' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert log is not None
+    assert log["status"] == "success"
+    assert log["action_target"] == "jobber:invoice:jobber-inv-123"
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_jobber_writeback_failure_is_logged_without_blocking_rest_of_flow(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+
+    failed_jobber = MagicMock()
+    failed_jobber.raise_for_status.return_value = None
+    failed_jobber.json.return_value = {
+        "data": {
+            "invoiceCreate": {
+                "invoice": None,
+                "userErrors": [{"message": "Invoice number has already been taken"}],
+            }
+        }
+    }
+    mock_clients.jobber.post.side_effect = lambda *args, **kwargs: failed_jobber
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(sample_triggers["completed_job"])
+
+    assert mock_slack.called, "Slack summary should still run when Jobber writeback fails"
+
+    inv = mock_db.execute(
+        "SELECT id FROM invoices ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert inv is not None
+    mapping = mock_db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name = 'jobber'",
+        (inv["id"],),
+    ).fetchone()
+    assert mapping is None
+
+    log = mock_db.execute(
+        "SELECT status, error_message FROM automation_log "
+        "WHERE action_name = 'create_jobber_invoice_writeback' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert log is not None
+    assert log["status"] == "failed"
+    assert "already been taken" in (log["error_message"] or "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -532,6 +652,89 @@ def test_duration_variance_not_flagged_within_20_percent(
     assert not any("Duration variance" in t for t in captured_texts), (
         "Did not expect a duration-variance warning for 8.3% deviation"
     )
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_slack_summary_prefers_canonical_crew_name_over_assignees(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+    with mock_db:
+        mock_db.execute(
+            "INSERT INTO crews (id, name, zone) VALUES (%s, %s, %s)",
+            ("crew-a", "Crew A", "West Austin"),
+        )
+        mock_db.execute(
+            "UPDATE jobs SET crew_id = %s WHERE id = %s",
+            ("crew-a", "SS-JOB-0001"),
+        )
+
+    trigger = dict(sample_triggers["completed_job"])
+    trigger["jobber_assigned_users"] = [
+        {
+            "id": "user-1",
+            "name": "Claudia Ramirez",
+            "email": "claudia.ramirez@oviodigital.com",
+        }
+    ]
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(trigger)
+
+    text = mock_slack.call_args[0][2]
+    assert "Crew: Crew A" in text
+    assert "Claudia Ramirez" not in text
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_slack_summary_falls_back_to_assignee_names(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+    trigger = dict(sample_triggers["completed_job"])
+    trigger["crew"] = None
+    trigger["jobber_assigned_users"] = [
+        {
+            "id": "user-1",
+            "name": "Claudia Ramirez",
+            "email": "claudia.ramirez@oviodigital.com",
+        },
+        {
+            "id": "user-2",
+            "name": "Leticia Morales",
+            "email": "leticia.morales@oviodigital.com",
+        },
+    ]
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(trigger)
+
+    text = mock_slack.call_args[0][2]
+    assert "Crew: Claudia Ramirez, Leticia Morales" in text
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_slack_summary_falls_back_to_canonical_duration(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+    with mock_db:
+        mock_db.execute(
+            "UPDATE jobs SET duration_minutes_actual = %s WHERE id = %s",
+            (125, "SS-JOB-0001"),
+        )
+
+    trigger = dict(sample_triggers["completed_job"])
+    trigger["duration_minutes"] = None
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(trigger)
+
+    text = mock_slack.call_args[0][2]
+    assert "Duration: 125 min" in text
 
 
 # ─────────────────────────────────────────────────────────────────────────────

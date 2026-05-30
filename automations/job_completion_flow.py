@@ -30,10 +30,12 @@ from config.service_catalog import (
     canonical_service_id,
     get_service_metadata,
 )
+from simulation.jobber_utils import assigned_user_display_names, normalize_jobber_assigned_users
 
 logger = logging.getLogger(__name__)
 
 _INVOICE_ID_LOCK_KEY = 9_214_001
+_JOBBER_GQL_URL      = "https://api.getjobber.com/api/graphql"
 
 _QBO_NET30_TERM_ID   = "3"
 _FALLBACK_PRICE      = 150.00
@@ -52,6 +54,14 @@ def _load_tool_ids() -> dict:
     path = os.path.join(_PROJECT_ROOT, "config", "tool_ids.json")
     with open(path) as f:
         return json.load(f)
+
+
+def _as_jobber_datetime(value: date) -> str:
+    return (
+        datetime.combine(value, datetime.min.time())
+        .replace(tzinfo=timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
 
 
 def _emit_fallback_pricing_alert(
@@ -240,18 +250,16 @@ def _lookup_service(
         "skip_invoice":     skip_invoice,
     }
 
-
-def _resolve_job_service_type_id(db, canonical_job_id: Optional[str]) -> Optional[str]:
-    if not canonical_job_id:
-        return None
-
-    row = db.execute(
-        "SELECT service_type_id FROM jobs WHERE id = %s",
-        (canonical_job_id,),
-    ).fetchone()
-    if not row:
-        return None
-    return row["service_type_id"] or None
+def _render_crew_display(
+    canonical_crew_name: Optional[str],
+    jobber_assigned_users: object,
+) -> Optional[str]:
+    if canonical_crew_name:
+        return canonical_crew_name
+    names = assigned_user_display_names(jobber_assigned_users)
+    if names:
+        return ", ".join(names)
+    return None
 
 
 def _allocate_invoice_id(db) -> str:
@@ -288,7 +296,7 @@ class JobCompletionFlow(BaseAutomation):
     Expects `self.clients` to be callable: clients("tool_name") → client/session.
     trigger_event must come from poll_jobber_completed_jobs() and contain:
         job_id, client_id (Jobber), service_type, duration_minutes,
-        crew, completion_notes, is_recurring.
+        crew, jobber_assigned_users, completion_notes, is_recurring.
     Optional: completed_at (ISO date string; defaults to today if absent).
     """
 
@@ -312,11 +320,14 @@ class JobCompletionFlow(BaseAutomation):
 
         # ── Action 1: QuickBooks invoice ──────────────────────────────────────
         invoice_id     = None
+        local_invoice_id = None
         invoice_amount = 0.0
         payment_terms  = "due on receipt"
         try:
             invoice_id, invoice_amount, payment_terms = self._action_quickbooks_invoice(ctx)
-            if not self.dry_run and invoice_id:
+            if self.dry_run and invoice_id:
+                local_invoice_id = "dry-run-local-invoice-id"
+            elif invoice_id:
                 inv_due_date = (
                     (ctx["completion_date"] + timedelta(days=30)).isoformat()
                     if ctx["is_commercial"]
@@ -337,6 +348,7 @@ class JobCompletionFlow(BaseAutomation):
                             inv_due_date,
                         ),
                     )
+                    local_invoice_id = inv_canonical_id
                 register_mapping(
                     self.db,
                     inv_canonical_id,
@@ -355,6 +367,32 @@ class JobCompletionFlow(BaseAutomation):
                 run_id, "create_quickbooks_invoice", None, "failed",
                 error_message=str(exc), trigger_source=trigger_source,
             )
+
+        # ── Action 1b: Jobber invoice writeback ──────────────────────────────
+        if invoice_id and local_invoice_id:
+            try:
+                jobber_invoice_id = self._action_jobber_invoice_writeback(
+                    ctx,
+                    local_invoice_id=local_invoice_id,
+                    quickbooks_invoice_id=invoice_id,
+                    invoice_amount=invoice_amount,
+                )
+                self.log_action(
+                    run_id, "create_jobber_invoice_writeback",
+                    f"jobber:invoice:{jobber_invoice_id}",
+                    "success",
+                    trigger_source=trigger_source,
+                    trigger_detail={
+                        "job_id": ctx["job_id"],
+                        "local_invoice_id": local_invoice_id,
+                        "quickbooks_invoice_id": invoice_id,
+                    },
+                )
+            except Exception as exc:
+                self.log_action(
+                    run_id, "create_jobber_invoice_writeback", None, "failed",
+                    error_message=str(exc), trigger_source=trigger_source,
+                )
 
         # ── Action 2: Schedule delayed review request ─────────────────────────
         try:
@@ -434,7 +472,30 @@ class JobCompletionFlow(BaseAutomation):
             except MappingNotFoundError:
                 pass
 
-        canonical_service_type = _resolve_job_service_type_id(self.db, canonical_job_id)
+        canonical_service_type = None
+        canonical_crew_name = None
+        canonical_duration_minutes = None
+        db_assigned_users: list[dict] = []
+        if canonical_job_id:
+            job_row = self.db.execute(
+                """
+                SELECT j.service_type_id,
+                       j.duration_minutes_actual,
+                       cr.name AS crew_name,
+                       j.jobber_assigned_users
+                FROM jobs j
+                LEFT JOIN crews cr ON cr.id = j.crew_id
+                WHERE j.id = %s
+                """,
+                (canonical_job_id,),
+            ).fetchone()
+            if job_row:
+                canonical_service_type = job_row["service_type_id"] or None
+                canonical_duration_minutes = job_row["duration_minutes_actual"]
+                canonical_crew_name = job_row["crew_name"] or None
+                db_assigned_users = normalize_jobber_assigned_users(
+                    job_row["jobber_assigned_users"]
+                )
 
         # Resolve downstream tool IDs
         qbo_customer_id: Optional[str] = None
@@ -480,6 +541,22 @@ class JobCompletionFlow(BaseAutomation):
             canonical_job_id=canonical_job_id,
         )
         service_type = service_info["display_name"]
+        event_assignee_users = normalize_jobber_assigned_users(
+            event.get("jobber_assigned_users")
+        )
+        if "jobber_assigned_users" in event:
+            jobber_assigned_users = event_assignee_users
+        else:
+            jobber_assigned_users = db_assigned_users
+        crew_display = _render_crew_display(
+            canonical_crew_name,
+            jobber_assigned_users,
+        )
+        event_duration_minutes = event.get("duration_minutes")
+        if event_duration_minutes is None:
+            duration_minutes = canonical_duration_minutes
+        else:
+            duration_minutes = event_duration_minutes
 
         return {
             "job_id":           canonical_job_id or jobber_job_id,
@@ -494,8 +571,9 @@ class JobCompletionFlow(BaseAutomation):
             "service_type_id":  service_info["service_type_id"],
             "service_type":     service_type,
             "service_info":     service_info,
-            "duration_minutes": event.get("duration_minutes"),
-            "crew":             event.get("crew"),
+            "duration_minutes": duration_minutes,
+            "crew":             crew_display,
+            "jobber_assigned_users": jobber_assigned_users,
             "completion_notes": event.get("completion_notes") or "",
             "is_recurring":     bool(event.get("is_recurring", False)),
             "completion_date":  completion_date,
@@ -584,6 +662,138 @@ class JobCompletionFlow(BaseAutomation):
             )
 
         return (str(invoice.get("Id", "")), amount, payment_terms)
+
+    # ── Action 1b: Jobber invoice writeback ──────────────────────────────────
+
+    def _action_jobber_invoice_writeback(
+        self,
+        ctx: dict,
+        *,
+        local_invoice_id: str,
+        quickbooks_invoice_id: str,
+        invoice_amount: float,
+    ) -> str:
+        """
+        Create a draft Jobber invoice linked to the completed job so Jobber no
+        longer keeps it in requires_invoicing. This draft is an internal mirror
+        of the authoritative QuickBooks invoice and is never marked sent.
+        """
+        if self.dry_run:
+            print(
+                f"[DRY RUN] Would create Jobber draft invoice for job "
+                f"{ctx['jobber_job_id']} mirroring {local_invoice_id} / QBO {quickbooks_invoice_id}"
+            )
+            return "dry-run-jobber-invoice-id"
+
+        try:
+            return self.resolve_id(local_invoice_id, "jobber")
+        except MappingNotFoundError:
+            pass
+
+        if not ctx.get("jobber_client_id"):
+            raise MappingNotFoundError(
+                f"No Jobber client ID available for canonical ID {ctx['canonical_id']}"
+            )
+        if not ctx.get("jobber_job_id"):
+            raise MappingNotFoundError(
+                f"No Jobber job ID available for canonical job {ctx['canonical_job_id']}"
+            )
+
+        issued_at = _as_jobber_datetime(ctx["completion_date"])
+        due_at = _as_jobber_datetime(
+            ctx["completion_date"] + timedelta(days=30)
+            if ctx["is_commercial"]
+            else ctx["completion_date"]
+        )
+
+        mutation = """
+        mutation CreateInvoiceMirror($input: InvoiceCreateInput!) {
+          invoiceCreate(input: $input) {
+            invoice {
+              id
+              invoiceNumber
+              invoiceStatus
+            }
+            userErrors {
+              message
+            }
+          }
+        }
+        """
+        payload = {
+            "query": mutation,
+            "variables": {
+                "input": {
+                    "clientId": ctx["jobber_client_id"],
+                    "jobId": ctx["jobber_job_id"],
+                    "invoiceNumber": local_invoice_id,
+                    "subject": f"QuickBooks mirror for {local_invoice_id}",
+                    "message": (
+                        "Authoritative billing lives in QuickBooks. "
+                        "Do not send this Jobber draft invoice."
+                    ),
+                    "issuedDate": issued_at,
+                    "dueDetails": {
+                        "dueDate": due_at,
+                    },
+                    "tax": {
+                        "taxCalculationMethod": "EXCLUSIVE",
+                    },
+                    "lineItems": [
+                        {
+                            "name": ctx["service_type"],
+                            "category": "SERVICE",
+                            "description": (
+                                f"Mirror of QuickBooks invoice {quickbooks_invoice_id} "
+                                f"for {local_invoice_id}."
+                            ),
+                            "quantity": 1.0,
+                            "unitPrice": float(invoice_amount),
+                            "date": issued_at,
+                            "taxable": False,
+                        }
+                    ],
+                    "notes": [
+                        {
+                            "message": (
+                                f"QuickBooks invoice {quickbooks_invoice_id} is the "
+                                f"system of record for {local_invoice_id}."
+                            ),
+                            "pinned": True,
+                        }
+                    ],
+                    "allowReviewRequest": False,
+                    "markSent": False,
+                }
+            },
+        }
+
+        session = self.clients("jobber")
+        resp = session.post(_JOBBER_GQL_URL, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        result = (data.get("data") or {}).get("invoiceCreate") or {}
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            joined = "; ".join(
+                err.get("message") or str(err)
+                for err in user_errors
+            )
+            raise RuntimeError(f"Jobber invoice create failed: {joined}")
+
+        invoice = result.get("invoice")
+        if not invoice or not invoice.get("id"):
+            raise RuntimeError(
+                f"Jobber invoice create returned unexpected body: {data}"
+            )
+
+        register_mapping(
+            self.db,
+            local_invoice_id,
+            "jobber",
+            str(invoice["id"]),
+        )
+        return str(invoice["id"])
 
     # ── Action 2: Schedule delayed review request ─────────────────────────────
 
