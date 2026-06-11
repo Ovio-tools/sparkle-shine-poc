@@ -26,6 +26,19 @@ def _reset_module_state():
     import simulation.error_reporter as er
     er._channel_id = None
     er._warning_log = {}
+    # Clear DB-backed alert-suppression state so repeated report_error calls
+    # in one test (or across tests) are not swallowed as duplicates.
+    # Best-effort: suppression fails open when the DB is unavailable.
+    try:
+        from database.connection import get_connection
+        conn = get_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM error_alert_state")
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 class TestClassify(unittest.TestCase):

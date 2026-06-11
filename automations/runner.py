@@ -27,7 +27,7 @@ try:
 except ImportError:
     pass
 
-from simulation.error_reporter import report_error
+from simulation.error_reporter import report_error, report_recovery
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging setup
@@ -113,6 +113,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling Pipedrive for won deals...")
     try:
         won_deals = poll_pipedrive_won_deals(clients, db)
+        report_recovery("pipedrive", "Polling Pipedrive for won deals", dry_run=dry_run)
     except Exception as e:
         logger.error("Pipedrive poll failed — skipping: %s", e)
         report_error(e, tool_name="pipedrive", context="Polling Pipedrive for won deals", dry_run=dry_run)
@@ -133,6 +134,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling Jobber for completed jobs...")
     try:
         completed = poll_jobber_completed_jobs(clients, db)
+        report_recovery("jobber", "Polling Jobber for completed jobs", dry_run=dry_run)
     except Exception as e:
         logger.error("Jobber poll failed — skipping: %s", e)
         report_error(e, tool_name="jobber", context="Polling Jobber for completed jobs", dry_run=dry_run)
@@ -153,6 +155,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling QuickBooks for new payments...")
     try:
         payments = poll_quickbooks_payments(clients, db)
+        report_recovery("quickbooks", "Polling QuickBooks for new payments", dry_run=dry_run)
     except Exception as e:
         logger.error("QuickBooks poll failed — skipping: %s", e)
         report_error(e, tool_name="quickbooks", context="Polling QuickBooks for new payments", dry_run=dry_run)
@@ -175,6 +178,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling Google Sheets for negative reviews...")
     try:
         reviews = poll_sheets_negative_reviews(clients, db)
+        report_recovery("google", "Polling Google Sheets for negative reviews", dry_run=dry_run)
     except Exception as e:
         logger.error("Google Sheets poll failed — skipping: %s", e)
         report_error(e, tool_name="google", context="Polling Google Sheets for negative reviews", dry_run=dry_run)

@@ -27,6 +27,18 @@ ESCALATION_WINDOW_MINUTES = 30  # rolling window in minutes
                                 # off-peak event spacing where events can be 15-30 min apart.
                                 # A 10-min window would miss repeated failures during slow periods.
 
+ALERT_SUPPRESSION_WINDOW_MINUTES = 30
+# At most one Slack post per identical (tool, context) failure per window.
+# Source: 2026-06-11 incident — a 50-minute Google Sheets slowness window
+# produced 10 identical alerts (one per 5-min runner cron cycle). A 30-min
+# window matches ESCALATION_WINDOW_MINUTES, covers 6 cron cycles, and would
+# have reduced that incident to 2 posts. State lives in the error_alert_state
+# table because the runner is a fresh container every cycle.
+
+_SUPPRESSION_KEY_MAX_CHARS = 500
+# context strings are short human sentences; 500 chars caps pathological keys
+# without ever truncating real ones.
+
 # ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
@@ -386,6 +398,148 @@ def _build_reconciliation_blocks(
     return blocks
 
 
+# ---------------------------------------------------------------------------
+# Duplicate-alert suppression (state in PostgreSQL: error_alert_state)
+# ---------------------------------------------------------------------------
+
+def _suppression_decision(conn, tool_name: str, context_key: str, window_minutes: int):
+    """Decide whether to post an alert for (tool_name, context_key) and update state.
+
+    Returns (should_post, suppressed_count): suppressed_count is how many
+    identical alerts were swallowed since the last post — non-zero only when
+    should_post is True after a window expiry, so the caller can say
+    "occurred N more times".
+    """
+    row = conn.execute(
+        """
+        SELECT suppressed_count,
+               (CURRENT_TIMESTAMP - last_posted_at)
+                   >= make_interval(mins => %s) AS window_elapsed
+        FROM error_alert_state
+        WHERE tool_name = %s AND context_key = %s
+        """,
+        (window_minutes, tool_name, context_key),
+    ).fetchone()
+
+    if row is None:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO error_alert_state (tool_name, context_key)
+                VALUES (%s, %s)
+                ON CONFLICT (tool_name, context_key) DO NOTHING
+                """,
+                (tool_name, context_key),
+            )
+        return True, 0
+
+    if row["window_elapsed"]:
+        with conn:
+            conn.execute(
+                """
+                UPDATE error_alert_state
+                SET last_posted_at   = CURRENT_TIMESTAMP,
+                    last_seen        = CURRENT_TIMESTAMP,
+                    suppressed_count = 0,
+                    episode_count    = episode_count + 1
+                WHERE tool_name = %s AND context_key = %s
+                """,
+                (tool_name, context_key),
+            )
+        return True, row["suppressed_count"]
+
+    with conn:
+        conn.execute(
+            """
+            UPDATE error_alert_state
+            SET last_seen        = CURRENT_TIMESTAMP,
+                suppressed_count = suppressed_count + 1,
+                episode_count    = episode_count + 1
+            WHERE tool_name = %s AND context_key = %s
+            """,
+            (tool_name, context_key),
+        )
+    return False, row["suppressed_count"] + 1
+
+
+def _check_suppression(tool_name: str, context: str):
+    """DB-backed wrapper around _suppression_decision. Fail-open: any DB
+    problem (no DATABASE_URL, missing table, connection refused) means the
+    alert posts exactly as it did before suppression existed."""
+    context_key = (context or "")[:_SUPPRESSION_KEY_MAX_CHARS]
+    try:
+        from database.connection import get_connection
+        conn = get_connection()
+        try:
+            return _suppression_decision(
+                conn, tool_name, context_key, ALERT_SUPPRESSION_WINDOW_MINUTES
+            )
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug(
+            "Alert suppression unavailable (%s) — posting without suppression", exc
+        )
+        return True, 0
+
+
+def report_recovery(tool_name: str, context: str, dry_run: bool = False) -> bool:
+    """Clear suppression state for (tool_name, context); post a one-line
+    recovery notice when the episode had 2+ failures.
+
+    Call after an operation that previously hit report_error() succeeds.
+    A single failed cycle that already alerted gets no second message — the
+    notice is only worth the channel noise for sustained incidents.
+    Returns True only when a recovery message was posted. Never raises.
+    """
+    try:
+        context_key = (context or "")[:_SUPPRESSION_KEY_MAX_CHARS]
+        from database.connection import get_connection
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT episode_count, first_seen FROM error_alert_state "
+                "WHERE tool_name = %s AND context_key = %s",
+                (tool_name, context_key),
+            ).fetchone()
+            if row is None:
+                return False
+            with conn:
+                conn.execute(
+                    "DELETE FROM error_alert_state "
+                    "WHERE tool_name = %s AND context_key = %s",
+                    (tool_name, context_key),
+                )
+        finally:
+            conn.close()
+
+        if row["episode_count"] < 2:
+            return False
+
+        if dry_run:
+            logger.info(
+                "[DRY RUN] Would post recovery notice for %s — %s", tool_name, context
+            )
+            return True
+
+        channel_id = setup_channel(dry_run=dry_run)
+        if channel_id is None:
+            return False
+
+        first_seen = row["first_seen"]
+        since = f" since {first_seen:%Y-%m-%d %H:%M} UTC" if first_seen else ""
+        text = (
+            f":white_check_mark: Recovered: {tool_name.title()} — {context} "
+            f"(failed {row['episode_count']} times{since})"
+        )
+        client = get_client("slack")
+        response = client.chat_postMessage(channel=channel_id, text=text)
+        return bool(response["ok"])
+    except Exception as exc:
+        logger.error("Unexpected error in report_recovery: %s", exc)
+        return False
+
+
 _topic_warning_logged = False
 
 _DESIRED_TOPIC = "Simulation and automation errors — plain language only, no stack traces"
@@ -528,6 +682,27 @@ def report_error(
                 if len(_warning_log[tool_name]) >= ESCALATION_THRESHOLD:
                     final_severity = "critical"
                     header_text = "Automation Issue — Repeated Failures"
+
+        # Duplicate suppression: at most one post per identical (tool, context)
+        # per ALERT_SUPPRESSION_WINDOW_MINUTES. Suppressed alerts still count
+        # toward the episode (see report_recovery) and return True — the error
+        # was handled, there is just nothing new to tell the channel.
+        suppressed_repeats = 0
+        if not dry_run:
+            should_post, suppressed_repeats = _check_suppression(tool_name, context)
+            if not should_post:
+                logger.info(
+                    "Suppressed duplicate #automation-failure alert for %s — %s "
+                    "(%d suppressed this window)",
+                    tool_name, context, suppressed_repeats,
+                )
+                return True
+        if suppressed_repeats:
+            plural = "s" if suppressed_repeats != 1 else ""
+            what_happened += (
+                f" (occurred {suppressed_repeats} more time{plural} "
+                "since the last alert)"
+            )
 
         error_location = _extract_location(exc) if isinstance(exc, Exception) else None
         log_file = _get_log_file_name()
