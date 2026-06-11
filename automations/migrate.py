@@ -109,6 +109,26 @@ _MIGRATIONS = [
     )
     """,
 
+    # ------------------------------------------------------------------ #
+    # error_alert_state — Slack alert suppression for the error reporter.
+    # The automation-runner is a fresh cron container every 5 minutes, so
+    # duplicate-alert state must live in PostgreSQL, not process memory.
+    # One row per (tool_name, context_key) failure stream; rows are deleted
+    # by report_recovery() when the failing operation succeeds again.
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS error_alert_state (
+        tool_name        TEXT NOT NULL,
+        context_key      TEXT NOT NULL,
+        first_seen       TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_posted_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        suppressed_count INTEGER NOT NULL DEFAULT 0,
+        episode_count    INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (tool_name, context_key)
+    )
+    """,
+
     # Indexes for common query patterns
     "CREATE INDEX IF NOT EXISTS idx_automation_log_run_id   ON automation_log(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_automation_log_status   ON automation_log(status)",
@@ -128,7 +148,7 @@ def run_migration(db_path: str = None) -> None:
     finally:
         conn.close()
     print("Migration complete.")
-    print("Tables ensured: poll_state, automation_log, pending_actions, outreach_drafts, sync_skip_list")
+    print("Tables ensured: poll_state, automation_log, pending_actions, outreach_drafts, sync_skip_list, error_alert_state")
 
 
 if __name__ == "__main__":
