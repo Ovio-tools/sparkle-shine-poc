@@ -120,12 +120,9 @@ def create_missing_invoices(db, dry_run: bool) -> list[str]:
 
     failures = []
     for job_id in JOBS_TO_INVOICE:
-        existing = db.execute(
-            "SELECT id FROM invoices WHERE job_id = %s", (job_id,)
-        ).fetchone()
-        if existing:
-            print(f"  [OK] {job_id} already invoiced ({existing['id']}) — skipping")
-            continue
+        # No existing-invoice pre-check here: run_invoice_retry is idempotent
+        # (skips the QBO create when the invoice exists) and also heals a
+        # missing Jobber draft writeback on already-invoiced jobs.
         try:
             _handle_create_invoice(
                 get_client, db, {"canonical_job_id": job_id}, dry_run
