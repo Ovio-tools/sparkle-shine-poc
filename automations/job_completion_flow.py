@@ -758,14 +758,16 @@ class JobCompletionFlow(BaseAutomation):
 
         if ctx["canonical_job_id"]:
             existing = self.db.execute(
-                "SELECT id FROM invoices WHERE job_id = %s",
+                "SELECT id, amount FROM invoices WHERE job_id = %s",
                 (ctx["canonical_job_id"],),
             ).fetchone()
             if existing:
                 logger.info(
-                    "Invoice retry for %s: invoice %s already exists — skipping",
+                    "Invoice retry for %s: invoice %s already exists — "
+                    "skipping QBO create",
                     ctx["canonical_job_id"], existing["id"],
                 )
+                self._heal_missing_writeback(run_id, ctx, trigger_source, existing)
                 return existing["id"]
 
         try:
@@ -808,6 +810,47 @@ class JobCompletionFlow(BaseAutomation):
                 )
 
         return invoice_id
+
+    def _heal_missing_writeback(
+        self, run_id: str, ctx: dict, trigger_source: str, invoice_row: dict
+    ) -> None:
+        """If a recorded invoice never got its Jobber draft mirror (a failed
+        writeback), attempt just the writeback. Best-effort: logs but never
+        raises — the QBO invoice (the system of record) already exists."""
+        local_invoice_id = invoice_row["id"]
+        if self.dry_run:
+            return
+        try:
+            self.resolve_id(local_invoice_id, "jobber")
+            return  # writeback already done
+        except MappingNotFoundError:
+            pass
+        try:
+            qbo_invoice_id = self.resolve_id(local_invoice_id, "quickbooks")
+        except MappingNotFoundError:
+            logger.warning(
+                "Invoice %s has no QuickBooks mapping — skipping Jobber writeback",
+                local_invoice_id,
+            )
+            return
+        try:
+            jobber_invoice_id = self._action_jobber_invoice_writeback(
+                ctx,
+                local_invoice_id=local_invoice_id,
+                quickbooks_invoice_id=qbo_invoice_id,
+                invoice_amount=float(invoice_row["amount"] or 0.0),
+            )
+            self.log_action(
+                run_id, "create_jobber_invoice_writeback",
+                f"jobber:invoice:{jobber_invoice_id}",
+                "success",
+                trigger_source=trigger_source,
+            )
+        except Exception as exc:
+            self.log_action(
+                run_id, "create_jobber_invoice_writeback", None, "failed",
+                error_message=str(exc), trigger_source=trigger_source,
+            )
 
     # ── Action 1b: Jobber invoice writeback ──────────────────────────────────
 
@@ -872,7 +915,10 @@ class JobCompletionFlow(BaseAutomation):
                 "input": {
                     "clientId": ctx["jobber_client_id"],
                     "jobId": ctx["jobber_job_id"],
-                    "invoiceNumber": local_invoice_id,
+                    # Jobber validates "Invoice number can only contain a
+                    # number" — send the digits of the SS-INV id; the full
+                    # canonical id travels in subject/notes below.
+                    "invoiceNumber": local_invoice_id.split("-")[-1],
                     "subject": f"QuickBooks mirror for {local_invoice_id}",
                     "message": (
                         "Authoritative billing lives in QuickBooks. "

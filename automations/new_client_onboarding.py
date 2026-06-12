@@ -993,7 +993,12 @@ class NewClientOnboarding(BaseAutomation):
         )
 
         # QBO returns 400 if a customer with this DisplayName already exists.
-        # In that case, look up the existing customer and return their ID.
+        # That existing customer is only OURS if it isn't mapped to a
+        # different canonical client — two distinct clients can share a
+        # human name (SS-CLIENT-0233 / SS-CLIENT-0521, both "Ana Thomas").
+        # Reusing the other client's customer would cross their billing, so
+        # disambiguate the DisplayName with the canonical ID and create a
+        # separate customer instead.
         if resp.status_code == 400:
             error_detail = resp.json()
             fault = error_detail.get("Fault", {})
@@ -1014,7 +1019,31 @@ class NewClientOnboarding(BaseAutomation):
                 qr.raise_for_status()
                 customers = qr.json().get("QueryResponse", {}).get("Customer", [])
                 if customers:
-                    return str(customers[0]["Id"])
+                    existing_id = str(customers[0]["Id"])
+                    owner = self.db.execute(
+                        "SELECT canonical_id FROM cross_tool_mapping "
+                        "WHERE tool_name = 'quickbooks' AND tool_specific_id = %s",
+                        (existing_id,),
+                    ).fetchone()
+                    if owner is None or owner["canonical_id"] == ctx["canonical_id"]:
+                        # Unmapped (a prior partial create for this client)
+                        # or already ours — safe to reuse.
+                        return existing_id
+                    body["DisplayName"] = (
+                        f"{ctx['display_name']} ({ctx['canonical_id']})"
+                    )
+                    print(
+                        f"[INFO] QBO DisplayName '{ctx['display_name']}' belongs "
+                        f"to {owner['canonical_id']} — creating disambiguated "
+                        f"customer '{body['DisplayName']}'"
+                    )
+                    resp = requests.post(
+                        f"{base_url}/customer",
+                        headers=headers,
+                        json=body,
+                        params={"minorversion": "65"},
+                        timeout=15,
+                    )
             resp.raise_for_status()
 
         resp.raise_for_status()

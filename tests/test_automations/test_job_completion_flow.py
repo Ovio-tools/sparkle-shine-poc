@@ -176,7 +176,9 @@ def test_jobber_writeback_creates_draft_invoice_and_mapping(
     jobber_input = payload["variables"]["input"]
     assert jobber_input["clientId"] == "301"
     assert jobber_input["jobId"] == "601"
-    assert jobber_input["invoiceNumber"].startswith("SS-INV-")
+    # Jobber rejects non-numeric invoice numbers ("Invoice number can only
+    # contain a number") — only the digits of the SS-INV id are sent.
+    assert jobber_input["invoiceNumber"].isdigit()
     assert jobber_input["markSent"] is False
     assert jobber_input["allowReviewRequest"] is False
     assert jobber_input["tax"]["taxCalculationMethod"] == "EXCLUSIVE"
@@ -928,3 +930,53 @@ def test_run_invoice_retry_raises_on_missing_mapping(mock_post, auto):
     }
     with pytest.raises(MappingNotFoundError):
         auto.run_invoice_retry(event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jobber writeback: numeric invoice number + retry heals missing writeback
+# ─────────────────────────────────────────────────────────────────────────────
+
+@patch("automations.job_completion_flow.requests.post")
+def test_writeback_invoice_number_is_numeric(mock_post, auto, mock_clients, sample_triggers):
+    """Jobber rejects non-numeric invoiceNumber values ('Invoice number can
+    only contain a number') — send only the digits of the SS-INV id."""
+    mock_post.return_value = _make_qbo_invoice_mock()
+
+    with patch("automations.base.post_slack_message"):
+        auto.run(sample_triggers["completed_job"])
+
+    writeback_calls = [
+        c for c in mock_clients.jobber.post.call_args_list
+        if "invoiceCreate" in (c.kwargs.get("json") or {}).get("query", "")
+    ]
+    assert writeback_calls, "expected a Jobber invoiceCreate writeback call"
+    inv_input = writeback_calls[0].kwargs["json"]["variables"]["input"]
+    assert inv_input["invoiceNumber"].isdigit(), (
+        f"invoiceNumber must be numeric, got {inv_input['invoiceNumber']!r}"
+    )
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_run_invoice_retry_heals_missing_writeback(
+    mock_post, auto, mock_clients, sample_triggers
+):
+    """Invoice already exists locally but the Jobber draft was never created
+    (e.g. the writeback failed): the retry must attempt only the writeback."""
+    with auto.db:
+        auto.db.execute(
+            "INSERT INTO invoices (id, client_id, job_id, amount, status, issue_date, due_date) "
+            "VALUES ('SS-INV-9002', 'SS-CLIENT-0001', 'SS-JOB-0001', 150.0, 'sent', "
+            "'2026-03-15', '2026-03-15')"
+        )
+    from automations.utils.id_resolver import register_mapping
+    register_mapping(auto.db, "SS-INV-9002", "quickbooks", "qbo-prev-1")
+
+    result = auto.run_invoice_retry(sample_triggers["completed_job"])
+
+    assert result == "SS-INV-9002"
+    mock_post.assert_not_called()  # no second QBO invoice
+    mapping = auto.db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = 'SS-INV-9002' AND tool_name = 'jobber'"
+    ).fetchone()
+    assert mapping is not None, "expected the retry to register the Jobber draft"

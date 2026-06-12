@@ -543,3 +543,72 @@ def test_promote_lead_repoints_jobber_and_qbo_mappings(auto):
             f"{r['tool_name']} mapping still points at {r['canonical_id']}"
         )
         assert r["entity_type"] == "CLIENT"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QBO duplicate DisplayName owned by a DIFFERENT client → disambiguate
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_qbo_duplicate_response():
+    m = MagicMock()
+    m.status_code = 400
+    m.json.return_value = {
+        "Fault": {"Error": [{"code": "6240", "Detail": "Duplicate Name Exists Error"}]}
+    }
+    return m
+
+
+def _make_qbo_query_response(customer_id="282"):
+    m = MagicMock()
+    m.raise_for_status.return_value = None
+    m.json.return_value = {"QueryResponse": {"Customer": [{"Id": customer_id}]}}
+    return m
+
+
+@patch("automations.new_client_onboarding.requests.get")
+@patch("automations.new_client_onboarding.requests.post")
+def test_duplicate_name_owned_by_other_client_disambiguates(
+    mock_post, mock_get, auto
+):
+    """Same human name, different client: must NOT reuse the other client's
+    QBO customer (regression: SS-CLIENT-0521 vs SS-CLIENT-0233 'Ana Thomas')."""
+    # QBO customer 282 belongs to a different canonical client
+    with auto.db:
+        auto.db.execute(
+            "INSERT INTO cross_tool_mapping "
+            "(canonical_id, entity_type, tool_name, tool_specific_id) "
+            "VALUES ('SS-CLIENT-0233', 'CLIENT', 'quickbooks', '282') "
+            "ON CONFLICT DO NOTHING"
+        )
+    canonical_id = _seed_client_without_qbo_mapping(auto.db, "SS-CLIENT-0097")
+
+    mock_post.side_effect = [
+        _make_qbo_duplicate_response(),          # first create → duplicate name
+        _make_qbo_post_mock(customer_id="999"),  # disambiguated create → ok
+    ]
+    mock_get.return_value = _make_qbo_query_response(customer_id="282")
+
+    result = auto.retry_quickbooks_customer(canonical_id)
+
+    assert result == "999"
+    second_body = mock_post.call_args_list[1].kwargs["json"]
+    assert second_body["DisplayName"] != "Rita Vargas"
+    assert canonical_id in second_body["DisplayName"]
+    assert _qbo_mappings(auto.db, canonical_id)["quickbooks"] == "999"
+
+
+@patch("automations.new_client_onboarding.requests.get")
+@patch("automations.new_client_onboarding.requests.post")
+def test_duplicate_name_unmapped_customer_is_reused(mock_post, mock_get, auto):
+    """Duplicate name where the existing QBO customer is unmapped (a prior
+    partial create for THIS client) → reuse it, no second create."""
+    canonical_id = _seed_client_without_qbo_mapping(auto.db, "SS-CLIENT-0098")
+
+    mock_post.return_value = _make_qbo_duplicate_response()
+    mock_get.return_value = _make_qbo_query_response(customer_id="777")
+
+    result = auto.retry_quickbooks_customer(canonical_id)
+
+    assert result == "777"
+    assert mock_post.call_count == 1
+    assert _qbo_mappings(auto.db, canonical_id)["quickbooks"] == "777"
