@@ -225,3 +225,94 @@ def test_error_isolation_one_failure_does_not_block_others(
     mock_pr_cls.return_value.run.assert_called_once()
     mock_nr_cls.return_value.run.assert_called_once()
     mock_hs_cls.return_value.run.assert_called_once_with()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pending handlers: create_invoice / create_qbo_customer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _enqueue(db, action_name, context, automation="Test"):
+    db_now = "2020-01-01T00:00:00Z"  # long past → due immediately
+    with db:
+        db.execute(
+            "INSERT INTO pending_actions "
+            "(automation_name, action_name, trigger_context, execute_after) "
+            "VALUES (%s, %s, %s, %s)",
+            (automation, action_name, json.dumps(context), db_now),
+        )
+
+
+def test_pending_create_invoice_dispatches_run_invoice_retry(
+    mock_clients, mock_db
+):
+    """create_invoice pending actions resolve Jobber IDs and call run_invoice_retry."""
+    _enqueue(mock_db, "create_invoice", {"canonical_job_id": "SS-JOB-0001"})
+
+    with patch(
+        "automations.job_completion_flow.JobCompletionFlow.run_invoice_retry",
+        return_value="qbo-inv-1",
+    ) as mock_retry:
+        result = run_pending(mock_clients, mock_db, dry_run=False)
+
+    assert result["succeeded"] == 1
+    event = mock_retry.call_args.args[0]
+    assert event["job_id"] == "601"      # jobber mapping of SS-JOB-0001
+    assert event["client_id"] == "301"   # jobber mapping of SS-CLIENT-0001
+    assert str(event["completed_at"]).startswith("2026-03-15")
+
+    row = mock_db.execute(
+        "SELECT status FROM pending_actions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "executed"
+
+
+def test_pending_create_invoice_fails_without_jobber_mapping(
+    mock_clients, mock_db
+):
+    """A job we can't tie back to Jobber must not be invoiced blindly."""
+    with mock_db:
+        mock_db.execute(
+            "INSERT INTO jobs (id, client_id, service_type_id, scheduled_date, status, completed_at) "
+            "VALUES ('SS-JOB-0077', 'SS-CLIENT-0001', 'std-residential', "
+            "'2026-06-01', 'completed', '2026-06-01T12:00:00') ON CONFLICT DO NOTHING"
+        )
+    _enqueue(mock_db, "create_invoice", {"canonical_job_id": "SS-JOB-0077"})
+
+    result = run_pending(mock_clients, mock_db, dry_run=False)
+
+    assert result["failed"] == 1
+    row = mock_db.execute(
+        "SELECT status FROM pending_actions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "failed"
+
+
+def test_pending_create_invoice_skips_uncompleted_job(mock_clients, mock_db):
+    with mock_db:
+        mock_db.execute(
+            "INSERT INTO jobs (id, client_id, service_type_id, scheduled_date, status) "
+            "VALUES ('SS-JOB-0078', 'SS-CLIENT-0001', 'std-residential', "
+            "'2026-07-01', 'scheduled') ON CONFLICT DO NOTHING"
+        )
+    _enqueue(mock_db, "create_invoice", {"canonical_job_id": "SS-JOB-0078"})
+
+    with patch(
+        "automations.job_completion_flow.JobCompletionFlow.run_invoice_retry"
+    ) as mock_retry:
+        result = run_pending(mock_clients, mock_db, dry_run=False)
+
+    mock_retry.assert_not_called()
+    assert result["succeeded"] == 1  # nothing to do counts as handled
+
+
+def test_pending_create_qbo_customer_dispatches_retry(mock_clients, mock_db):
+    _enqueue(mock_db, "create_qbo_customer", {"canonical_id": "SS-CLIENT-0001"})
+
+    with patch(
+        "automations.new_client_onboarding.NewClientOnboarding.retry_quickbooks_customer",
+        return_value="qbo-cust-1",
+    ) as mock_retry:
+        result = run_pending(mock_clients, mock_db, dry_run=False)
+
+    assert result["succeeded"] == 1
+    mock_retry.assert_called_once_with("SS-CLIENT-0001")

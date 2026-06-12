@@ -28,7 +28,7 @@ if _PROJECT_ROOT not in sys.path:
 from automations.base import BaseAutomation
 from automations.utils.assignees import get_assignee_email
 from automations.utils.asana_tasks import create_tasks
-from automations.utils.id_resolver import MappingNotFoundError, register_mapping
+from automations.utils.id_resolver import MappingNotFoundError, register_mapping, resolve
 from simulation.jobber_user_pool import load_user_pool_from_config
 from simulation.jobber_utils import build_job_create_input, expected_duration
 
@@ -722,6 +722,80 @@ class NewClientOnboarding(BaseAutomation):
             f"(deal_id={deal_id}, {first_name} {last_name})"
         )
         return client_id
+
+    # ── Retry entry point: QuickBooks customer ────────────────────────────────
+
+    def retry_quickbooks_customer(self, canonical_id: str) -> Optional[str]:
+        """Create the QBO customer for a client whose original onboarding
+        create_quickbooks_customer action failed.
+
+        Entry point for the pending_actions 'create_qbo_customer' handler and
+        the incident backfill script. Idempotent: an existing 'quickbooks'
+        mapping is returned as-is (backfilling the 'quickbooks_customer' alias
+        if absent). Raises on failure so callers can mark the retry failed.
+        """
+        run_id = self.generate_run_id()
+        trigger_source = f"retry:create_qbo_customer:{canonical_id}"
+
+        try:
+            existing = resolve(self.db, canonical_id, "quickbooks")
+            try:
+                resolve(self.db, canonical_id, "quickbooks_customer")
+            except MappingNotFoundError:
+                if not self.dry_run:
+                    register_mapping(
+                        self.db, canonical_id, "quickbooks_customer", existing
+                    )
+            print(
+                f"[INFO] {canonical_id} already mapped to QBO customer "
+                f"{existing} — skipping create"
+            )
+            return existing
+        except MappingNotFoundError:
+            pass
+
+        row = self.db.execute(
+            "SELECT first_name, last_name, company_name, email, phone, client_type "
+            "FROM clients WHERE id = %s",
+            (canonical_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"retry_quickbooks_customer: no clients row for {canonical_id}"
+            )
+
+        display_name = (
+            (row["company_name"] or "").strip()
+            or f"{row['first_name']} {row['last_name']}".strip()
+        )
+        ctx = {
+            "canonical_id": canonical_id,
+            "display_name": display_name,
+            "email":        row["email"] or "",
+            "phone":        row["phone"] or "",
+            "client_type":  row["client_type"] or "residential",
+        }
+
+        try:
+            qbo_customer_id = self._action_quickbooks(ctx)
+            if not self.dry_run and qbo_customer_id:
+                register_mapping(self.db, canonical_id, "quickbooks", qbo_customer_id)
+                register_mapping(
+                    self.db, canonical_id, "quickbooks_customer", qbo_customer_id
+                )
+            self.log_action(
+                run_id, "create_quickbooks_customer",
+                f"quickbooks:customer:{qbo_customer_id}",
+                "success",
+                trigger_source=trigger_source,
+            )
+            return qbo_customer_id
+        except Exception as exc:
+            self.log_action(
+                run_id, "create_quickbooks_customer", None, "failed",
+                error_message=str(exc), trigger_source=trigger_source,
+            )
+            raise
 
     # ── Action 1: Asana ───────────────────────────────────────────────────────
 

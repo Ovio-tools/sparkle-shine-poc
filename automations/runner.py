@@ -348,8 +348,84 @@ def _dispatch_pending(clients, db, action_name: str, context: dict, dry_run: boo
     """Route a pending action to its handler."""
     if action_name == "send_review_request":
         _handle_send_review_request(clients, db, context, dry_run)
+    elif action_name == "create_invoice":
+        _handle_create_invoice(clients, db, context, dry_run)
+    elif action_name == "create_qbo_customer":
+        _handle_create_qbo_customer(clients, db, context, dry_run)
     else:
         logger.warning("Unknown pending action_name '%s' — skipping.", action_name)
+
+
+def _handle_create_invoice(clients, db, context: dict, dry_run: bool) -> None:
+    """
+    Re-attempt QuickBooks invoice creation for a completed job whose original
+    invoice failed (queued by JobCompletionFlow or the reconciliation healer).
+
+    Expected context keys: canonical_job_id (required).
+    Raises on failure so run_pending marks the action failed; the daily
+    reconciler sweep re-queues it while the job remains uninvoiced.
+    """
+    from automations.job_completion_flow import JobCompletionFlow
+    from automations.utils.id_resolver import MappingNotFoundError, resolve
+
+    canonical_job_id = context.get("canonical_job_id")
+    if not canonical_job_id:
+        raise ValueError("create_invoice context missing 'canonical_job_id'")
+
+    job = db.execute(
+        "SELECT client_id, status, completed_at FROM jobs WHERE id = %s",
+        (canonical_job_id,),
+    ).fetchone()
+    if job is None:
+        raise ValueError(f"create_invoice: no jobs row for {canonical_job_id}")
+    if job["status"] != "completed":
+        logger.info(
+            "create_invoice for %s: job status is '%s' — nothing to invoice.",
+            canonical_job_id, job["status"],
+        )
+        return
+
+    # The flow context builder works from Jobber IDs (the poll event shape).
+    # A job with no Jobber mapping can't be safely priced/recorded — refuse
+    # rather than invoice blindly.
+    try:
+        jobber_job_id = resolve(db, canonical_job_id, "jobber")
+    except MappingNotFoundError:
+        raise ValueError(
+            f"create_invoice: {canonical_job_id} has no Jobber mapping — "
+            "cannot rebuild the completion event"
+        )
+    jobber_client_id = ""
+    if job["client_id"]:
+        try:
+            jobber_client_id = resolve(db, job["client_id"], "jobber")
+        except MappingNotFoundError:
+            pass
+
+    event = {
+        "job_id": jobber_job_id,
+        "client_id": jobber_client_id,
+        "completed_at": job["completed_at"],
+        "is_recurring": False,
+    }
+    JobCompletionFlow(clients, db, dry_run).run_invoice_retry(event)
+
+
+def _handle_create_qbo_customer(clients, db, context: dict, dry_run: bool) -> None:
+    """
+    Re-attempt QuickBooks customer creation for an onboarded client whose
+    original create_quickbooks_customer action failed (queued by the
+    onboarding mapping-verification step).
+
+    Expected context keys: canonical_id (required).
+    """
+    from automations.new_client_onboarding import NewClientOnboarding
+
+    canonical_id = context.get("canonical_id")
+    if not canonical_id:
+        raise ValueError("create_qbo_customer context missing 'canonical_id'")
+
+    NewClientOnboarding(clients, db, dry_run).retry_quickbooks_customer(canonical_id)
 
 
 def _handle_send_review_request(clients, db, context: dict, dry_run: bool) -> None:

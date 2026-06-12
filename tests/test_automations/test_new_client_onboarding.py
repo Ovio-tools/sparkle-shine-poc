@@ -389,3 +389,66 @@ def test_dry_run_no_api_writes(_mock_tasks, mock_db, mock_clients, sample_trigge
     mock_slack.assert_not_called()
     mock_clients.jobber.post.assert_not_called()
     mock_clients.mailchimp.lists.update_list_member_tags.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# retry_quickbooks_customer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seed_client_without_qbo_mapping(db, canonical_id="SS-CLIENT-0095"):
+    with db:
+        db.execute(
+            "INSERT INTO clients (id, client_type, first_name, last_name, email, phone, status) "
+            "VALUES (%s, 'residential', 'Rita', 'Vargas', 'rita.vargas@example.com', "
+            "'(512) 555-0188', 'active') ON CONFLICT DO NOTHING",
+            (canonical_id,),
+        )
+    return canonical_id
+
+
+def _qbo_mappings(db, canonical_id):
+    rows = db.execute(
+        "SELECT tool_name, tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name IN ('quickbooks', 'quickbooks_customer')",
+        (canonical_id,),
+    ).fetchall()
+    return {r["tool_name"]: r["tool_specific_id"] for r in rows}
+
+
+@patch("automations.new_client_onboarding.requests.post")
+def test_retry_quickbooks_customer_creates_and_registers(mock_post, auto):
+    canonical_id = _seed_client_without_qbo_mapping(auto.db)
+    mock_post.return_value = _make_qbo_post_mock(customer_id="qbo-cust-555")
+
+    result = auto.retry_quickbooks_customer(canonical_id)
+
+    assert result == "qbo-cust-555"
+    mappings = _qbo_mappings(auto.db, canonical_id)
+    assert mappings == {
+        "quickbooks": "qbo-cust-555",
+        "quickbooks_customer": "qbo-cust-555",
+    }
+    log = auto.db.execute(
+        "SELECT status, trigger_source FROM automation_log "
+        "WHERE action_name = 'create_quickbooks_customer' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert log["status"] == "success"
+    assert canonical_id in log["trigger_source"]
+
+
+@patch("automations.new_client_onboarding.requests.post")
+def test_retry_quickbooks_customer_idempotent(mock_post, auto):
+    """Existing mapping → no HTTP call, returns the existing customer id."""
+    result = auto.retry_quickbooks_customer("SS-CLIENT-0001")  # seeded with quickbooks=401
+
+    assert result == "401"
+    mock_post.assert_not_called()
+    # the quickbooks_customer alias gets backfilled
+    assert _qbo_mappings(auto.db, "SS-CLIENT-0001")["quickbooks_customer"] == "401"
+
+
+@patch("automations.new_client_onboarding.requests.post")
+def test_retry_quickbooks_customer_unknown_client_raises(mock_post, auto):
+    with pytest.raises(ValueError):
+        auto.retry_quickbooks_customer("SS-CLIENT-9999")
+    mock_post.assert_not_called()
