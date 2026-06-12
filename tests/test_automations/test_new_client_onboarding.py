@@ -452,3 +452,54 @@ def test_retry_quickbooks_customer_unknown_client_raises(mock_post, auto):
     with pytest.raises(ValueError):
         auto.retry_quickbooks_customer("SS-CLIENT-9999")
     mock_post.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mapping verification queues a QBO customer retry
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pending_qbo_customer_rows(db, canonical_id):
+    return db.execute(
+        "SELECT * FROM pending_actions "
+        "WHERE action_name = 'create_qbo_customer' AND trigger_context LIKE %s",
+        (f'%"{canonical_id}"%',),
+    ).fetchall()
+
+
+def test_verify_missing_qbo_mapping_queues_retry(auto):
+    ctx = {
+        "canonical_id": "SS-CLIENT-0096",
+        "email": "verify.gap@example.com",
+    }
+    with patch("automations.base.post_slack_message"):
+        auto._action_verify_mappings("run-x", ctx, "pipedrive:deal:999")
+
+    rows = _pending_qbo_customer_rows(auto.db, "SS-CLIENT-0096")
+    assert len(rows) == 1
+    import json as _json
+    assert _json.loads(rows[0]["trigger_context"])["canonical_id"] == "SS-CLIENT-0096"
+
+
+def test_verify_missing_qbo_mapping_does_not_duplicate(auto):
+    ctx = {"canonical_id": "SS-CLIENT-0096", "email": "verify.gap@example.com"}
+    with patch("automations.base.post_slack_message"):
+        auto._action_verify_mappings("run-x", ctx, "pipedrive:deal:999")
+        auto._action_verify_mappings("run-y", ctx, "pipedrive:deal:999")
+
+    assert len(_pending_qbo_customer_rows(auto.db, "SS-CLIENT-0096")) == 1
+
+
+def test_verify_all_mappings_present_queues_nothing(auto):
+    """SS-CLIENT-0001 has every required mapping seeded."""
+    ctx = {"canonical_id": "SS-CLIENT-0001", "email": "jane@example.com"}
+    # the seeded fixture lacks the quickbooks_customer alias — add it
+    with auto.db:
+        auto.db.execute(
+            "INSERT INTO cross_tool_mapping (canonical_id, entity_type, tool_name, tool_specific_id) "
+            "VALUES ('SS-CLIENT-0001', 'CLIENT', 'quickbooks_customer', '401') "
+            "ON CONFLICT DO NOTHING"
+        )
+    with patch("automations.base.post_slack_message"):
+        auto._action_verify_mappings("run-x", ctx, "pipedrive:deal:999")
+
+    assert _pending_qbo_customer_rows(auto.db, "SS-CLIENT-0001") == []

@@ -1218,10 +1218,38 @@ class NewClientOnboarding(BaseAutomation):
             trigger_source=trigger_source,
         )
         if not all_present:
+            qbo_missing = {"quickbooks", "quickbooks_customer"} & set(missing)
+            retry_note = ""
+            if qbo_missing and not self.dry_run:
+                # The QBO customer gap is self-healable: queue a retry instead
+                # of relying on a human reading #operations. 1h delay because
+                # the original creation failed seconds ago (usually a transient
+                # QBO error) and an immediate retry would re-fail — failed
+                # pending actions are not auto-retried.
+                try:
+                    already_queued = self.db.execute(
+                        "SELECT 1 FROM pending_actions "
+                        "WHERE action_name = 'create_qbo_customer' "
+                        "AND status = 'pending' AND trigger_context LIKE %s",
+                        (f'%"{canonical_id}"%',),
+                    ).fetchone()
+                    if not already_queued:
+                        self.schedule_delayed_action(
+                            action_name="create_qbo_customer",
+                            trigger_context_dict={"canonical_id": canonical_id},
+                            delay_hours=1,
+                        )
+                    retry_note = " Automatic QuickBooks customer retry queued."
+                except Exception as queue_exc:
+                    print(
+                        f"[WARN] Could not queue create_qbo_customer retry for "
+                        f"{canonical_id}: {queue_exc}"
+                    )
             self.send_slack(
                 "operations",
                 f":warning: Onboarding sync gap for `{canonical_id}`: "
-                f"no mapping in {', '.join(missing)}. Manual follow-up required.",
+                f"no mapping in {', '.join(missing)}. Manual follow-up required."
+                f"{retry_note}",
             )
 
 
