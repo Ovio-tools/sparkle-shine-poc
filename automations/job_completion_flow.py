@@ -325,36 +325,10 @@ class JobCompletionFlow(BaseAutomation):
         payment_terms  = "due on receipt"
         try:
             invoice_id, invoice_amount, payment_terms = self._action_quickbooks_invoice(ctx)
-            if self.dry_run and invoice_id:
-                local_invoice_id = "dry-run-local-invoice-id"
-            elif invoice_id:
-                inv_due_date = (
-                    (ctx["completion_date"] + timedelta(days=30)).isoformat()
-                    if ctx["is_commercial"]
-                    else ctx["completion_date"].isoformat()
-                )
-                with self.db:
-                    inv_canonical_id = _allocate_invoice_id(self.db)
-                    self.db.execute(
-                        "INSERT INTO invoices "
-                        "(id, client_id, job_id, amount, status, issue_date, due_date) "
-                        "VALUES (%s, %s, %s, %s, 'sent', %s, %s)",
-                        (
-                            inv_canonical_id,
-                            ctx["canonical_id"],
-                            ctx["canonical_job_id"],
-                            invoice_amount,
-                            ctx["completion_date"].isoformat(),
-                            inv_due_date,
-                        ),
-                    )
-                    local_invoice_id = inv_canonical_id
-                register_mapping(
-                    self.db,
-                    inv_canonical_id,
-                    "quickbooks",
-                    invoice_id,
-                )
+            local_invoice_id = (
+                self._record_local_invoice(ctx, invoice_id, invoice_amount)
+                if invoice_id else None
+            )
             self.log_action(
                 run_id, "create_quickbooks_invoice",
                 f"quickbooks:invoice:{invoice_id}",
@@ -367,6 +341,7 @@ class JobCompletionFlow(BaseAutomation):
                 run_id, "create_quickbooks_invoice", None, "failed",
                 error_message=str(exc), trigger_source=trigger_source,
             )
+            self._maybe_queue_invoice_retry(ctx, exc)
 
         # ── Action 1b: Jobber invoice writeback ──────────────────────────────
         if invoice_id and local_invoice_id:
@@ -662,6 +637,177 @@ class JobCompletionFlow(BaseAutomation):
             )
 
         return (str(invoice.get("Id", "")), amount, payment_terms)
+
+    # ── Action 1 helpers: local record, retry queueing, retry entry point ─────
+
+    def _record_local_invoice(
+        self, ctx: dict, invoice_id: str, invoice_amount: float
+    ) -> Optional[str]:
+        """Insert the canonical invoices row + INV mapping for a created QBO invoice.
+
+        Returns the SS-INV-* id (or the dry-run placeholder).
+        """
+        if self.dry_run:
+            return "dry-run-local-invoice-id"
+        if not invoice_id:
+            return None
+
+        inv_due_date = (
+            (ctx["completion_date"] + timedelta(days=30)).isoformat()
+            if ctx["is_commercial"]
+            else ctx["completion_date"].isoformat()
+        )
+        with self.db:
+            inv_canonical_id = _allocate_invoice_id(self.db)
+            self.db.execute(
+                "INSERT INTO invoices "
+                "(id, client_id, job_id, amount, status, issue_date, due_date) "
+                "VALUES (%s, %s, %s, %s, 'sent', %s, %s)",
+                (
+                    inv_canonical_id,
+                    ctx["canonical_id"],
+                    ctx["canonical_job_id"],
+                    invoice_amount,
+                    ctx["completion_date"].isoformat(),
+                    inv_due_date,
+                ),
+            )
+        register_mapping(
+            self.db,
+            inv_canonical_id,
+            "quickbooks",
+            invoice_id,
+        )
+        return inv_canonical_id
+
+    def _maybe_queue_invoice_retry(self, ctx: dict, exc: Exception) -> None:
+        """On a missing QBO customer mapping, queue a delayed retry and alert now.
+
+        The poll watermark advances when the completed-job event is fetched, so
+        a failed invoice would otherwise never be attempted again (the gap
+        behind the 2026-06 SS-JOB-5981 / SS-JOB-6058 missing invoices). Only
+        the missing-mapping case is queued: it self-heals once the QuickBooks
+        customer exists. Pricing-unresolved skips already alert via
+        _emit_fallback_pricing_alert and need ops action, not a retry.
+        Never raises.
+        """
+        if not isinstance(exc, MappingNotFoundError):
+            return
+        canonical_job_id = ctx.get("canonical_job_id")
+        if not canonical_job_id:
+            return
+        if self.dry_run:
+            print(
+                f"[DRY RUN] Would queue create_invoice retry for {canonical_job_id} "
+                f"and alert #automation-failure"
+            )
+            return
+
+        try:
+            already_queued = self.db.execute(
+                "SELECT 1 FROM pending_actions "
+                "WHERE action_name = 'create_invoice' AND status = 'pending' "
+                "AND trigger_context LIKE %s",
+                (f'%"{canonical_job_id}"%',),
+            ).fetchone()
+            if not already_queued:
+                # 1h delay: the usual cause is an onboarding gap whose own
+                # create_qbo_customer retry is queued on the same cadence;
+                # retrying immediately would just re-fail.
+                self.schedule_delayed_action(
+                    action_name="create_invoice",
+                    trigger_context_dict={"canonical_job_id": canonical_job_id},
+                    delay_hours=1,
+                )
+        except Exception as queue_exc:
+            logger.error(
+                "Could not queue invoice retry for %s: %s",
+                canonical_job_id, queue_exc,
+            )
+
+        try:
+            from simulation.error_reporter import report_error
+            report_error(
+                str(exc),
+                tool_name="quickbooks",
+                context=(
+                    f"creating invoice for {ctx.get('client_name', 'Unknown Client')} "
+                    f"(job {ctx.get('job_id', 'unknown')}) — retry queued"
+                ),
+                severity="warning",
+                dry_run=self.dry_run,
+            )
+        except Exception as alert_exc:
+            logger.debug("Invoice-failure alert suppressed: %s", alert_exc)
+
+    def run_invoice_retry(self, trigger_event: dict) -> Optional[str]:
+        """Re-attempt invoice creation for a completed job.
+
+        Entry point for the pending_actions 'create_invoice' handler and the
+        incident backfill script. Idempotent: returns the existing invoice ID
+        when one is already recorded. Raises on failure so callers can mark
+        the retry as failed (a later reconciler sweep re-queues it).
+        Returns the QuickBooks invoice ID (or the local SS-INV-* id when the
+        invoice already existed).
+        """
+        run_id = self.generate_run_id()
+        trigger_source = (
+            f"retry:create_invoice:{trigger_event.get('job_id', 'unknown')}"
+        )
+        ctx = self._build_context(trigger_event)
+
+        if ctx["canonical_job_id"]:
+            existing = self.db.execute(
+                "SELECT id FROM invoices WHERE job_id = %s",
+                (ctx["canonical_job_id"],),
+            ).fetchone()
+            if existing:
+                logger.info(
+                    "Invoice retry for %s: invoice %s already exists — skipping",
+                    ctx["canonical_job_id"], existing["id"],
+                )
+                return existing["id"]
+
+        try:
+            invoice_id, invoice_amount, _ = self._action_quickbooks_invoice(ctx)
+            local_invoice_id = self._record_local_invoice(ctx, invoice_id, invoice_amount)
+        except Exception as exc:
+            self.log_action(
+                run_id, "create_quickbooks_invoice", None, "failed",
+                error_message=str(exc), trigger_source=trigger_source,
+            )
+            raise
+
+        self.log_action(
+            run_id, "create_quickbooks_invoice",
+            f"quickbooks:invoice:{invoice_id}",
+            "success",
+            trigger_source=trigger_source,
+            trigger_detail={"job_id": ctx["job_id"], "amount": invoice_amount},
+        )
+
+        # Best-effort Jobber writeback so the job leaves requires_invoicing.
+        if invoice_id and local_invoice_id:
+            try:
+                jobber_invoice_id = self._action_jobber_invoice_writeback(
+                    ctx,
+                    local_invoice_id=local_invoice_id,
+                    quickbooks_invoice_id=invoice_id,
+                    invoice_amount=invoice_amount,
+                )
+                self.log_action(
+                    run_id, "create_jobber_invoice_writeback",
+                    f"jobber:invoice:{jobber_invoice_id}",
+                    "success",
+                    trigger_source=trigger_source,
+                )
+            except Exception as exc:
+                self.log_action(
+                    run_id, "create_jobber_invoice_writeback", None, "failed",
+                    error_message=str(exc), trigger_source=trigger_source,
+                )
+
+        return invoice_id
 
     # ── Action 1b: Jobber invoice writeback ──────────────────────────────────
 
