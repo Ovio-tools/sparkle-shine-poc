@@ -503,3 +503,43 @@ def test_verify_all_mappings_present_queues_nothing(auto):
         auto._action_verify_mappings("run-x", ctx, "pipedrive:deal:999")
 
     assert _pending_qbo_customer_rows(auto.db, "SS-CLIENT-0001") == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lead promotion migrates ALL tool mappings to the client
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_promote_lead_repoints_jobber_and_qbo_mappings(auto):
+    lead_id = "SS-LEAD-0901"
+    with auto.db:
+        for tool, tid in [
+            ("hubspot", "hs-901"),
+            ("pipedrive", "pd-901"),
+            ("jobber", "jc-901"),
+            ("jobber_property", "jp-901"),
+            ("quickbooks", "qb-901"),
+            ("mailchimp", "mc-901"),
+        ]:
+            auto.db.execute(
+                "INSERT INTO cross_tool_mapping "
+                "(canonical_id, entity_type, tool_name, tool_specific_id) "
+                "VALUES (%s, 'LEAD', %s, %s) ON CONFLICT DO NOTHING",
+                (lead_id, tool, tid),
+            )
+
+    client_id = auto._promote_lead_to_client(
+        lead_id, "deal-901", "Pat", "Promoted", "pat.promoted@example.com",
+        "residential",
+    )
+
+    assert client_id.startswith("SS-CLIENT-")
+    rows = auto.db.execute(
+        "SELECT tool_name, canonical_id, entity_type FROM cross_tool_mapping "
+        "WHERE tool_specific_id LIKE '%-901'"
+    ).fetchall()
+    assert rows, "expected migrated mapping rows"
+    for r in rows:
+        assert r["canonical_id"] == client_id, (
+            f"{r['tool_name']} mapping still points at {r['canonical_id']}"
+        )
+        assert r["entity_type"] == "CLIENT"

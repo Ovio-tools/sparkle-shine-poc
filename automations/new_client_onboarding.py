@@ -695,16 +695,21 @@ class NewClientOnboarding(BaseAutomation):
                 """,
                 (client_id, client_type, first_name, last_name, email),
             )
-            # Re-point only the Pipedrive deal mapping (and pipedrive_person if
-            # it shares the same tool_specific_id) from the lead ID to the new
-            # client ID. HubSpot is promoted too so downstream client automations
-            # resolve the same CRM contact after conversion.
+            # Re-point ALL operational tool mappings from the lead ID to the
+            # new client ID. A Jobber client / QBO customer / Mailchimp member
+            # created pre-conversion belongs to the client after promotion;
+            # leaving those rows on the lead makes reverse lookups resolve to
+            # a record with no billing mappings (the SS-LEAD-0335 /
+            # SS-JOB-5981 stranded-invoice bug). No uniqueness risk: the
+            # client canonical ID was just minted, so it has no rows yet.
             self.db.execute(
                 """
                 UPDATE cross_tool_mapping
                    SET canonical_id = %s, entity_type = 'CLIENT', synced_at = CURRENT_TIMESTAMP
                  WHERE canonical_id = %s
-                   AND tool_name IN ('hubspot', 'pipedrive', 'pipedrive_person')
+                   AND tool_name IN ('hubspot', 'pipedrive', 'pipedrive_person',
+                                     'jobber', 'jobber_property', 'mailchimp',
+                                     'quickbooks', 'quickbooks_customer')
                 """,
                 (client_id, lead_id),
             )

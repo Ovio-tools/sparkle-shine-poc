@@ -49,6 +49,13 @@ def reverse_resolve(
     """
     Return the canonical SS-ID for a tool-specific ID.
 
+    When no entity_type is given and the same tool ID is mapped by multiple
+    canonical records (e.g., a lead later promoted to a client kept its old
+    mapping), prefer CLIENT, then PROP, then LEAD — downstream automations
+    such as invoicing must resolve to the record that carries the QuickBooks
+    and billing mappings, which is the client. Without the ORDER BY the
+    returned row is arbitrary (the SS-LEAD-0335 / SS-JOB-5981 invoice bug).
+
     Raises MappingNotFoundError if no mapping exists.
     """
     if entity_type:
@@ -59,8 +66,18 @@ def reverse_resolve(
         )
     else:
         cursor = db.execute(
-            "SELECT canonical_id FROM cross_tool_mapping "
-            "WHERE tool_specific_id = %s AND tool_name = %s",
+            """
+            SELECT canonical_id FROM cross_tool_mapping
+            WHERE tool_specific_id = %s AND tool_name = %s
+            ORDER BY CASE entity_type
+                         WHEN 'CLIENT' THEN 0
+                         WHEN 'PROP'   THEN 1
+                         WHEN 'LEAD'   THEN 2
+                         ELSE 3
+                     END,
+                     canonical_id DESC
+            LIMIT 1
+            """,
             (tool_specific_id, source_tool),
         )
     row = cursor.fetchone()
