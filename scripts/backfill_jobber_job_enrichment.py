@@ -29,6 +29,9 @@ def _snapshot(conn) -> dict[str, int]:
             COUNT(*) FILTER (WHERE notes IS NOT NULL AND BTRIM(notes) <> '') AS jobs_with_notes,
             COUNT(*) FILTER (WHERE job_title_raw IS NOT NULL AND BTRIM(job_title_raw) <> '') AS jobs_with_raw_title,
             COUNT(*) FILTER (WHERE jobber_job_type IS NOT NULL AND BTRIM(jobber_job_type) <> '') AS jobs_with_job_type,
+            COUNT(*) FILTER (WHERE jobber_assigned_users IS NOT NULL AND jobber_assigned_users <> '[]'::jsonb) AS jobs_with_assignees,
+            COUNT(*) FILTER (WHERE crew_id IS NOT NULL) AS jobs_with_crew_id,
+            COUNT(*) FILTER (WHERE duration_minutes_actual IS NOT NULL) AS jobs_with_duration,
             COUNT(*) FILTER (WHERE is_recurring_job IS TRUE) AS jobs_marked_recurring
         FROM jobs
         """

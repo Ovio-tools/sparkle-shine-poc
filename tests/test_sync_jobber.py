@@ -48,6 +48,7 @@ def test_upsert_job_does_not_downgrade_completed_rows_to_scheduled():
         CREATE TABLE jobs (
             id TEXT PRIMARY KEY,
             client_id TEXT NOT NULL,
+            crew_id TEXT,
             service_type_id TEXT NOT NULL,
             job_title_raw TEXT,
             jobber_job_type TEXT,
@@ -56,6 +57,7 @@ def test_upsert_job_does_not_downgrade_completed_rows_to_scheduled():
             duration_minutes_actual INTEGER,
             status TEXT NOT NULL DEFAULT 'scheduled',
             notes TEXT,
+            jobber_assigned_users TEXT,
             is_recurring_job BOOLEAN,
             jobber_updated_at TEXT,
             completed_at TEXT
@@ -127,6 +129,7 @@ def test_upsert_job_enriches_confirmed_fields():
         CREATE TABLE jobs (
             id TEXT PRIMARY KEY,
             client_id TEXT NOT NULL,
+            crew_id TEXT,
             service_type_id TEXT NOT NULL,
             job_title_raw TEXT,
             jobber_job_type TEXT,
@@ -135,11 +138,34 @@ def test_upsert_job_enriches_confirmed_fields():
             duration_minutes_actual INTEGER,
             status TEXT NOT NULL DEFAULT 'scheduled',
             notes TEXT,
+            jobber_assigned_users TEXT,
             is_recurring_job BOOLEAN,
             jobber_updated_at TEXT,
             completed_at TEXT
         );
+        CREATE TABLE employees (
+            id TEXT PRIMARY KEY,
+            first_name TEXT,
+            last_name TEXT,
+            email TEXT,
+            crew_id TEXT,
+            status TEXT
+        );
         """
+    )
+    conn.execute(
+        """
+        INSERT INTO employees (id, first_name, last_name, email, crew_id, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "SS-EMP-002",
+            "Claudia",
+            "Ramirez",
+            "claudia.ramirez@oviodigital.com",
+            "crew-a",
+            "active",
+        ),
     )
     conn.execute(
         """
@@ -171,20 +197,30 @@ def test_upsert_job_enriches_confirmed_fields():
                     "updatedAt": "2026-04-13T09:00:00Z",
                     "client": {"id": "JOBBER-CLIENT-1"},
                     "visitSchedule": {"recurrenceSchedule": {"calendarRule": "FREQ=WEEKLY"}},
-                    "visits": {"nodes": [{"duration": 7200}]},
+                    "visits": {"nodes": [{
+                        "duration": 7200,
+                        "assignedUsers": {
+                            "nodes": [{
+                                "id": "user-1",
+                                "name": {"full": "Claudia Ramirez"},
+                                "email": {"raw": "claudia.ramirez@oviodigital.com"},
+                            }]
+                        },
+                    }]},
                 }
             )
             syncer.close()
 
     row = conn.execute(
         """
-        SELECT service_type_id, job_title_raw, jobber_job_type, scheduled_date, scheduled_time,
-               duration_minutes_actual, notes, is_recurring_job, jobber_updated_at
+        SELECT crew_id, service_type_id, job_title_raw, jobber_job_type, scheduled_date, scheduled_time,
+               duration_minutes_actual, notes, jobber_assigned_users, is_recurring_job, jobber_updated_at
         FROM jobs
         WHERE id = ?
         """,
         ("SS-JOB-0002",),
     ).fetchone()
+    assert row["crew_id"] == "crew-a"
     assert row["service_type_id"] == "recurring-weekly"
     assert row["job_title_raw"] == "Recurring Weekly"
     assert row["jobber_job_type"] == "RECURRING"
@@ -192,5 +228,110 @@ def test_upsert_job_enriches_confirmed_fields():
     assert row["scheduled_time"] == "08:00"
     assert row["duration_minutes_actual"] == 120
     assert row["notes"] == "Gate code 4455"
+    assert '"Claudia Ramirez"' in row["jobber_assigned_users"]
     assert row["is_recurring_job"] == 1
     assert row["jobber_updated_at"] == "2026-04-13T09:00:00Z"
+
+
+def test_upsert_job_preserves_existing_crew_when_assignees_are_ambiguous():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE sync_state (
+            tool_name TEXT PRIMARY KEY,
+            last_sync_at TEXT NOT NULL,
+            records_synced INTEGER,
+            last_error TEXT
+        );
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            crew_id TEXT,
+            service_type_id TEXT NOT NULL,
+            job_title_raw TEXT,
+            jobber_job_type TEXT,
+            scheduled_date TEXT,
+            scheduled_time TEXT,
+            duration_minutes_actual INTEGER,
+            status TEXT NOT NULL DEFAULT 'scheduled',
+            notes TEXT,
+            jobber_assigned_users TEXT,
+            is_recurring_job BOOLEAN,
+            jobber_updated_at TEXT,
+            completed_at TEXT
+        );
+        CREATE TABLE employees (
+            id TEXT PRIMARY KEY,
+            first_name TEXT,
+            last_name TEXT,
+            email TEXT,
+            crew_id TEXT,
+            status TEXT
+        );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO employees (id, first_name, last_name, email, crew_id, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("SS-EMP-002", "Claudia", "Ramirez", "claudia.ramirez@oviodigital.com", "crew-a", "active"),
+            ("SS-EMP-003", "Darnell", "Washington", "darnell.washington@oviodigital.com", "crew-b", "active"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO jobs
+            (id, client_id, crew_id, service_type_id, status)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("SS-JOB-0003", "SS-CLIENT-0001", "crew-a", "std-residential", "scheduled"),
+    )
+    conn.commit()
+
+    with patch("intelligence.syncers.base_syncer.get_connection", return_value=wrap_sqlite_connection(conn)):
+        with patch("intelligence.syncers.sync_jobber.get_canonical_id") as mock_get_canonical_id:
+            syncer = JobberSyncer(":memory:")
+            mock_get_canonical_id.side_effect = lambda tool, tool_id, **kwargs: {
+                "JOBBER-JOB-3": "SS-JOB-0003",
+                "JOBBER-CLIENT-1": "SS-CLIENT-0001",
+            }.get(tool_id)
+
+            syncer._upsert_job(
+                {
+                    "id": "JOBBER-JOB-3",
+                    "title": "Standard Residential Clean",
+                    "jobType": "ONE_OFF",
+                    "jobStatus": "ACTIVE",
+                    "startAt": "2026-04-13T08:00:00Z",
+                    "updatedAt": "2026-04-13T09:00:00Z",
+                    "client": {"id": "JOBBER-CLIENT-1"},
+                    "visits": {"nodes": [{
+                        "duration": 120,
+                        "assignedUsers": {
+                            "nodes": [
+                                {
+                                    "id": "user-1",
+                                    "name": {"full": "Claudia Ramirez"},
+                                    "email": {"raw": "claudia.ramirez@oviodigital.com"},
+                                },
+                                {
+                                    "id": "user-2",
+                                    "name": {"full": "Darnell Washington"},
+                                    "email": {"raw": "darnell.washington@oviodigital.com"},
+                                },
+                            ]
+                        },
+                    }]},
+                }
+            )
+            syncer.close()
+
+    row = conn.execute(
+        "SELECT crew_id, jobber_assigned_users FROM jobs WHERE id = ?",
+        ("SS-JOB-0003",),
+    ).fetchone()
+    assert row["crew_id"] == "crew-a"
+    assert '"Darnell Washington"' in row["jobber_assigned_users"]
