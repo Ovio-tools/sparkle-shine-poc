@@ -305,9 +305,12 @@ class SimulationEngine:
             # crash the engine or mask the original error.
             try:
                 from simulation.error_reporter import report_error
+                # Report under the generator's real SaaS tool (e.g. "hubspot"),
+                # not the engine registry key (e.g. "contacts"). Generators that
+                # span several tools omit `tool` and fall back to their name.
                 report_error(
                     e,
-                    tool_name=name,
+                    tool_name=getattr(generator, "tool", name),
                     context=f"running {name} generator",
                     dry_run=self.dry_run,
                 )

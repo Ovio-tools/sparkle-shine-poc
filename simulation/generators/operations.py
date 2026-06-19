@@ -488,6 +488,9 @@ class NewClientSetupGenerator:
     is wrapped in its own try/except so a single failure does not abort the rest.
     """
 
+    name = "new_client_setup"
+    tool = "jobber"  # primary SaaS tool — used for #automation-failure alert labels
+
     def __init__(self, db_path: str = "sparkle_shine.db", user_pool: Optional[UserPool] = None):
         self.db_path = db_path
         self._user_pool = user_pool
@@ -819,6 +822,9 @@ class JobSchedulingGenerator:
         queue_fn: Callable(fire_at, generator_name, kwargs) — injected by engine.
                   None in tests that don't need the queue.
     """
+
+    name = "job_scheduling"
+    tool = "jobber"  # primary SaaS tool — used for #automation-failure alert labels
 
     def __init__(
         self,
@@ -1474,6 +1480,9 @@ class JobCompletionGenerator:
     Outcome probabilities from DAILY_VOLUMES["job_completion"]:
       92% completed, 3% cancelled, 2% no-show, 3% rescheduled
     """
+
+    name = "job_completion"
+    tool = "jobber"  # primary SaaS tool — used for #automation-failure alert labels
 
     def __init__(self, db_path: str = "sparkle_shine.db", user_pool: Optional[UserPool] = None):
         self.db_path = db_path

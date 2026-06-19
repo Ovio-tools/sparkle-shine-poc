@@ -377,6 +377,35 @@ class TestDispatch(unittest.TestCase):
         except Exception:
             self.fail("dispatch() raised an exception on generator failure")
 
+    def test_dispatch_reports_real_tool_not_generator_name(self):
+        # When a generator fails, the Slack alert must name the real SaaS tool
+        # (from the generator's `tool` attribute), not the engine's registry key.
+        # Regression: the contacts generator was registered as "contacts", so a
+        # HubSpot 402 was reported as 'Tool: contacts' / "check Contacts's status page".
+        engine = self._make_engine()
+        mock_gen = MagicMock()
+        mock_gen.tool = "hubspot"
+        mock_gen.execute.side_effect = RuntimeError("HubSpot create contact failed: (402)")
+        engine.register("contacts", mock_gen)
+        with patch("simulation.error_reporter.report_error") as mock_report:
+            engine.dispatch(GeneratorCall("contacts", {}))
+        mock_report.assert_called_once()
+        self.assertEqual(mock_report.call_args.kwargs["tool_name"], "hubspot")
+
+    def test_dispatch_falls_back_to_generator_name_when_no_tool(self):
+        # A generator without a declared `tool` still reports under its name.
+        engine = self._make_engine()
+
+        class _NoToolGen:
+            def execute(self, dry_run=False, **kwargs):
+                raise RuntimeError("boom")
+
+        engine.register("mystery", _NoToolGen())
+        with patch("simulation.error_reporter.report_error") as mock_report:
+            engine.dispatch(GeneratorCall("mystery", {}))
+        mock_report.assert_called_once()
+        self.assertEqual(mock_report.call_args.kwargs["tool_name"], "mystery")
+
     def test_dispatch_warns_on_unknown_generator(self):
         engine = self._make_engine()
         with self.assertLogs("simulation.engine", level="WARNING") as cm:

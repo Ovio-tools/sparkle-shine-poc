@@ -118,6 +118,9 @@ class DealGenerator:
     Engine calls execute(dry_run=...) on each tick.
     """
 
+    name = "deals"
+    tool = "pipedrive"  # primary SaaS tool — used for #automation-failure alert labels
+
     def __init__(self):
         tool_ids = json.loads(Path("config/tool_ids.json").read_text())
         stages = tool_ids["pipedrive"]["stages"]
