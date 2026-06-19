@@ -11,7 +11,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 ## Tech Stack
 
 - **Language:** Python 3.11+ (Railway/Nixpacks default is 3.11; avoid macOS system Python 3.9 for local dev)
-- **Database:** PostgreSQL via psycopg2 for every running service (simulation, automations, intelligence, reconciliation, token-keeper). SQLite is only used in offline tooling that never runs on Railway: original `seeding/` generators, `setup/populate_workspace.py`, `demo/smoke_test.py`, test-doubles under `tests/sqlite_compat.py`, `scripts/migrate_to_postgres.py`, and a handful of legacy one-off scripts under `scripts/`.
+- **Database:** PostgreSQL via psycopg2 is the only live database — Railway Postgres in production, local Postgres for dev. SQLite survives only in retired offline tooling that never runs on Railway (original `seeding/` generators, `setup/populate_workspace.py`, `demo/smoke_test.py`, `scripts/migrate_to_postgres.py`, legacy one-off scripts) and the test doubles in `tests/sqlite_compat.py`. No running service or current workflow reads or writes a SQLite database.
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
 - **Deployment:** Railway (`railway.toml` in repo root, 6 services — start commands configured per-service on dashboard via wrapper scripts; always-on workers should use `/railway.worker.toml` as their custom config file)
@@ -27,8 +27,10 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 | intelligence-weekly | Cron | `0 13 * * 0` (8 AM CDT Sun) | `python -m intelligence.runner --report-type weekly` |
 | token-keeper | Worker (always-on) | — | `bash scripts/start_token_keeper.sh` |
 
-**Nixpacks 1.38.0 workaround:** If a Railway service build fails with `Found argument '-m'`, use a wrapper script (`scripts/start_*.sh`) as the dashboard start command instead of `python -m ...` directly. Do NOT set `NIXPACKS_START_CMD` env var alongside a dashboard start command — the combination causes build failures.
-- **Worker config:** Keep the shared root [`railway.toml`](/Users/ovieoghor/Documents/Claude%20Code%20Exercises/Simulation%20Exercise/sparkle-shine-poc/railway.toml) for cron services. Point always-on workers (`simulation-engine`, `token-keeper`) at [`railway.worker.toml`](/Users/ovieoghor/Documents/Claude%20Code%20Exercises/Simulation%20Exercise/sparkle-shine-poc/railway.worker.toml) in Railway's "Custom Config File" setting so they use `restartPolicyType = "ALWAYS"` without affecting the cron jobs. [`railway.simulation.toml`](/Users/ovieoghor/Documents/Claude%20Code%20Exercises/Simulation%20Exercise/sparkle-shine-poc/railway.simulation.toml) remains as a compatibility alias for older `simulation-engine` setups.
+Note: `sales-outreach` was deliberately slowed from `*/5` to `*/30` as a topic-spam mitigation; the root cause has since been fixed, but the slower cadence is the intended current state.
+
+Deployment details (Nixpacks `-m` build workaround, wrapper scripts, which `railway.*.toml` config file each service uses) live in `docs/railway.md` — read it before changing any Railway service config or start command.
+
 - **Local dev:** macOS, Postgres.app, Python 3.11+ recommended. The macOS system `python3` (3.9 + LibreSSL) works for basic scripts but emits Google client EOL warnings and `urllib3` LibreSSL warnings during tests.
 
 ## Tool Stack
@@ -50,14 +52,14 @@ OAuth tokens are stored via `auth/token_store.py` (four-tier: PostgreSQL DB -> J
 
 Pipedrive and HubSpot overlap intentionally. Pipedrive owns the active sales process (deals, proposals). HubSpot owns marketing and the full contact database. The overlap mirrors real SMB operations and is a feature for the intelligence layer to exploit.
 
-See @docs/skills/tool-api-patterns.md for rate limits, endpoints, headers, and error codes.
+See `docs/skills/tool-api-patterns.md` for rate limits, endpoints, headers, and error codes.
 
 ## IMPORTANT: Common Mistakes
 
 These rules exist because of real bugs. Follow them strictly.
 
-- When investigating or troubleshooting, default to GitHub-tracked repo state for intended code/config behavior and Railway for live DB state, env vars, deployed runtime, logs, auth state, and token behavior.
-- When troubleshooting runtime issues, auth issues, missing records, or data mismatches, treat Railway as the default source of truth for DB state, env vars, token state, and live tool behavior. Do not start by trusting the local DB or local token files unless the prompt is explicitly about local development, SQLite seeding, or tests.
+- When investigating or troubleshooting, GitHub-tracked repo state is the source of truth for intended behavior; Railway is the source of truth for live runtime (DB state, env vars, logs, auth/token state). Never start from local DB contents or local token files unless the task is explicitly about local dev or tests. Full diagnostic sequence: see "Troubleshooting Source Of Truth" below.
+- Jobber has NO crew objects. The 4 crews exist only in the business narrative (`config/business.py`). Jobber work is assigned per job via `assignedUsers` from a 7-user field-staff pool — avoid scheduling time overlaps for the same user.
 - NEVER `import sqlite3` or call `sqlite3.connect()` in new production code. Use `from database.connection import get_connection`.
 - NEVER use integer indexing on database rows (`row[0]`, `fetchone()[0]`). Rows are `RealDictRow` dicts. Always use `row["column_name"]`.
 - NEVER use `?` as a parameter placeholder in PostgreSQL code. Use `%s`.
@@ -141,7 +143,7 @@ The pipeline follows: **Sync -> Metrics -> Context -> Generate -> Publish**
 
 Two report types: daily (6 AM Mon-Fri, 175-450 words) and weekly (Sunday evening, 700-1400 words). Both post to Slack via Block Kit.
 
-See @docs/skills/weekly-report.md for report structure, section specs, confidence levels, citation formatting, and insight repetition rules. See `intelligence/config.py` for thresholds, targets, and prompt templates.
+See `docs/skills/weekly-report.md` for report structure, section specs, confidence levels, citation formatting, and insight repetition rules. See `intelligence/config.py` for thresholds, targets, and prompt templates.
 
 ## Conventions
 
@@ -183,7 +185,7 @@ python -m simulation.engine --dry-run
 # Data validation
 python seeding/utils/validator.py
 python seeding/generators/gen_anomalies.py
-python -c "from database.mappings import find_unmapped; print(find_unmapped('jobber', 'CLIENT'))"
+python -c "from database.mappings import find_unmapped; print(find_unmapped('CLIENT', 'jobber'))"  # entity_type first, then tool
 
 # PostgreSQL migration
 python scripts/migrate_to_postgres.py
@@ -208,13 +210,13 @@ When compacting, always preserve: the database pattern rules (PostgreSQL vs. SQL
 
 ## Skills Reference
 
-Read the relevant skill doc before building new modules:
+These are read-on-demand references — read the relevant one with the Read tool when the task calls for it; do not load them preemptively:
 
-- @docs/skills/project-conventions.md -- Import paths, naming rules, testing patterns, error handling. Read at session start.
-- @docs/skills/tool-api-patterns.md -- Auth patterns, endpoints, headers, rate limits, error codes. Read before any API call.
-- @docs/skills/canonical-record.md -- How to create records and register cross-tool mappings. Read before writing to the database.
-- @docs/skills/generator-template.md -- Boilerplate class for simulation generators. Copy and fill in.
-- @docs/skills/weekly-report.md -- Report structure, data analysis standards, confidence levels, citations, insight repetition rules.
+- `docs/skills/project-conventions.md` -- Import paths, naming rules, testing patterns, error handling. Read before writing new code.
+- `docs/skills/tool-api-patterns.md` -- Auth patterns, endpoints, headers, rate limits, error codes. Read before any API call.
+- `docs/skills/canonical-record.md` -- How to create records and register cross-tool mappings. Read before writing to the database.
+- `docs/skills/generator-template.md` -- Boilerplate class for simulation generators. Copy and fill in.
+- `docs/skills/weekly-report.md` -- Report structure, data analysis standards, confidence levels, citations, insight repetition rules. Read before touching the weekly report.
 
 ## Reference Documents
 

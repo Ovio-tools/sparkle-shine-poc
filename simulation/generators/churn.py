@@ -162,6 +162,9 @@ class ChurnGenerator:
     """
 
     name = "churn"
+    # No single `tool`: the churn cascade spans Jobber, HubSpot, Pipedrive,
+    # Mailchimp, Asana, and Slack. #automation-failure alerts fall back to the
+    # generator name "churn"; the real tool is identified from the logged trace.
 
     def __init__(self, db_path: str = "sparkle_shine.db"):
         self.db_path = db_path

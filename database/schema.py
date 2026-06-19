@@ -100,6 +100,7 @@ CREATE_TABLES = [
                                         CHECK(status IN ('scheduled','completed','cancelled','no-show')),
         address                     TEXT,
         notes                       TEXT,
+        jobber_assigned_users       JSONB,
         is_recurring_job            BOOLEAN,
         jobber_updated_at           TEXT,
         review_requested            INTEGER NOT NULL DEFAULT 0 CHECK(review_requested IN (0,1)),
@@ -108,6 +109,7 @@ CREATE_TABLES = [
     """,
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_title_raw TEXT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_job_type TEXT",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_assigned_users JSONB",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_recurring_job BOOLEAN",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_updated_at TEXT",
 

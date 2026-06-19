@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 import traceback
 from datetime import datetime, date
@@ -106,6 +107,15 @@ _CATEGORY_DEFAULTS: dict[str, dict] = {
         "what_happened": "{tool} returned a server error.",
         "what_to_do": "The engine will retry. If this persists, check {tool}'s status page.",
         "severity": "warning",
+    },
+    "payment_required": {
+        "what_happened": "{tool} rejected the request with a plan or billing limit (HTTP 402).",
+        "what_to_do": (
+            "This will not clear on its own — check {tool}'s plan, billing, and"
+            " contact/record limits. The simulation will keep failing until the"
+            " account limit is resolved."
+        ),
+        "severity": "critical",
     },
     "connection_error": {
         "what_happened": "Could not reach {tool}.",
@@ -248,6 +258,40 @@ def _build_slack_section(label: str, body: str) -> dict:
     }
 
 
+# Map a known HTTP status code to a category. 5xx is handled by range below.
+_STATUS_CATEGORY: dict[int, str] = {
+    400: "client_error",
+    401: "token_expired",
+    402: "payment_required",
+    403: "permission_error",
+    404: "not_found",
+    429: "rate_limited",
+}
+
+
+def _extract_status_code(exc: Exception) -> Optional[int]:
+    """Return the HTTP status code for an exception, or None.
+
+    Prefer structured attributes (SDK exceptions expose `.status`; requests-style
+    exceptions expose `.response.status_code`) over parsing the rendered message.
+    Falls back to the FIRST standalone 3-digit status (100–599) in the message.
+
+    The \\b…\\b anchors are critical: they stop a 3-digit run *inside* a longer
+    number — e.g. the '500' inside a 'x-hubspot-ratelimit-daily: 250000' header —
+    from being mistaken for a status code. That bug is exactly what mislabeled a
+    HubSpot 402 as a server error in the 2026-06 incident.
+    """
+    status = getattr(exc, "status", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status
+
+    match = re.search(r"\b([1-5]\d{2})\b", str(exc))
+    return int(match.group(1)) if match else None
+
+
 def _classify(exc: Union[Exception, str]) -> str:
     """Map an exception or HTTP status string to a category name."""
     if isinstance(exc, str):
@@ -266,19 +310,12 @@ def _classify(exc: Union[Exception, str]) -> str:
     if isinstance(exc, ToolAPIError):
         return "not_found" if "404" in str(exc) else "client_error"
 
-    msg = str(exc)
-    if "401" in msg:
-        return "token_expired"
-    if "403" in msg:
-        return "permission_error"
-    if "429" in msg:
-        return "rate_limited"
-    if any(code in msg for code in ["500", "501", "502", "503", "504"]):
-        return "server_error"
-    if "404" in msg:
-        return "not_found"
-    if "400" in msg:
-        return "client_error"
+    code = _extract_status_code(exc)
+    if code is not None:
+        if code in _STATUS_CATEGORY:
+            return _STATUS_CATEGORY[code]
+        if 500 <= code <= 599:
+            return "server_error"
 
     return "unknown"
 

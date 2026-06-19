@@ -15,12 +15,12 @@ simulation/generators/{name}.py
 {One-line description of what this generator does.}
 """
 
-import sqlite3
 from datetime import datetime, date
 from dataclasses import dataclass, field
 
-# Import paths -- confirm these match the codebase (see SIMULATION_AUDIT.md)
-from database.mappings import generate_id, link, lookup, reverse_lookup
+# Database -- PostgreSQL via DATABASE_URL. NEVER import sqlite3.
+from database.connection import get_connection
+from database.mappings import generate_id, register_mapping, get_tool_id, get_canonical_id
 from simulation.config import DAILY_VOLUMES
 from simulation.variation import should_event_happen, get_adjusted_volume
 
@@ -60,6 +60,8 @@ class {ClassName}Generator:
     name = "{name}"
 
     def __init__(self, db_path: str = "sparkle_shine.db"):
+        # db_path is a legacy parameter kept for signature compatibility.
+        # get_connection() ignores it and connects via DATABASE_URL.
         self.db_path = db_path
         self.logger = logger
 
@@ -68,7 +70,7 @@ class {ClassName}Generator:
 
         This method must:
         1. Decide WHAT to do (pick a record to act on, generate data, etc.)
-        2. DO it (API call to the tool + SQLite write + mapping)
+        2. DO it (API call to the tool + PostgreSQL write + mapping)
         3. Return a GeneratorResult
 
         If there's nothing to do (e.g., no eligible records), return
@@ -78,11 +80,11 @@ class {ClassName}Generator:
         Only raise if the error is unrecoverable. For transient errors
         (rate limits, timeouts), retry internally or let the engine retry.
         """
-        db = sqlite3.connect(self.db_path)
+        db = get_connection()
 
         try:
             # ── 1. Decide what to do ──────────────────────────
-            # Example: pick an eligible record from SQLite
+            # Example: pick an eligible record from the database
             eligible = self._get_eligible_records(db)
             if not eligible:
                 return GeneratorResult(
@@ -100,12 +102,12 @@ class {ClassName}Generator:
             # Call the tool API
             tool_id = self._call_tool_api(data)
 
-            # Write to SQLite
-            self._write_to_sqlite(db, record, data, tool_id)
+            # Write to the database
+            self._write_to_db(db, record, data, tool_id)
 
             # Register cross-tool mapping (if creating a new record)
             canonical_id = record.get("canonical_id") or generate_id("{TYPE}")
-            link(canonical_id, "{tool}", tool_id)
+            register_mapping(canonical_id, "{tool}", tool_id)
 
             db.commit()
 
@@ -125,8 +127,8 @@ class {ClassName}Generator:
         finally:
             db.close()
 
-    def _get_eligible_records(self, db: sqlite3.Connection) -> list[dict]:
-        """Query SQLite for records this generator can act on.
+    def _get_eligible_records(self, db) -> list[dict]:
+        """Query PostgreSQL for records this generator can act on.
 
         Examples:
         - Contacts generator: returns [] (it generates from scratch)
@@ -139,8 +141,8 @@ class {ClassName}Generator:
             FROM some_table
             WHERE status = 'active'
         """)
-        return [dict(zip([d[0] for d in cursor.description], row))
-                for row in cursor.fetchall()]
+        # Rows are RealDictRow (dict-like). Never use integer indexing.
+        return [dict(row) for row in cursor.fetchall()]
 
     def _pick_one(self, eligible: list[dict]) -> dict:
         """Pick one record from the eligible list.
@@ -185,15 +187,15 @@ class {ClassName}Generator:
 
         return resp.json()["id"]
 
-    def _write_to_sqlite(self, db, record, data, tool_id):
-        """Write the result to SQLite.
+    def _write_to_db(self, db, record, data, tool_id):
+        """Write the result to PostgreSQL.
 
         See docs/skills/canonical-record.md for table schemas
         and the correct insert/update patterns.
         """
         db.execute("""
             INSERT INTO some_table (canonical_id, ...)
-            VALUES (?, ...)
+            VALUES (%s, ...)
         """, (...))
 ```
 
@@ -341,7 +343,7 @@ async def execute_one(self) -> GeneratorResult:
     except Exception as e:
         errors.append(f"Asana: {e}")
 
-    self.update_sqlite(client, reason)
+    self.update_db(client, reason)
 
     summary = f"Churned: {client['name']} ({reason})"
     if errors:
@@ -363,7 +365,7 @@ Each generator should have:
 
 1. **A unit test** that calls `_generate_data()` or `generate_contact_profile()` and verifies the output format without making API calls.
 
-2. **A dry-run test** that calls `execute_one()` with API calls mocked and verifies SQLite writes.
+2. **A dry-run test** that calls `execute_one()` with API calls mocked and verifies database writes.
 
 3. **An integration test** (gated behind `RUN_INTEGRATION`) that creates one real record in the tool and verifies it.
 
@@ -385,6 +387,6 @@ def test_contact_creation_live():
     assert result.canonical_id.startswith("SS-")
     assert result.error is None
     # Verify the mapping was created
-    from database.mappings import lookup
-    assert lookup(result.canonical_id, "hubspot") is not None
+    from database.mappings import get_tool_id
+    assert get_tool_id(result.canonical_id, "hubspot") is not None
 ```
