@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from scripts.remediate_skipped_commercial_invoices import (
+from scripts.archive.remediate_skipped_commercial_invoices import (
     TargetJob,
     _build_trigger_event,
     _increment_hubspot_outstanding_balance,

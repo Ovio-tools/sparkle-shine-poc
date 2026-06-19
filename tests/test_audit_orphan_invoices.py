@@ -1,5 +1,5 @@
 from datetime import date
-from scripts import audit_orphan_invoices as audit
+from scripts.archive import audit_orphan_invoices as audit
 
 
 def test_classify_orphan_flags_qbo_mapped_no_job():

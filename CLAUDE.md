@@ -11,7 +11,7 @@ This is NOT a customer-facing product. It is an internal asset to prove the conc
 ## Tech Stack
 
 - **Language:** Python 3.11+ (Railway/Nixpacks default is 3.11; avoid macOS system Python 3.9 for local dev)
-- **Database:** PostgreSQL via psycopg2 is the only live database — Railway Postgres in production, local Postgres for dev. SQLite survives only in retired offline tooling that never runs on Railway (original `seeding/` generators, `setup/populate_workspace.py`, `demo/smoke_test.py`, `scripts/migrate_to_postgres.py`, legacy one-off scripts) and the test doubles in `tests/sqlite_compat.py`. No running service or current workflow reads or writes a SQLite database.
+- **Database:** PostgreSQL via psycopg2 is the only live database — Railway Postgres in production, local Postgres for dev. SQLite survives only in retired offline tooling that never runs on Railway (original `seeding/` generators, `setup/populate_workspace.py`, `demo/smoke_test.py`, `scripts/archive/migrate_to_postgres.py`, legacy one-off scripts) and the test doubles in `tests/sqlite_compat.py`. No running service or current workflow reads or writes a SQLite database.
 - **No middleware:** All integrations are direct API calls (no Zapier/Make)
 - **LLM:** Anthropic API (`claude-sonnet-4-6` for daily briefings, `claude-opus-4-6` for weekly analysis)
 - **Deployment:** Railway (`railway.toml` in repo root, 6 services — start commands configured per-service on dashboard via wrapper scripts; always-on workers should use `/railway.worker.toml` as their custom config file)
@@ -188,8 +188,8 @@ python seeding/utils/validator.py
 python seeding/generators/gen_anomalies.py
 python -c "from database.mappings import find_unmapped; print(find_unmapped('CLIENT', 'jobber'))"  # entity_type first, then tool
 
-# PostgreSQL migration
-python scripts/migrate_to_postgres.py
+# PostgreSQL migration (one-time, already run — kept for reference)
+python scripts/archive/migrate_to_postgres.py
 ```
 
 Resume an interrupted push by re-running the pusher. Checkpoints handle it.
