@@ -17,7 +17,7 @@ import json
 import os
 import random
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from config.business import SERVICE_TYPES
 from intelligence.logging_config import setup_logging
@@ -201,6 +201,216 @@ def get_recurrence_field(session) -> Optional[str]:
     """Back-compat shim for callers that imported `_get_recurrence_field`."""
     discover_job_create_fields(session)
     return JOBBER_FIELD_CACHE["recurrence"]
+
+
+# ── Visit / assignee helpers ────────────────────────────────────────────────
+
+def _parse_iso_datetime(value: object) -> Optional[datetime]:
+    """Parse a Jobber ISO-ish timestamp into a datetime, or None."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+
+    try:
+        parsed = date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+    return datetime(parsed.year, parsed.month, parsed.day)
+
+
+def _duration_to_minutes(raw_duration: object) -> Optional[int]:
+    """Normalize Jobber duration values into minutes.
+
+    Jobber visit durations are documented in minutes, but legacy code and test
+    fixtures in this repo have historically treated large values as seconds.
+    Accept both shapes so we do not regress existing data handling while still
+    supporting minute-based responses.
+    """
+    if raw_duration in (None, "", 0):
+        return None
+    try:
+        value = float(raw_duration)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    if value > 1440:
+        return round(value / 60.0)
+    return round(value)
+
+
+def normalize_jobber_assigned_users(value: object) -> list[dict[str, str]]:
+    """Return a stable [{id, name, email}] representation of Jobber assignees."""
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+
+    if isinstance(value, dict):
+        nodes = value.get("nodes") or []
+    elif isinstance(value, list):
+        nodes = value
+    else:
+        return []
+
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        user_id = str(node.get("id") or "").strip()
+        name_obj = node.get("name") or {}
+        full_name = ""
+        if isinstance(name_obj, dict):
+            full_name = str(name_obj.get("full") or "").strip()
+        full_name = full_name or str(node.get("name") or "").strip()
+        email_obj = node.get("email") or {}
+        email = ""
+        if isinstance(email_obj, dict):
+            email = str(email_obj.get("raw") or "").strip()
+        email = email or str(node.get("email") or "").strip()
+        record = {"id": user_id, "name": full_name, "email": email}
+        key = (record["id"], record["name"].lower(), record["email"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        if any(record.values()):
+            normalized.append(record)
+    return normalized
+
+
+def assigned_user_display_names(users: object) -> list[str]:
+    """Return display names for normalized or raw Jobber assignee values."""
+    names: list[str] = []
+    for user in normalize_jobber_assigned_users(users):
+        name = (user.get("name") or "").strip()
+        email = (user.get("email") or "").strip()
+        display = name or email
+        if display:
+            names.append(display)
+    return names
+
+
+def choose_relevant_visit(visit_nodes: list[dict]) -> Optional[dict]:
+    """Pick the Jobber visit we should treat as the source of truth."""
+    if not visit_nodes:
+        return None
+
+    completed = [
+        (visit, _parse_iso_datetime(visit.get("completedAt")))
+        for visit in visit_nodes
+    ]
+    completed = [(visit, dt) for visit, dt in completed if dt is not None]
+    if completed:
+        return max(completed, key=lambda item: item[1])[0]
+
+    started = [
+        (visit, _parse_iso_datetime(visit.get("startAt")))
+        for visit in visit_nodes
+    ]
+    started = [(visit, dt) for visit, dt in started if dt is not None]
+    if started:
+        return max(started, key=lambda item: item[1])[0]
+
+    return visit_nodes[0]
+
+
+def duration_minutes_from_visit(visit: Optional[dict]) -> Optional[int]:
+    """Return the chosen visit's duration in minutes."""
+    if not visit:
+        return None
+
+    duration_minutes = _duration_to_minutes(visit.get("duration"))
+    if duration_minutes is not None:
+        return duration_minutes
+
+    start_at = _parse_iso_datetime(visit.get("startAt"))
+    end_at = _parse_iso_datetime(visit.get("endAt"))
+    if start_at is None or end_at is None:
+        return None
+
+    delta_minutes = (end_at - start_at).total_seconds() / 60.0
+    if delta_minutes <= 0:
+        return None
+    return round(delta_minutes)
+
+
+def extract_job_visit_details(node: dict) -> dict[str, Any]:
+    """Select the relevant visit and return normalized visit-derived fields."""
+    visit_nodes = (node.get("visits") or {}).get("nodes") or []
+    visit = choose_relevant_visit(visit_nodes)
+    return {
+        "visit": visit,
+        "duration_minutes": duration_minutes_from_visit(visit),
+        "jobber_assigned_users": normalize_jobber_assigned_users(
+            (visit or {}).get("assignedUsers")
+        ),
+        "visit_completed_at": (visit or {}).get("completedAt"),
+    }
+
+
+def derive_canonical_crew_id(
+    db,
+    jobber_assigned_users: object,
+    *,
+    existing_crew_id: Optional[str] = None,
+) -> Optional[str]:
+    """Best-effort crew derivation from Jobber assignees.
+
+    Only returns a derived crew when every assignee maps cleanly to the same
+    non-null employees.crew_id. Otherwise preserves the existing crew_id.
+    """
+    users = normalize_jobber_assigned_users(jobber_assigned_users)
+    if not users:
+        return existing_crew_id
+
+    rows = db.execute(
+        """
+        SELECT first_name, last_name, email, crew_id
+        FROM employees
+        WHERE status = 'active' OR status IS NULL
+        """
+    ).fetchall()
+
+    email_map: dict[str, Any] = {}
+    name_map: dict[str, Any] = {}
+    for row in rows:
+        email = str(row["email"] or "").strip().lower()
+        if email:
+            email_map[email] = row
+        full_name = f"{row['first_name']} {row['last_name']}".strip().lower()
+        if full_name:
+            name_map[full_name] = row
+
+    crew_ids: list[str] = []
+    for user in users:
+        email = str(user.get("email") or "").strip().lower()
+        name = str(user.get("name") or "").strip().lower()
+        match = email_map.get(email) if email else None
+        if match is None and name:
+            match = name_map.get(name)
+        if match is None:
+            return existing_crew_id
+        crew_id = match["crew_id"]
+        if not crew_id:
+            return existing_crew_id
+        crew_ids.append(crew_id)
+
+    unique_crew_ids = {crew_id for crew_id in crew_ids if crew_id}
+    if len(unique_crew_ids) != 1:
+        return existing_crew_id
+    return next(iter(unique_crew_ids))
 
 
 # ── Duration helpers ─────────────────────────────────────────────────────────

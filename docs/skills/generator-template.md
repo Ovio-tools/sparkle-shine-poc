@@ -18,9 +18,9 @@ simulation/generators/{name}.py
 from datetime import datetime, date
 from dataclasses import dataclass, field
 
-# Import paths -- confirm these match the codebase (see SIMULATION_AUDIT.md)
+# Database -- PostgreSQL via DATABASE_URL. NEVER import sqlite3.
 from database.connection import get_connection
-from database.mappings import generate_id, link, lookup, reverse_lookup
+from database.mappings import generate_id, register_mapping, get_tool_id, get_canonical_id
 from simulation.config import DAILY_VOLUMES
 from simulation.variation import should_event_happen, get_adjusted_volume
 
@@ -59,7 +59,10 @@ class {ClassName}Generator:
 
     name = "{name}"
 
-    def __init__(self):
+    def __init__(self, db_path: str = "sparkle_shine.db"):
+        # db_path is a legacy parameter kept for signature compatibility.
+        # get_connection() ignores it and connects via DATABASE_URL.
+        self.db_path = db_path
         self.logger = logger
 
     async def execute_one(self) -> GeneratorResult:
@@ -67,7 +70,7 @@ class {ClassName}Generator:
 
         This method must:
         1. Decide WHAT to do (pick a record to act on, generate data, etc.)
-        2. DO it (API call to the tool + Postgres write + mapping)
+        2. DO it (API call to the tool + PostgreSQL write + mapping)
         3. Return a GeneratorResult
 
         If there's nothing to do (e.g., no eligible records), return
@@ -77,51 +80,55 @@ class {ClassName}Generator:
         Only raise if the error is unrecoverable. For transient errors
         (rate limits, timeouts), retry internally or let the engine retry.
         """
-        with get_connection() as conn:
-            try:
-                # ── 1. Decide what to do ──────────────────────────
-                # Example: pick an eligible record from Postgres
-                eligible = self._get_eligible_records(conn)
-                if not eligible:
-                    return GeneratorResult(
-                        summary="No eligible records",
-                        tool="{tool}",
-                        canonical_id="",
-                    )
+        db = get_connection()
 
-                record = self._pick_one(eligible)
-
-                # ── 2. Do it ──────────────────────────────────────
-                # Generate any needed data
-                data = self._generate_data(record)
-
-                # Call the tool API
-                tool_id = self._call_tool_api(data)
-
-                # Write to Postgres
-                self._write_to_postgres(conn, record, data, tool_id)
-
-                # Register cross-tool mapping (if creating a new record)
-                canonical_id = record.get("canonical_id") or generate_id("{TYPE}")
-                link(canonical_id, "{tool}", tool_id)
-
-                conn.commit()
-
-                # ── 3. Return result ──────────────────────────────
+        try:
+            # ── 1. Decide what to do ──────────────────────────
+            # Example: pick an eligible record from the database
+            eligible = self._get_eligible_records(db)
+            if not eligible:
                 return GeneratorResult(
-                    summary=f"Created {data['description']} for {record['name']}",
+                    summary="No eligible records",
                     tool="{tool}",
-                    canonical_id=canonical_id,
-                    details=data,
+                    canonical_id="",
                 )
 
-            except Exception as e:
-                conn.rollback()
-                self.logger.error(f"Failed: {e}")
-                raise  # let the engine's error handler deal with it
+            record = self._pick_one(eligible)
 
-    def _get_eligible_records(self, conn) -> list[dict]:
-        """Query Postgres for records this generator can act on.
+            # ── 2. Do it ──────────────────────────────────────
+            # Generate any needed data
+            data = self._generate_data(record)
+
+            # Call the tool API
+            tool_id = self._call_tool_api(data)
+
+            # Write to the database
+            self._write_to_db(db, record, data, tool_id)
+
+            # Register cross-tool mapping (if creating a new record)
+            canonical_id = record.get("canonical_id") or generate_id("{TYPE}")
+            register_mapping(canonical_id, "{tool}", tool_id)
+
+            db.commit()
+
+            # ── 3. Return result ──────────────────────────────
+            return GeneratorResult(
+                summary=f"Created {data['description']} for {record['name']}",
+                tool="{tool}",
+                canonical_id=canonical_id,
+                details=data,
+            )
+
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Failed: {e}")
+            raise  # let the engine's error handler deal with it
+
+        finally:
+            db.close()
+
+    def _get_eligible_records(self, db) -> list[dict]:
+        """Query PostgreSQL for records this generator can act on.
 
         Examples:
         - Contacts generator: returns [] (it generates from scratch)
@@ -129,13 +136,13 @@ class {ClassName}Generator:
         - Payment generator: returns unpaid invoices past their due window
         - Churn generator: returns active clients not yet checked today
         """
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT canonical_id, column1, column2
-                FROM some_table
-                WHERE status = %s
-            """, ("active",))
-            return cur.fetchall()  # RealDictRow list — access via row["column_name"]
+        cursor = db.execute("""
+            SELECT canonical_id, column1, column2
+            FROM some_table
+            WHERE status = 'active'
+        """)
+        # Rows are RealDictRow (dict-like). Never use integer indexing.
+        return [dict(row) for row in cursor.fetchall()]
 
     def _pick_one(self, eligible: list[dict]) -> dict:
         """Pick one record from the eligible list.
@@ -180,17 +187,16 @@ class {ClassName}Generator:
 
         return resp.json()["id"]
 
-    def _write_to_postgres(self, conn, record, data, tool_id):
-        """Write the result to Postgres.
+    def _write_to_db(self, db, record, data, tool_id):
+        """Write the result to PostgreSQL.
 
         See docs/skills/canonical-record.md for table schemas
         and the correct insert/update patterns.
         """
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO some_table (canonical_id, ...)
-                VALUES (%s, ...)
-            """, (...))
+        db.execute("""
+            INSERT INTO some_table (canonical_id, ...)
+            VALUES (%s, ...)
+        """, (...))
 ```
 
 ---
@@ -210,13 +216,13 @@ from simulation.generators.churn import ChurnGenerator
 
 engine = SimulationEngine()
 
-engine.register_generator("contacts", ContactGenerator(), weight=1.0)
-engine.register_generator("deals", DealProgressionGenerator(), weight=0.8)
-engine.register_generator("operations", OperationsGenerator(), weight=1.2)
-engine.register_generator("invoicing", InvoicingGenerator(), weight=0.6)
-engine.register_generator("payments", PaymentGenerator(), weight=0.5)
-engine.register_generator("tasks", TaskCompletionGenerator(), weight=0.7)
-engine.register_generator("churn", ChurnGenerator(), weight=0.2)
+engine.register_generator("contacts", ContactGenerator(db_path), weight=1.0)
+engine.register_generator("deals", DealProgressionGenerator(db_path), weight=0.8)
+engine.register_generator("operations", OperationsGenerator(db_path), weight=1.2)
+engine.register_generator("invoicing", InvoicingGenerator(db_path), weight=0.6)
+engine.register_generator("payments", PaymentGenerator(db_path), weight=0.5)
+engine.register_generator("tasks", TaskCompletionGenerator(db_path), weight=0.7)
+engine.register_generator("churn", ChurnGenerator(db_path), weight=0.2)
 ```
 
 The weight determines how often the engine picks a given generator relative to others. Higher weight = more events per day.
@@ -337,7 +343,7 @@ async def execute_one(self) -> GeneratorResult:
     except Exception as e:
         errors.append(f"Asana: {e}")
 
-    self.update_sqlite(client, reason)
+    self.update_db(client, reason)
 
     summary = f"Churned: {client['name']} ({reason})"
     if errors:
@@ -359,7 +365,7 @@ Each generator should have:
 
 1. **A unit test** that calls `_generate_data()` or `generate_contact_profile()` and verifies the output format without making API calls.
 
-2. **A dry-run test** that calls `execute_one()` with API calls mocked and verifies SQLite writes.
+2. **A dry-run test** that calls `execute_one()` with API calls mocked and verifies database writes.
 
 3. **An integration test** (gated behind `RUN_INTEGRATION`) that creates one real record in the tool and verifies it.
 
@@ -367,7 +373,7 @@ Each generator should have:
 # tests/test_simulation.py
 
 def test_contact_profile_generation():
-    gen = ContactGenerator()
+    gen = ContactGenerator("sparkle_shine.db")
     for _ in range(20):
         p = gen.generate_contact_profile()
         assert p["zip"] in VALID_AUSTIN_ZIPS
@@ -376,11 +382,11 @@ def test_contact_profile_generation():
 
 @unittest.skipUnless(os.getenv("RUN_INTEGRATION"), "Skipping")
 def test_contact_creation_live():
-    gen = ContactGenerator()
+    gen = ContactGenerator("sparkle_shine.db")
     result = asyncio.run(gen.execute_one())
     assert result.canonical_id.startswith("SS-")
     assert result.error is None
     # Verify the mapping was created
-    from database.mappings import lookup
-    assert lookup(result.canonical_id, "hubspot") is not None
+    from database.mappings import get_tool_id
+    assert get_tool_id(result.canonical_id, "hubspot") is not None
 ```

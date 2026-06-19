@@ -26,6 +26,19 @@ def _reset_module_state():
     import simulation.error_reporter as er
     er._channel_id = None
     er._warning_log = {}
+    # Clear DB-backed alert-suppression state so repeated report_error calls
+    # in one test (or across tests) are not swallowed as duplicates.
+    # Best-effort: suppression fails open when the DB is unavailable.
+    try:
+        from database.connection import get_connection
+        conn = get_connection()
+        try:
+            with conn:
+                conn.execute("DELETE FROM error_alert_state")
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 class TestClassify(unittest.TestCase):
@@ -101,6 +114,34 @@ class TestClassify(unittest.TestCase):
         from simulation.error_reporter import _classify
         assert _classify(ValueError("something completely unexpected")) == "unknown"
 
+    def test_http_402_with_response_headers_is_not_server_error(self):
+        # Real HubSpot 402 incident (2026-06-17/18). The SDK's ApiException str()
+        # embeds the full HTTP response headers, and the value of
+        # 'x-hubspot-ratelimit-daily' is '250000' — which contains the substring
+        # '500'. Naive substring matching mislabels this 402 as a server error.
+        from simulation.error_reporter import _classify
+        msg = (
+            "HubSpot create contact failed: (402)\n"
+            "HTTP response headers: HTTPHeaderDict({'Content-Length': '198', "
+            "'x-hubspot-ratelimit-daily': '250000', "
+            "'x-hubspot-ratelimit-daily-remaining': '249933'})"
+        )
+        assert _classify(RuntimeError(msg)) == "payment_required"
+
+    def test_http_402_clean_message(self):
+        from simulation.error_reporter import _classify
+        assert _classify(Exception("(402) Payment Required")) == "payment_required"
+
+    def test_http_402_structured_status_attribute(self):
+        # HubSpot's ApiException exposes a structured .status the classifier
+        # should trust over any substring in the rendered message.
+        from simulation.error_reporter import _classify
+
+        class FakeApiException(Exception):
+            status = 402
+
+        assert _classify(FakeApiException("rendered text mentioning 250000")) == "payment_required"
+
 
 class TestResolveTranslation(unittest.TestCase):
     def setUp(self):
@@ -165,6 +206,17 @@ class TestResolveTranslation(unittest.TestCase):
         from simulation.error_reporter import _resolve_translation
         result = _resolve_translation("quickbooks", "client_error")
         assert result["severity"] == "info"
+
+    def test_payment_required_severity_is_critical(self):
+        # A 402 is a plan/billing wall — non-transient, needs human action.
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("hubspot", "payment_required")
+        assert result["severity"] == "critical"
+
+    def test_payment_required_does_not_promise_retry(self):
+        from simulation.error_reporter import _resolve_translation
+        result = _resolve_translation("hubspot", "payment_required")
+        assert "retry" not in result["what_to_do"].lower()
 
 
 class TestSetupChannel(unittest.TestCase):

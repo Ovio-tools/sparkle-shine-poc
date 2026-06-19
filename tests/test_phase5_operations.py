@@ -1160,6 +1160,141 @@ class TestJobSchedulingGeneratorPass2(unittest.TestCase):
         self.assertEqual(job["client_id"], "SS-CLIENT-U001")
 
 
+class TestJobSchedulingCatchupOrphanHandling(unittest.TestCase):
+    """The Pass 1c catch-up loop must leave a past-due scheduled job alone
+    when its Jobber side cannot be progressed.
+
+    Background: on 2026-05-01 a worker auto-redeploy left 37 jobs in
+    'scheduled' status with no cross_tool_mapping row to Jobber. The
+    catch-up loop silently skipped the Jobber `jobClose` call (no
+    mapping) but still flipped the Postgres row to 'completed'. With no
+    matching Jobber job, the QBO-invoicing automation never fired, so
+    the reconciler emitted permanent 'completed jobs with no invoice'
+    alerts and operators had to run remediate_reconciliation_invoices.py
+    by hand. The fix: refuse to advance Postgres when Jobber state
+    cannot be made to match.
+    """
+
+    def _make_fixture(self, scheduled_date_iso):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE recurring_agreements (
+                id TEXT PRIMARY KEY, client_id TEXT, service_type_id TEXT,
+                crew_id TEXT, frequency TEXT, price_per_visit REAL,
+                start_date TEXT, end_date TEXT, status TEXT DEFAULT 'active',
+                day_of_week TEXT, client_type TEXT DEFAULT 'residential'
+            );
+            CREATE TABLE clients (
+                id TEXT PRIMARY KEY, client_type TEXT, company_name TEXT,
+                notes TEXT, zone TEXT, status TEXT DEFAULT 'active',
+                last_service_date TEXT, churn_risk TEXT DEFAULT 'normal'
+            );
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, client_id TEXT, crew_id TEXT,
+                service_type_id TEXT, scheduled_date TEXT, scheduled_time TEXT,
+                duration_minutes_actual INTEGER,
+                status TEXT DEFAULT 'scheduled', address TEXT, notes TEXT,
+                review_requested INTEGER DEFAULT 0, completed_at TEXT
+            );
+            CREATE TABLE reviews (
+                id TEXT PRIMARY KEY, client_id TEXT, job_id TEXT,
+                rating INTEGER, platform TEXT, review_date TEXT
+            );
+            CREATE TABLE cross_tool_mapping (
+                canonical_id TEXT, tool_name TEXT, tool_specific_id TEXT,
+                tool_specific_url TEXT, synced_at TEXT,
+                PRIMARY KEY (canonical_id, tool_name)
+            );
+        """)
+        conn.execute(
+            "INSERT INTO clients (id, client_type, status) "
+            "VALUES ('SS-CLIENT-Z1','residential','active')"
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, client_id, crew_id, service_type_id, "
+            "scheduled_date, status) VALUES "
+            "('SS-JOB-ORPH','SS-CLIENT-Z1','crew-a','std-residential',?,'scheduled')",
+            (scheduled_date_iso,),
+        )
+        conn.commit()
+        return conn
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations._gql")
+    @patch("simulation.generators.operations.get_tool_id")
+    def test_no_jobber_mapping_leaves_job_scheduled(
+        self, mock_get_tool_id, mock_gql, mock_get_client
+    ):
+        from simulation.generators.operations import JobSchedulingGenerator
+
+        today = date(2026, 5, 27)
+        two_days_ago = (today - timedelta(days=2)).isoformat()
+        conn = self._make_fixture(two_days_ago)
+
+        # No Jobber mapping anywhere — the orphan condition.
+        mock_get_tool_id.return_value = None
+        mock_get_client.return_value = MagicMock(name="jobber-session")
+
+        gen = JobSchedulingGenerator(db_path=":memory:")
+        with _patched_ops_db(conn), \
+             patch("simulation.generators.operations.date") as mock_date:
+            mock_date.today.return_value = today
+            mock_date.fromisoformat.side_effect = date.fromisoformat
+            gen.execute(dry_run=False)
+
+        row = conn.execute(
+            "SELECT status, completed_at FROM jobs WHERE id='SS-JOB-ORPH'"
+        ).fetchone()
+        self.assertEqual(
+            row["status"], "scheduled",
+            "Orphan past-due job (no Jobber mapping) must stay 'scheduled'; "
+            "Postgres must not drift ahead of Jobber.",
+        )
+        self.assertIsNone(
+            row["completed_at"],
+            "completed_at must remain NULL when the catch-up skipped the job.",
+        )
+        # _gql must not be invoked when there is nothing to close in Jobber.
+        mock_gql.assert_not_called()
+
+    @patch("simulation.generators.operations.get_client")
+    @patch("simulation.generators.operations._gql")
+    @patch("simulation.generators.operations.get_tool_id")
+    def test_jobclose_failure_leaves_job_scheduled(
+        self, mock_get_tool_id, mock_gql, mock_get_client
+    ):
+        """When jobClose raises (transient Jobber outage, auth failure, etc.),
+        the catch-up loop must leave Postgres untouched so the next tick
+        retries cleanly."""
+        from simulation.generators.operations import JobSchedulingGenerator
+
+        today = date(2026, 5, 27)
+        two_days_ago = (today - timedelta(days=2)).isoformat()
+        conn = self._make_fixture(two_days_ago)
+
+        # Mapping exists, but jobClose raises.
+        mock_get_tool_id.return_value = "GQL-JOB-XYZ"
+        mock_get_client.return_value = MagicMock(name="jobber-session")
+        mock_gql.side_effect = RuntimeError("Jobber 503: service unavailable")
+
+        gen = JobSchedulingGenerator(db_path=":memory:")
+        with _patched_ops_db(conn), \
+             patch("simulation.generators.operations.date") as mock_date:
+            mock_date.today.return_value = today
+            mock_date.fromisoformat.side_effect = date.fromisoformat
+            gen.execute(dry_run=False)
+
+        row = conn.execute(
+            "SELECT status FROM jobs WHERE id='SS-JOB-ORPH'"
+        ).fetchone()
+        self.assertEqual(
+            row["status"], "scheduled",
+            "When jobClose raises, the catch-up must not flip Postgres to "
+            "'completed' — leave it for the next tick to retry.",
+        )
+
+
 class TestJobCompletionGeneratorCompleted(unittest.TestCase):
     """completed outcome: jobs updated, review inserted."""
 

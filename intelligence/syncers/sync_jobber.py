@@ -4,6 +4,7 @@ Jobber syncer -- pulls clients, jobs, and recurring agreements into SQLite.
 Uses the Jobber GraphQL API with cursor-based pagination.
 Handles cross_tool_mapping for all three entity types.
 """
+import json
 import re
 import time
 from datetime import datetime
@@ -11,11 +12,18 @@ from typing import Optional
 
 from auth import get_client
 from config.service_catalog import canonical_service_id
-from database.mappings import get_canonical_id, register_mapping, generate_id
+from database.mappings import (
+    generate_id,
+    get_canonical_id,
+    get_canonical_id_on_conn,
+    register_mapping,
+)
 from intelligence.syncers.base_syncer import BaseSyncer, SyncResult
 from seeding.utils.throttler import JOBBER
+from simulation.jobber_utils import derive_canonical_crew_id, extract_job_visit_details
 
 _GRAPHQL_URL = "https://api.getjobber.com/api/graphql"
+_JOBS_PAGE_SIZE = 3
 
 _CLIENTS_QUERY = """
 query ListClients($cursor: String) {
@@ -34,10 +42,13 @@ query ListClients($cursor: String) {
 }
 """
 
-_JOBS_QUERY = """
-query ListJobs($cursor: String) {
-  jobs(first: 100, after: $cursor) {
-    nodes {
+# Jobber rejects requested GraphQL query costs above 10,000. With
+# visits(first: 5) + assignedUsers nested under jobs, 3 is the largest page
+# size that stays below that ceiling on API version 2026-03-10.
+_JOBS_QUERY = f"""
+query ListJobs($cursor: String) {{
+  jobs(first: {_JOBS_PAGE_SIZE}, after: $cursor) {{
+    nodes {{
       id
       title
       instructions
@@ -45,22 +56,32 @@ query ListJobs($cursor: String) {
       endAt
       jobStatus
       jobType
-      client { id }
-      visitSchedule {
-        recurrenceSchedule {
+      client {{ id }}
+      visitSchedule {{
+        recurrenceSchedule {{
           calendarRule
-        }
-      }
-      visits(first: 1) {
-        nodes {
+        }}
+      }}
+      visits(first: 5) {{
+        nodes {{
           duration
-        }
-      }
+          startAt
+          endAt
+          completedAt
+          assignedUsers {{
+            nodes {{
+              id
+              name {{ full }}
+              email {{ raw }}
+            }}
+          }}
+        }}
+      }}
       updatedAt
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
+    }}
+    pageInfo {{ hasNextPage endCursor }}
+  }}
+}}
 """
 
 _RECURRING_QUERY = """
@@ -92,6 +113,21 @@ _JOBBER_STATUS_MAP = {
     "UNSCHEDULED": "scheduled",
 }
 
+
+def _mapped_canonical_id(db, tool_specific_id: Optional[str], entity_type: str, db_path: str) -> Optional[str]:
+    """Prefer the caller-owned connection, but keep the legacy fallback path."""
+    if not tool_specific_id:
+        return None
+    try:
+        return get_canonical_id_on_conn(db, "jobber", tool_specific_id, entity_type=entity_type)
+    except Exception:
+        return get_canonical_id(
+            "jobber",
+            tool_specific_id,
+            entity_type=entity_type,
+            db_path=db_path,
+        )
+
 def _clean_text(value: object) -> Optional[str]:
     text = (value or "").strip()
     return text or None
@@ -103,13 +139,6 @@ def _slug_title(value: str) -> str:
 
 def _service_type_from_title(title: Optional[str]) -> Optional[str]:
     return canonical_service_id(_clean_text(title))
-
-
-def _duration_minutes(node: dict) -> Optional[int]:
-    visit_nodes = (node.get("visits") or {}).get("nodes") or []
-    first_visit = visit_nodes[0] if visit_nodes else {}
-    raw_duration = first_visit.get("duration") or 0
-    return round(raw_duration / 60) if raw_duration else None
 
 
 def _is_recurring_job(node: dict) -> Optional[bool]:
@@ -256,9 +285,7 @@ class JobberSyncer(BaseSyncer):
 
     def _upsert_client(self, node: dict) -> None:
         jobber_id = node["id"]
-        canonical_id = get_canonical_id(
-            "jobber", jobber_id, entity_type="CLIENT", db_path=self.db_path
-        )
+        canonical_id = _mapped_canonical_id(self.db, jobber_id, "CLIENT", self.db_path)
 
         emails = node.get("emails") or []
         primary_email = next(
@@ -350,9 +377,7 @@ class JobberSyncer(BaseSyncer):
 
     def _upsert_job(self, node: dict) -> None:
         jobber_id = node["id"]
-        canonical_id = get_canonical_id(
-            "jobber", jobber_id, entity_type="JOB", db_path=self.db_path
-        )
+        canonical_id = _mapped_canonical_id(self.db, jobber_id, "JOB", self.db_path)
 
         client_jobber_id = (node.get("client") or {}).get("id")
         # entity_type filter is critical: a Jobber client tool_specific_id can
@@ -360,9 +385,7 @@ class JobberSyncer(BaseSyncer):
         # Without this filter we may pick up a SS-PROP-* row, then violate the
         # jobs_client_id_fkey FK to clients(id) on insert.
         client_canonical = (
-            get_canonical_id(
-                "jobber", client_jobber_id, entity_type="CLIENT", db_path=self.db_path
-            )
+            _mapped_canonical_id(self.db, client_jobber_id, "CLIENT", self.db_path)
             if client_jobber_id else None
         )
         if client_canonical is None:
@@ -376,27 +399,39 @@ class JobberSyncer(BaseSyncer):
         title = _clean_text(node.get("title"))
         instructions = _clean_text(node.get("instructions"))
         job_type = _clean_text(node.get("jobType"))
-        duration_minutes = _duration_minutes(node)
+        visit_details = extract_job_visit_details(node)
+        duration_minutes = visit_details["duration_minutes"]
+        jobber_assigned_users = visit_details["jobber_assigned_users"]
         is_recurring = _is_recurring_job(node)
         updated_at = _clean_text(node.get("updatedAt"))
+        completed_at = (
+            visit_details["visit_completed_at"]
+            or (end_at if status == "completed" else None)
+        )
 
         if canonical_id is None:
             service_type_id = _choose_service_type(None, node)
+            crew_id = derive_canonical_crew_id(
+                self.db,
+                jobber_assigned_users,
+                existing_crew_id=None,
+            )
             canonical_id = generate_id("JOB", self.db_path)
             with self.db:
                 self.db.execute(
                     """
                     INSERT INTO jobs
-                        (id, client_id, service_type_id, job_title_raw,
+                        (id, client_id, crew_id, service_type_id, job_title_raw,
                          jobber_job_type, scheduled_date, scheduled_time,
-                         duration_minutes_actual, status, notes,
+                         duration_minutes_actual, status, notes, jobber_assigned_users,
                          is_recurring_job, jobber_updated_at, completed_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     """,
                     (
                         canonical_id,
                         client_canonical,
+                        crew_id,
                         service_type_id,
                         title,
                         job_type,
@@ -405,18 +440,20 @@ class JobberSyncer(BaseSyncer):
                         duration_minutes,
                         status,
                         instructions,
+                        json.dumps(jobber_assigned_users),
                         is_recurring,
                         updated_at,
-                        end_at if status == "completed" else None,
+                        completed_at,
                     ),
                 )
             register_mapping(canonical_id, "jobber", jobber_id, db_path=self.db_path)
         else:
             row = self.db.execute(
                 """
-                SELECT service_type_id, job_title_raw, jobber_job_type,
+                SELECT crew_id, service_type_id, job_title_raw, jobber_job_type,
                        scheduled_date, scheduled_time, duration_minutes_actual,
-                       status, notes, is_recurring_job, jobber_updated_at, completed_at
+                       status, notes, jobber_assigned_users, is_recurring_job,
+                       jobber_updated_at, completed_at
                 FROM jobs
                 WHERE id = %s
                 """,
@@ -426,7 +463,7 @@ class JobberSyncer(BaseSyncer):
                 return
 
             merged_status = "completed" if row["completed_at"] is not None and status == "scheduled" else status
-            merged_completed_at = end_at if status == "completed" else row["completed_at"]
+            merged_completed_at = completed_at if status == "completed" else row["completed_at"]
             merged_service_type = _choose_service_type(row["service_type_id"], node)
             merged_title = title or row["job_title_raw"]
             merged_job_type = job_type or row["jobber_job_type"]
@@ -434,6 +471,16 @@ class JobberSyncer(BaseSyncer):
             merged_scheduled_time = scheduled_time or row["scheduled_time"]
             merged_duration = duration_minutes or row["duration_minutes_actual"]
             merged_notes = instructions or row["notes"]
+            merged_assigned_users = (
+                json.dumps(jobber_assigned_users)
+                if visit_details["visit"] is not None
+                else row["jobber_assigned_users"]
+            )
+            merged_crew_id = derive_canonical_crew_id(
+                self.db,
+                jobber_assigned_users,
+                existing_crew_id=row["crew_id"],
+            )
             merged_is_recurring = is_recurring if is_recurring is not None else row["is_recurring_job"]
             merged_updated_at = updated_at or row["jobber_updated_at"]
 
@@ -441,7 +488,8 @@ class JobberSyncer(BaseSyncer):
                 self.db.execute(
                     """
                     UPDATE jobs
-                    SET service_type_id         = %s,
+                    SET crew_id                 = %s,
+                        service_type_id         = %s,
                         job_title_raw           = %s,
                         jobber_job_type         = %s,
                         scheduled_date          = %s,
@@ -449,12 +497,14 @@ class JobberSyncer(BaseSyncer):
                         duration_minutes_actual = %s,
                         status                  = %s,
                         notes                   = %s,
+                        jobber_assigned_users   = %s,
                         is_recurring_job        = %s,
                         jobber_updated_at       = %s,
                         completed_at            = %s
                     WHERE id = %s
                     """,
                     (
+                        merged_crew_id,
                         merged_service_type,
                         merged_title,
                         merged_job_type,
@@ -463,6 +513,7 @@ class JobberSyncer(BaseSyncer):
                         merged_duration,
                         merged_status,
                         merged_notes,
+                        merged_assigned_users,
                         merged_is_recurring,
                         merged_updated_at,
                         merged_completed_at,
@@ -505,15 +556,11 @@ class JobberSyncer(BaseSyncer):
 
     def _upsert_recurring(self, node: dict) -> None:
         jobber_id = node["id"]
-        canonical_id = get_canonical_id(
-            "jobber", jobber_id, entity_type="RECUR", db_path=self.db_path
-        )
+        canonical_id = _mapped_canonical_id(self.db, jobber_id, "RECUR", self.db_path)
 
         client_jobber_id = (node.get("client") or {}).get("id")
         client_canonical = (
-            get_canonical_id(
-                "jobber", client_jobber_id, entity_type="CLIENT", db_path=self.db_path
-            )
+            _mapped_canonical_id(self.db, client_jobber_id, "CLIENT", self.db_path)
             if client_jobber_id else None
         )
         if client_canonical is None:

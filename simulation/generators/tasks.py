@@ -86,6 +86,7 @@ class TaskCompletionGenerator:
     """
 
     name = "tasks"
+    tool = "asana"  # primary SaaS tool — used for #automation-failure alert labels
 
     def __init__(self, db_path: str = "sparkle_shine.db"):
         self.db_path = db_path

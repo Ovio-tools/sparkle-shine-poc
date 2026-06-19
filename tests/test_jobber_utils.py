@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import random
+import sqlite3
 import sys
 import unittest
 from datetime import date, datetime, timedelta
@@ -14,6 +15,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from simulation import jobber_utils
 from simulation.jobber_user_pool import UserPool
+from tests.sqlite_compat import wrap_sqlite_connection
 
 
 def _reset_field_cache() -> None:
@@ -159,6 +161,121 @@ class TestCrewSizeFor(unittest.TestCase):
         self.assertEqual(jobber_utils.crew_size_for(150, pool_size=8), 2)
         # 151 → large tier
         self.assertEqual(jobber_utils.crew_size_for(151, pool_size=8), 3)
+
+
+class TestVisitHelpers(unittest.TestCase):
+    def test_choose_relevant_visit_prefers_latest_completed(self):
+        visit = jobber_utils.choose_relevant_visit([
+            {"id": "v1", "completedAt": "2026-05-26T08:00:00Z", "startAt": "2026-05-26T07:00:00Z"},
+            {"id": "v2", "completedAt": "2026-05-26T10:30:00Z", "startAt": "2026-05-26T09:00:00Z"},
+        ])
+        self.assertEqual(visit["id"], "v2")
+
+    def test_choose_relevant_visit_falls_back_to_latest_start(self):
+        visit = jobber_utils.choose_relevant_visit([
+            {"id": "v1", "startAt": "2026-05-26T07:00:00Z"},
+            {"id": "v2", "startAt": "2026-05-26T09:00:00Z"},
+        ])
+        self.assertEqual(visit["id"], "v2")
+
+    def test_extract_job_visit_details_uses_duration_or_timeframe(self):
+        details = jobber_utils.extract_job_visit_details(
+            {
+                "visits": {
+                    "nodes": [
+                        {
+                            "id": "visit-1",
+                            "completedAt": "2026-05-26T10:30:00Z",
+                            "startAt": "2026-05-26T09:00:00Z",
+                            "endAt": "2026-05-26T10:45:00Z",
+                            "assignedUsers": {
+                                "nodes": [
+                                    {
+                                        "id": "user-1",
+                                        "name": {"full": "Claudia Ramirez"},
+                                        "email": {"raw": "claudia.ramirez@oviodigital.com"},
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertEqual(details["duration_minutes"], 105)
+        self.assertEqual(
+            details["jobber_assigned_users"],
+            [
+                {
+                    "id": "user-1",
+                    "name": "Claudia Ramirez",
+                    "email": "claudia.ramirez@oviodigital.com",
+                }
+            ],
+        )
+
+    def test_extract_job_visit_details_handles_second_durations(self):
+        details = jobber_utils.extract_job_visit_details(
+            {"visits": {"nodes": [{"duration": 7200}]}}
+        )
+        self.assertEqual(details["duration_minutes"], 120)
+
+
+class TestCrewDerivation(unittest.TestCase):
+    def test_derive_canonical_crew_id_only_when_all_assignees_match_same_crew(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE employees (
+                id TEXT PRIMARY KEY,
+                first_name TEXT,
+                last_name TEXT,
+                email TEXT,
+                crew_id TEXT,
+                status TEXT
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO employees (id, first_name, last_name, email, crew_id, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("SS-EMP-002", "Claudia", "Ramirez", "claudia.ramirez@oviodigital.com", "crew-a", "active"),
+                ("SS-EMP-007", "Leticia", "Morales", "leticia.morales@oviodigital.com", "crew-a", "active"),
+                ("SS-EMP-003", "Darnell", "Washington", "darnell.washington@oviodigital.com", "crew-b", "active"),
+                ("SS-EMP-001", "Maria", "Gonzalez", "maria.gonzalez@oviodigital.com", None, "active"),
+            ],
+        )
+        db = wrap_sqlite_connection(conn)
+
+        derived = jobber_utils.derive_canonical_crew_id(
+            db,
+            [
+                {"id": "u1", "name": "Claudia Ramirez", "email": "claudia.ramirez@oviodigital.com"},
+                {"id": "u2", "name": "Leticia Morales", "email": "leticia.morales@oviodigital.com"},
+            ],
+        )
+        self.assertEqual(derived, "crew-a")
+
+        mixed = jobber_utils.derive_canonical_crew_id(
+            db,
+            [
+                {"id": "u1", "name": "Claudia Ramirez", "email": "claudia.ramirez@oviodigital.com"},
+                {"id": "u3", "name": "Darnell Washington", "email": "darnell.washington@oviodigital.com"},
+            ],
+            existing_crew_id="crew-z",
+        )
+        self.assertEqual(mixed, "crew-z")
+
+        non_field = jobber_utils.derive_canonical_crew_id(
+            db,
+            [{"id": "u4", "name": "Maria Gonzalez", "email": "maria.gonzalez@oviodigital.com"}],
+            existing_crew_id="crew-a",
+        )
+        self.assertEqual(non_field, "crew-a")
 
 
 class TestBuildJobCreateInput(unittest.TestCase):

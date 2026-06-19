@@ -28,7 +28,7 @@ if _PROJECT_ROOT not in sys.path:
 from automations.base import BaseAutomation
 from automations.utils.assignees import get_assignee_email
 from automations.utils.asana_tasks import create_tasks
-from automations.utils.id_resolver import MappingNotFoundError, register_mapping
+from automations.utils.id_resolver import MappingNotFoundError, register_mapping, resolve
 from simulation.jobber_user_pool import load_user_pool_from_config
 from simulation.jobber_utils import build_job_create_input, expected_duration
 
@@ -695,16 +695,21 @@ class NewClientOnboarding(BaseAutomation):
                 """,
                 (client_id, client_type, first_name, last_name, email),
             )
-            # Re-point only the Pipedrive deal mapping (and pipedrive_person if
-            # it shares the same tool_specific_id) from the lead ID to the new
-            # client ID. HubSpot is promoted too so downstream client automations
-            # resolve the same CRM contact after conversion.
+            # Re-point ALL operational tool mappings from the lead ID to the
+            # new client ID. A Jobber client / QBO customer / Mailchimp member
+            # created pre-conversion belongs to the client after promotion;
+            # leaving those rows on the lead makes reverse lookups resolve to
+            # a record with no billing mappings (the SS-LEAD-0335 /
+            # SS-JOB-5981 stranded-invoice bug). No uniqueness risk: the
+            # client canonical ID was just minted, so it has no rows yet.
             self.db.execute(
                 """
                 UPDATE cross_tool_mapping
                    SET canonical_id = %s, entity_type = 'CLIENT', synced_at = CURRENT_TIMESTAMP
                  WHERE canonical_id = %s
-                   AND tool_name IN ('hubspot', 'pipedrive', 'pipedrive_person')
+                   AND tool_name IN ('hubspot', 'pipedrive', 'pipedrive_person',
+                                     'jobber', 'jobber_property', 'mailchimp',
+                                     'quickbooks', 'quickbooks_customer')
                 """,
                 (client_id, lead_id),
             )
@@ -722,6 +727,80 @@ class NewClientOnboarding(BaseAutomation):
             f"(deal_id={deal_id}, {first_name} {last_name})"
         )
         return client_id
+
+    # ── Retry entry point: QuickBooks customer ────────────────────────────────
+
+    def retry_quickbooks_customer(self, canonical_id: str) -> Optional[str]:
+        """Create the QBO customer for a client whose original onboarding
+        create_quickbooks_customer action failed.
+
+        Entry point for the pending_actions 'create_qbo_customer' handler and
+        the incident backfill script. Idempotent: an existing 'quickbooks'
+        mapping is returned as-is (backfilling the 'quickbooks_customer' alias
+        if absent). Raises on failure so callers can mark the retry failed.
+        """
+        run_id = self.generate_run_id()
+        trigger_source = f"retry:create_qbo_customer:{canonical_id}"
+
+        try:
+            existing = resolve(self.db, canonical_id, "quickbooks")
+            try:
+                resolve(self.db, canonical_id, "quickbooks_customer")
+            except MappingNotFoundError:
+                if not self.dry_run:
+                    register_mapping(
+                        self.db, canonical_id, "quickbooks_customer", existing
+                    )
+            print(
+                f"[INFO] {canonical_id} already mapped to QBO customer "
+                f"{existing} — skipping create"
+            )
+            return existing
+        except MappingNotFoundError:
+            pass
+
+        row = self.db.execute(
+            "SELECT first_name, last_name, company_name, email, phone, client_type "
+            "FROM clients WHERE id = %s",
+            (canonical_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"retry_quickbooks_customer: no clients row for {canonical_id}"
+            )
+
+        display_name = (
+            (row["company_name"] or "").strip()
+            or f"{row['first_name']} {row['last_name']}".strip()
+        )
+        ctx = {
+            "canonical_id": canonical_id,
+            "display_name": display_name,
+            "email":        row["email"] or "",
+            "phone":        row["phone"] or "",
+            "client_type":  row["client_type"] or "residential",
+        }
+
+        try:
+            qbo_customer_id = self._action_quickbooks(ctx)
+            if not self.dry_run and qbo_customer_id:
+                register_mapping(self.db, canonical_id, "quickbooks", qbo_customer_id)
+                register_mapping(
+                    self.db, canonical_id, "quickbooks_customer", qbo_customer_id
+                )
+            self.log_action(
+                run_id, "create_quickbooks_customer",
+                f"quickbooks:customer:{qbo_customer_id}",
+                "success",
+                trigger_source=trigger_source,
+            )
+            return qbo_customer_id
+        except Exception as exc:
+            self.log_action(
+                run_id, "create_quickbooks_customer", None, "failed",
+                error_message=str(exc), trigger_source=trigger_source,
+            )
+            raise
 
     # ── Action 1: Asana ───────────────────────────────────────────────────────
 
@@ -914,7 +993,12 @@ class NewClientOnboarding(BaseAutomation):
         )
 
         # QBO returns 400 if a customer with this DisplayName already exists.
-        # In that case, look up the existing customer and return their ID.
+        # That existing customer is only OURS if it isn't mapped to a
+        # different canonical client — two distinct clients can share a
+        # human name (SS-CLIENT-0233 / SS-CLIENT-0521, both "Ana Thomas").
+        # Reusing the other client's customer would cross their billing, so
+        # disambiguate the DisplayName with the canonical ID and create a
+        # separate customer instead.
         if resp.status_code == 400:
             error_detail = resp.json()
             fault = error_detail.get("Fault", {})
@@ -935,7 +1019,31 @@ class NewClientOnboarding(BaseAutomation):
                 qr.raise_for_status()
                 customers = qr.json().get("QueryResponse", {}).get("Customer", [])
                 if customers:
-                    return str(customers[0]["Id"])
+                    existing_id = str(customers[0]["Id"])
+                    owner = self.db.execute(
+                        "SELECT canonical_id FROM cross_tool_mapping "
+                        "WHERE tool_name = 'quickbooks' AND tool_specific_id = %s",
+                        (existing_id,),
+                    ).fetchone()
+                    if owner is None or owner["canonical_id"] == ctx["canonical_id"]:
+                        # Unmapped (a prior partial create for this client)
+                        # or already ours — safe to reuse.
+                        return existing_id
+                    body["DisplayName"] = (
+                        f"{ctx['display_name']} ({ctx['canonical_id']})"
+                    )
+                    print(
+                        f"[INFO] QBO DisplayName '{ctx['display_name']}' belongs "
+                        f"to {owner['canonical_id']} — creating disambiguated "
+                        f"customer '{body['DisplayName']}'"
+                    )
+                    resp = requests.post(
+                        f"{base_url}/customer",
+                        headers=headers,
+                        json=body,
+                        params={"minorversion": "65"},
+                        timeout=15,
+                    )
             resp.raise_for_status()
 
         resp.raise_for_status()
@@ -1144,10 +1252,38 @@ class NewClientOnboarding(BaseAutomation):
             trigger_source=trigger_source,
         )
         if not all_present:
+            qbo_missing = {"quickbooks", "quickbooks_customer"} & set(missing)
+            retry_note = ""
+            if qbo_missing and not self.dry_run:
+                # The QBO customer gap is self-healable: queue a retry instead
+                # of relying on a human reading #operations. 1h delay because
+                # the original creation failed seconds ago (usually a transient
+                # QBO error) and an immediate retry would re-fail — failed
+                # pending actions are not auto-retried.
+                try:
+                    already_queued = self.db.execute(
+                        "SELECT 1 FROM pending_actions "
+                        "WHERE action_name = 'create_qbo_customer' "
+                        "AND status = 'pending' AND trigger_context LIKE %s",
+                        (f'%"{canonical_id}"%',),
+                    ).fetchone()
+                    if not already_queued:
+                        self.schedule_delayed_action(
+                            action_name="create_qbo_customer",
+                            trigger_context_dict={"canonical_id": canonical_id},
+                            delay_hours=1,
+                        )
+                    retry_note = " Automatic QuickBooks customer retry queued."
+                except Exception as queue_exc:
+                    print(
+                        f"[WARN] Could not queue create_qbo_customer retry for "
+                        f"{canonical_id}: {queue_exc}"
+                    )
             self.send_slack(
                 "operations",
                 f":warning: Onboarding sync gap for `{canonical_id}`: "
-                f"no mapping in {', '.join(missing)}. Manual follow-up required.",
+                f"no mapping in {', '.join(missing)}. Manual follow-up required."
+                f"{retry_note}",
             )
 
 

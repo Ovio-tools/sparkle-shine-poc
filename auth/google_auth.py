@@ -224,6 +224,26 @@ def get_google_credentials() -> Credentials:
 # Service factories
 # ------------------------------------------------------------------ #
 
+GOOGLE_HTTP_TIMEOUT_SECONDS = 20
+# ESTIMATED — reasoning: healthy Sheets reads complete in ~1s (Railway runner
+# logs); worst observed healthy read was 8.5s during the 2026-06-11 Google
+# slowness window. The googleapiclient default is a 60s socket timeout, which
+# stretched each failing runner cron cycle to 69s during that incident.
+# 20s keeps >2x headroom over the worst healthy read while capping the time a
+# hung Google API can cost per cycle.
+
+
+def _authorized_http(credentials, timeout: int = GOOGLE_HTTP_TIMEOUT_SECONDS):
+    """Return an AuthorizedHttp with an explicit socket timeout.
+
+    build() accepts either credentials= (no timeout control) or http=; when
+    passing http= the credentials must be wrapped in AuthorizedHttp ourselves.
+    """
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+    return AuthorizedHttp(credentials, http=httplib2.Http(timeout=timeout))
+
+
 def get_drive_service():
     """Return a Google Drive v3 service."""
     return build("drive", "v3", credentials=get_google_credentials())
@@ -235,8 +255,13 @@ def get_docs_service():
 
 
 def get_sheets_service():
-    """Return a Google Sheets v4 service."""
-    return build("sheets", "v4", credentials=get_google_credentials())
+    """Return a Google Sheets v4 service with an explicit socket timeout.
+
+    Sheets is polled every automation-runner cycle; the explicit timeout
+    keeps a hung Google API from blocking the whole poll run (the library
+    default is 60s).
+    """
+    return build("sheets", "v4", http=_authorized_http(get_google_credentials()))
 
 
 def get_calendar_service():

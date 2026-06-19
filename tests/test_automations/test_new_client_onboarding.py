@@ -389,3 +389,226 @@ def test_dry_run_no_api_writes(_mock_tasks, mock_db, mock_clients, sample_trigge
     mock_slack.assert_not_called()
     mock_clients.jobber.post.assert_not_called()
     mock_clients.mailchimp.lists.update_list_member_tags.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# retry_quickbooks_customer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seed_client_without_qbo_mapping(db, canonical_id="SS-CLIENT-0095"):
+    with db:
+        db.execute(
+            "INSERT INTO clients (id, client_type, first_name, last_name, email, phone, status) "
+            "VALUES (%s, 'residential', 'Rita', 'Vargas', 'rita.vargas@example.com', "
+            "'(512) 555-0188', 'active') ON CONFLICT DO NOTHING",
+            (canonical_id,),
+        )
+    return canonical_id
+
+
+def _qbo_mappings(db, canonical_id):
+    rows = db.execute(
+        "SELECT tool_name, tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name IN ('quickbooks', 'quickbooks_customer')",
+        (canonical_id,),
+    ).fetchall()
+    return {r["tool_name"]: r["tool_specific_id"] for r in rows}
+
+
+@patch("automations.new_client_onboarding.requests.post")
+def test_retry_quickbooks_customer_creates_and_registers(mock_post, auto):
+    canonical_id = _seed_client_without_qbo_mapping(auto.db)
+    mock_post.return_value = _make_qbo_post_mock(customer_id="qbo-cust-555")
+
+    result = auto.retry_quickbooks_customer(canonical_id)
+
+    assert result == "qbo-cust-555"
+    mappings = _qbo_mappings(auto.db, canonical_id)
+    assert mappings == {
+        "quickbooks": "qbo-cust-555",
+        "quickbooks_customer": "qbo-cust-555",
+    }
+    log = auto.db.execute(
+        "SELECT status, trigger_source FROM automation_log "
+        "WHERE action_name = 'create_quickbooks_customer' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert log["status"] == "success"
+    assert canonical_id in log["trigger_source"]
+
+
+@patch("automations.new_client_onboarding.requests.post")
+def test_retry_quickbooks_customer_idempotent(mock_post, auto):
+    """Existing mapping → no HTTP call, returns the existing customer id."""
+    result = auto.retry_quickbooks_customer("SS-CLIENT-0001")  # seeded with quickbooks=401
+
+    assert result == "401"
+    mock_post.assert_not_called()
+    # the quickbooks_customer alias gets backfilled
+    assert _qbo_mappings(auto.db, "SS-CLIENT-0001")["quickbooks_customer"] == "401"
+
+
+@patch("automations.new_client_onboarding.requests.post")
+def test_retry_quickbooks_customer_unknown_client_raises(mock_post, auto):
+    with pytest.raises(ValueError):
+        auto.retry_quickbooks_customer("SS-CLIENT-9999")
+    mock_post.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mapping verification queues a QBO customer retry
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pending_qbo_customer_rows(db, canonical_id):
+    return db.execute(
+        "SELECT * FROM pending_actions "
+        "WHERE action_name = 'create_qbo_customer' AND trigger_context LIKE %s",
+        (f'%"{canonical_id}"%',),
+    ).fetchall()
+
+
+def test_verify_missing_qbo_mapping_queues_retry(auto):
+    ctx = {
+        "canonical_id": "SS-CLIENT-0096",
+        "email": "verify.gap@example.com",
+    }
+    with patch("automations.base.post_slack_message"):
+        auto._action_verify_mappings("run-x", ctx, "pipedrive:deal:999")
+
+    rows = _pending_qbo_customer_rows(auto.db, "SS-CLIENT-0096")
+    assert len(rows) == 1
+    import json as _json
+    assert _json.loads(rows[0]["trigger_context"])["canonical_id"] == "SS-CLIENT-0096"
+
+
+def test_verify_missing_qbo_mapping_does_not_duplicate(auto):
+    ctx = {"canonical_id": "SS-CLIENT-0096", "email": "verify.gap@example.com"}
+    with patch("automations.base.post_slack_message"):
+        auto._action_verify_mappings("run-x", ctx, "pipedrive:deal:999")
+        auto._action_verify_mappings("run-y", ctx, "pipedrive:deal:999")
+
+    assert len(_pending_qbo_customer_rows(auto.db, "SS-CLIENT-0096")) == 1
+
+
+def test_verify_all_mappings_present_queues_nothing(auto):
+    """SS-CLIENT-0001 has every required mapping seeded."""
+    ctx = {"canonical_id": "SS-CLIENT-0001", "email": "jane@example.com"}
+    # the seeded fixture lacks the quickbooks_customer alias — add it
+    with auto.db:
+        auto.db.execute(
+            "INSERT INTO cross_tool_mapping (canonical_id, entity_type, tool_name, tool_specific_id) "
+            "VALUES ('SS-CLIENT-0001', 'CLIENT', 'quickbooks_customer', '401') "
+            "ON CONFLICT DO NOTHING"
+        )
+    with patch("automations.base.post_slack_message"):
+        auto._action_verify_mappings("run-x", ctx, "pipedrive:deal:999")
+
+    assert _pending_qbo_customer_rows(auto.db, "SS-CLIENT-0001") == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lead promotion migrates ALL tool mappings to the client
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_promote_lead_repoints_jobber_and_qbo_mappings(auto):
+    lead_id = "SS-LEAD-0901"
+    with auto.db:
+        for tool, tid in [
+            ("hubspot", "hs-901"),
+            ("pipedrive", "pd-901"),
+            ("jobber", "jc-901"),
+            ("jobber_property", "jp-901"),
+            ("quickbooks", "qb-901"),
+            ("mailchimp", "mc-901"),
+        ]:
+            auto.db.execute(
+                "INSERT INTO cross_tool_mapping "
+                "(canonical_id, entity_type, tool_name, tool_specific_id) "
+                "VALUES (%s, 'LEAD', %s, %s) ON CONFLICT DO NOTHING",
+                (lead_id, tool, tid),
+            )
+
+    client_id = auto._promote_lead_to_client(
+        lead_id, "deal-901", "Pat", "Promoted", "pat.promoted@example.com",
+        "residential",
+    )
+
+    assert client_id.startswith("SS-CLIENT-")
+    rows = auto.db.execute(
+        "SELECT tool_name, canonical_id, entity_type FROM cross_tool_mapping "
+        "WHERE tool_specific_id LIKE '%-901'"
+    ).fetchall()
+    assert rows, "expected migrated mapping rows"
+    for r in rows:
+        assert r["canonical_id"] == client_id, (
+            f"{r['tool_name']} mapping still points at {r['canonical_id']}"
+        )
+        assert r["entity_type"] == "CLIENT"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QBO duplicate DisplayName owned by a DIFFERENT client → disambiguate
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_qbo_duplicate_response():
+    m = MagicMock()
+    m.status_code = 400
+    m.json.return_value = {
+        "Fault": {"Error": [{"code": "6240", "Detail": "Duplicate Name Exists Error"}]}
+    }
+    return m
+
+
+def _make_qbo_query_response(customer_id="282"):
+    m = MagicMock()
+    m.raise_for_status.return_value = None
+    m.json.return_value = {"QueryResponse": {"Customer": [{"Id": customer_id}]}}
+    return m
+
+
+@patch("automations.new_client_onboarding.requests.get")
+@patch("automations.new_client_onboarding.requests.post")
+def test_duplicate_name_owned_by_other_client_disambiguates(
+    mock_post, mock_get, auto
+):
+    """Same human name, different client: must NOT reuse the other client's
+    QBO customer (regression: SS-CLIENT-0521 vs SS-CLIENT-0233 'Ana Thomas')."""
+    # QBO customer 282 belongs to a different canonical client
+    with auto.db:
+        auto.db.execute(
+            "INSERT INTO cross_tool_mapping "
+            "(canonical_id, entity_type, tool_name, tool_specific_id) "
+            "VALUES ('SS-CLIENT-0233', 'CLIENT', 'quickbooks', '282') "
+            "ON CONFLICT DO NOTHING"
+        )
+    canonical_id = _seed_client_without_qbo_mapping(auto.db, "SS-CLIENT-0097")
+
+    mock_post.side_effect = [
+        _make_qbo_duplicate_response(),          # first create → duplicate name
+        _make_qbo_post_mock(customer_id="999"),  # disambiguated create → ok
+    ]
+    mock_get.return_value = _make_qbo_query_response(customer_id="282")
+
+    result = auto.retry_quickbooks_customer(canonical_id)
+
+    assert result == "999"
+    second_body = mock_post.call_args_list[1].kwargs["json"]
+    assert second_body["DisplayName"] != "Rita Vargas"
+    assert canonical_id in second_body["DisplayName"]
+    assert _qbo_mappings(auto.db, canonical_id)["quickbooks"] == "999"
+
+
+@patch("automations.new_client_onboarding.requests.get")
+@patch("automations.new_client_onboarding.requests.post")
+def test_duplicate_name_unmapped_customer_is_reused(mock_post, mock_get, auto):
+    """Duplicate name where the existing QBO customer is unmapped (a prior
+    partial create for THIS client) → reuse it, no second create."""
+    canonical_id = _seed_client_without_qbo_mapping(auto.db, "SS-CLIENT-0098")
+
+    mock_post.return_value = _make_qbo_duplicate_response()
+    mock_get.return_value = _make_qbo_query_response(customer_id="777")
+
+    result = auto.retry_quickbooks_customer(canonical_id)
+
+    assert result == "777"
+    assert mock_post.call_count == 1
+    assert _qbo_mappings(auto.db, canonical_id)["quickbooks"] == "777"

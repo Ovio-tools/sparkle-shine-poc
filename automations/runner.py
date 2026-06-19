@@ -27,7 +27,7 @@ try:
 except ImportError:
     pass
 
-from simulation.error_reporter import report_error
+from simulation.error_reporter import report_error, report_recovery
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging setup
@@ -113,6 +113,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling Pipedrive for won deals...")
     try:
         won_deals = poll_pipedrive_won_deals(clients, db)
+        report_recovery("pipedrive", "Polling Pipedrive for won deals", dry_run=dry_run)
     except Exception as e:
         logger.error("Pipedrive poll failed — skipping: %s", e)
         report_error(e, tool_name="pipedrive", context="Polling Pipedrive for won deals", dry_run=dry_run)
@@ -133,6 +134,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling Jobber for completed jobs...")
     try:
         completed = poll_jobber_completed_jobs(clients, db)
+        report_recovery("jobber", "Polling Jobber for completed jobs", dry_run=dry_run)
     except Exception as e:
         logger.error("Jobber poll failed — skipping: %s", e)
         report_error(e, tool_name="jobber", context="Polling Jobber for completed jobs", dry_run=dry_run)
@@ -153,6 +155,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling QuickBooks for new payments...")
     try:
         payments = poll_quickbooks_payments(clients, db)
+        report_recovery("quickbooks", "Polling QuickBooks for new payments", dry_run=dry_run)
     except Exception as e:
         logger.error("QuickBooks poll failed — skipping: %s", e)
         report_error(e, tool_name="quickbooks", context="Polling QuickBooks for new payments", dry_run=dry_run)
@@ -175,6 +178,7 @@ def run_poll(clients, db, dry_run: bool) -> dict:
     logger.info("Polling Google Sheets for negative reviews...")
     try:
         reviews = poll_sheets_negative_reviews(clients, db)
+        report_recovery("google", "Polling Google Sheets for negative reviews", dry_run=dry_run)
     except Exception as e:
         logger.error("Google Sheets poll failed — skipping: %s", e)
         report_error(e, tool_name="google", context="Polling Google Sheets for negative reviews", dry_run=dry_run)
@@ -213,6 +217,19 @@ def run_poll(clients, db, dry_run: bool) -> dict:
 
 _LEAD_LEAK_SENTINEL = os.path.join(_LOGS_DIR, ".lead_leak_last_run")
 _OVERDUE_INVOICE_SENTINEL = os.path.join(_LOGS_DIR, ".overdue_invoice_last_run")
+_HUBSPOT_PRUNE_SENTINEL = os.path.join(_LOGS_DIR, ".hubspot_prune_last_run")
+
+
+def _should_run_hubspot_prune() -> bool:
+    """Return True if HubSpotContactPruner has not run successfully in the last 24 hours."""
+    if not os.path.exists(_HUBSPOT_PRUNE_SENTINEL):
+        return True
+    return (time.time() - os.path.getmtime(_HUBSPOT_PRUNE_SENTINEL)) >= 86400
+
+
+def _mark_hubspot_prune_ran() -> None:
+    """Touch the sentinel file to record that HubSpotContactPruner just completed."""
+    open(_HUBSPOT_PRUNE_SENTINEL, "w").close()
 
 
 def _should_run_lead_leak() -> bool:
@@ -281,6 +298,25 @@ def run_scheduled(clients, db, dry_run: bool) -> dict:
     else:
         logger.info("Skipping overdue invoice scan (only runs on Mondays)")
 
+    time.sleep(0.5)
+
+    # HubSpot Contact Pruner -- at most once per 24 hours
+    if _should_run_hubspot_prune():
+        logger.info("Running HubSpot Contact Pruner...")
+        results["processed"] += 1
+        try:
+            from automations.hubspot_contact_pruner import HubSpotContactPruner
+            HubSpotContactPruner(clients, db, dry_run).run()
+            results["succeeded"] += 1
+            if not dry_run:
+                _mark_hubspot_prune_ran()
+        except Exception as e:
+            results["failed"] += 1
+            logger.error("HubSpot contact prune failed: %s", e)
+            report_error(e, tool_name="hubspot", context="HubSpot contact pruning", dry_run=dry_run)
+    else:
+        logger.info("Skipping HubSpot Contact Pruner (ran within the last 24 hours)")
+
     return results
 
 
@@ -344,8 +380,84 @@ def _dispatch_pending(clients, db, action_name: str, context: dict, dry_run: boo
     """Route a pending action to its handler."""
     if action_name == "send_review_request":
         _handle_send_review_request(clients, db, context, dry_run)
+    elif action_name == "create_invoice":
+        _handle_create_invoice(clients, db, context, dry_run)
+    elif action_name == "create_qbo_customer":
+        _handle_create_qbo_customer(clients, db, context, dry_run)
     else:
         logger.warning("Unknown pending action_name '%s' — skipping.", action_name)
+
+
+def _handle_create_invoice(clients, db, context: dict, dry_run: bool) -> None:
+    """
+    Re-attempt QuickBooks invoice creation for a completed job whose original
+    invoice failed (queued by JobCompletionFlow or the reconciliation healer).
+
+    Expected context keys: canonical_job_id (required).
+    Raises on failure so run_pending marks the action failed; the daily
+    reconciler sweep re-queues it while the job remains uninvoiced.
+    """
+    from automations.job_completion_flow import JobCompletionFlow
+    from automations.utils.id_resolver import MappingNotFoundError, resolve
+
+    canonical_job_id = context.get("canonical_job_id")
+    if not canonical_job_id:
+        raise ValueError("create_invoice context missing 'canonical_job_id'")
+
+    job = db.execute(
+        "SELECT client_id, status, completed_at FROM jobs WHERE id = %s",
+        (canonical_job_id,),
+    ).fetchone()
+    if job is None:
+        raise ValueError(f"create_invoice: no jobs row for {canonical_job_id}")
+    if job["status"] != "completed":
+        logger.info(
+            "create_invoice for %s: job status is '%s' — nothing to invoice.",
+            canonical_job_id, job["status"],
+        )
+        return
+
+    # The flow context builder works from Jobber IDs (the poll event shape).
+    # A job with no Jobber mapping can't be safely priced/recorded — refuse
+    # rather than invoice blindly.
+    try:
+        jobber_job_id = resolve(db, canonical_job_id, "jobber")
+    except MappingNotFoundError:
+        raise ValueError(
+            f"create_invoice: {canonical_job_id} has no Jobber mapping — "
+            "cannot rebuild the completion event"
+        )
+    jobber_client_id = ""
+    if job["client_id"]:
+        try:
+            jobber_client_id = resolve(db, job["client_id"], "jobber")
+        except MappingNotFoundError:
+            pass
+
+    event = {
+        "job_id": jobber_job_id,
+        "client_id": jobber_client_id,
+        "completed_at": job["completed_at"],
+        "is_recurring": False,
+    }
+    JobCompletionFlow(clients, db, dry_run).run_invoice_retry(event)
+
+
+def _handle_create_qbo_customer(clients, db, context: dict, dry_run: bool) -> None:
+    """
+    Re-attempt QuickBooks customer creation for an onboarded client whose
+    original create_quickbooks_customer action failed (queued by the
+    onboarding mapping-verification step).
+
+    Expected context keys: canonical_id (required).
+    """
+    from automations.new_client_onboarding import NewClientOnboarding
+
+    canonical_id = context.get("canonical_id")
+    if not canonical_id:
+        raise ValueError("create_qbo_customer context missing 'canonical_id'")
+
+    NewClientOnboarding(clients, db, dry_run).retry_quickbooks_customer(canonical_id)
 
 
 def _handle_send_review_request(clients, db, context: dict, dry_run: bool) -> None:
@@ -456,6 +568,7 @@ def _run_health_check() -> None:
     _sentinels = [
         (_LEAD_LEAK_SENTINEL,       "Lead leak sentinel",       48 * 3600),
         (_OVERDUE_INVOICE_SENTINEL, "Overdue invoice sentinel", 14 * 86400),
+        (_HUBSPOT_PRUNE_SENTINEL,   "HubSpot prune sentinel",   48 * 3600),
     ]
     for sentinel_path, name, max_age_seconds in _sentinels:
         if not os.path.exists(sentinel_path):
@@ -479,6 +592,7 @@ def _run_health_check() -> None:
         ("automations.lead_leak_detection",     "LeadLeakDetection"),
         ("automations.overdue_invoice",         "OverdueInvoiceEscalation"),
         ("automations.hubspot_qualified_sync",       "HubSpotQualifiedSync"),
+        ("automations.hubspot_contact_pruner",  "HubSpotContactPruner"),
     ]
     for module_path, class_name in _AUTOMATION_IMPORTS:
         try:

@@ -20,6 +20,7 @@ from database.connection import get_connection
 _STATEMENTS = [
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_title_raw TEXT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_job_type TEXT",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_assigned_users JSONB",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_recurring_job BOOLEAN",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jobber_updated_at TEXT",
     "CREATE INDEX IF NOT EXISTS idx_jobs_jobber_updated ON jobs(jobber_updated_at)",
@@ -36,7 +37,10 @@ def main() -> None:
         conn.close()
 
     print("Jobber job enrichment migration complete.")
-    print("Columns ensured: job_title_raw, jobber_job_type, is_recurring_job, jobber_updated_at")
+    print(
+        "Columns ensured: job_title_raw, jobber_job_type, jobber_assigned_users, "
+        "is_recurring_job, jobber_updated_at"
+    )
 
 
 if __name__ == "__main__":

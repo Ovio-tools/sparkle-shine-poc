@@ -8,9 +8,9 @@ Every entity in the Sparkle & Shine POC has a canonical record in PostgreSQL and
 
 ## The Golden Rule
 
-**PostgreSQL is the source of truth.** The SaaS tools are mirrors. If there's a conflict between what Postgres says and what HubSpot says, Postgres wins. Every new record starts in Postgres, gets a canonical ID, then gets pushed to tools. Never create a tool record without also creating the Postgres record and mapping.
+**PostgreSQL is the source of truth.** The SaaS tools are mirrors. If there's a conflict between what the database says and what HubSpot says, the database wins. Every new record starts in PostgreSQL, gets a canonical ID, then gets pushed to tools. Never create a tool record without also creating the database record and mapping.
 
-For production diagnosis, Railway Postgres is the source of truth. Local Postgres exists only for tests and local-dev reproduction.
+All database access goes through `from database.connection import get_connection` (requires `DATABASE_URL`). Parameter placeholders are `%s`, rows are `RealDictRow` dicts (`row["column_name"]`, never `row[0]`). See "Database Patterns (PostgreSQL)" in CLAUDE.md.
 
 ---
 
@@ -38,51 +38,73 @@ The sequential number auto-increments per type. Use `database.mappings.generate_
 
 **Location:** `database/mappings.py`
 
-**Key functions:**
+All functions accept a legacy `db_path` keyword argument that is passed through to `get_connection()`; new code can omit it (the PostgreSQL connection comes from `DATABASE_URL`).
 
 ```python
-from database.mappings import generate_id, link, lookup, reverse_lookup, find_unmapped
+from database.mappings import (
+    generate_id, register_mapping, get_tool_id, get_tool_url,
+    get_canonical_id, find_unmapped, bulk_register,
+)
 
-# Generate the next canonical ID for a type
+# Generate the next canonical ID for a type.
+# Checks BOTH the entity table AND cross_tool_mapping to avoid colliding
+# with IDs allocated by automations.
 canonical_id = generate_id("CLIENT")
 # Returns: "SS-CLIENT-0311" (next available)
 
-# Link a canonical ID to a tool-specific ID
-link(canonical_id="SS-CLIENT-0311", tool_name="hubspot", tool_id="12345678")
-link(canonical_id="SS-CLIENT-0311", tool_name="pipedrive", tool_id="456")
-link(canonical_id="SS-CLIENT-0311", tool_name="quickbooks", tool_id="789")
+# Link a canonical ID to a tool-specific ID (insert-or-update).
+# Raises ValueError if the tool ID is already mapped to a DIFFERENT
+# canonical_id -- guards against cross-contaminated mappings.
+register_mapping("SS-CLIENT-0311", "hubspot", "12345678")
+register_mapping("SS-CLIENT-0311", "pipedrive", "456", tool_specific_url="https://yourco.pipedrive.com/person/456")
 
 # Look up a tool-specific ID from a canonical ID
-hubspot_id = lookup("SS-CLIENT-0311", "hubspot")
+hubspot_id = get_tool_id("SS-CLIENT-0311", "hubspot")
 # Returns: "12345678" or None if not mapped
 
+# Look up the stored deep-link URL for a record
+url = get_tool_url("SS-CLIENT-0311", "pipedrive")
+
 # Reverse lookup: find canonical ID from a tool-specific ID
-canonical_id = reverse_lookup("hubspot", "12345678")
+canonical_id = get_canonical_id("hubspot", "12345678")
 # Returns: "SS-CLIENT-0311" or None
 
-# Find canonical IDs that are missing a mapping for a specific tool
-unmapped = find_unmapped("jobber", "CLIENT")
+# Find canonical IDs that exist in the entity table but lack a mapping
+# for a tool. NOTE the argument order: entity_type FIRST, then tool_name.
+unmapped = find_unmapped("CLIENT", "jobber")
 # Returns: ["SS-CLIENT-0311", "SS-CLIENT-0312"] -- clients with no Jobber ID
+
+# Insert many mappings in one transaction.
+# Each item: (canonical_id, tool_name, tool_specific_id)
+bulk_register([("SS-JOB-8201", "jobber", "gid://jobber/Job/991")])
 ```
+
+For code that already holds an open connection, `register_mapping_on_conn()` and `get_canonical_id_on_conn()` variants exist.
 
 ---
 
 ## cross_tool_mapping Table
 
+Actual DDL (see `database/schema.py` for the authoritative version):
+
 ```sql
-CREATE TABLE cross_tool_mapping (
-    canonical_id TEXT NOT NULL,
-    tool_name TEXT NOT NULL,
-    tool_id TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (canonical_id, tool_name)
+CREATE TABLE IF NOT EXISTS cross_tool_mapping (
+    id                  SERIAL PRIMARY KEY,
+    canonical_id        TEXT NOT NULL,             -- SS-TYPE-NNNN
+    entity_type         TEXT NOT NULL,
+    tool_name           TEXT NOT NULL,
+    tool_specific_id    TEXT NOT NULL,
+    tool_specific_url   TEXT,
+    synced_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(canonical_id, tool_name),
+    UNIQUE(entity_type, tool_name, tool_specific_id)
 );
 ```
 
 A single client might have 5 rows in this table:
 
-| canonical_id | tool_name | tool_id |
-|-------------|-----------|---------|
+| canonical_id | tool_name | tool_specific_id |
+|-------------|-----------|------------------|
 | SS-CLIENT-0311 | hubspot | 12345678 |
 | SS-CLIENT-0311 | pipedrive | 456 |
 | SS-CLIENT-0311 | jobber | gid://jobber/Client/789 |
@@ -99,27 +121,32 @@ Here's the full sequence for creating a client that ends up in HubSpot, Pipedriv
 
 ```python
 # 1. Generate canonical ID
-from database.mappings import generate_id, link
+from database.mappings import generate_id, register_mapping
 canonical_id = generate_id("LEAD")  # SS-LEAD-0313
 
-# 2. Insert into Postgres leads table
+# 2. Insert into the leads table
+from datetime import datetime
 from database.connection import get_connection
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO leads (
-                canonical_id, first_name, last_name, email, phone,
-                address, city, state, zip, neighborhood,
-                client_type, lead_source, service_interest,
-                lifecycle_stage, status, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-        """, (
-            canonical_id, "Sarah", "Chen", "sarah.chen@example.com",
-            "(512) 555-0147", "2401 Westlake Dr", "Austin", "TX", "78746",
-            "Westlake/Tarrytown", "residential", "referral",
-            "biweekly_recurring", "sales_qualified_lead", "active",
-        ))
-    conn.commit()
+
+db = get_connection()
+try:
+    db.execute("""
+        INSERT INTO leads (
+            canonical_id, first_name, last_name, email, phone,
+            address, city, state, zip, neighborhood,
+            client_type, lead_source, service_interest,
+            lifecycle_stage, status, created_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        canonical_id, "Sarah", "Chen", "sarah.chen@example.com",
+        "(512) 555-0147", "2401 Westlake Dr", "Austin", "TX", "78746",
+        "Westlake/Tarrytown", "residential", "referral",
+        "biweekly_recurring", "sales_qualified_lead", "active",
+        datetime.utcnow().isoformat(),
+    ))
+    db.commit()
+finally:
+    db.close()
 
 # 3. Create in HubSpot using the unified auth interface
 from auth import get_client
@@ -128,13 +155,13 @@ session = get_client("hubspot")
 hubspot_id = create_in_hubspot(session, profile, lifecycle_stage)
 
 # 4. Register the HubSpot mapping
-link(canonical_id, "hubspot", hubspot_id)
+register_mapping(canonical_id, "hubspot", hubspot_id)
 
 # *** CRITICAL: Do NOT register a Pipedrive mapping here. ***
 # The automation runner detects new SQLs by finding HubSpot contacts
 # with NO Pipedrive entry in cross_tool_mapping.
-# If you call link(canonical_id, "pipedrive", ...) here, the runner
-# will never pick up this SQL and no deal will be created.
+# If you call register_mapping(canonical_id, "pipedrive", ...) here,
+# the runner will never pick up this SQL and no deal will be created.
 
 # 5. Embed canonical ID in HubSpot record (for traceability)
 # This is done by including a note or custom property:
@@ -149,7 +176,7 @@ The automation runner polls HubSpot for new SQLs. When it finds SS-LEAD-0313:
 # The automation runner handles this -- you don't write this code.
 # But the runner should:
 # 1. Create Pipedrive person + deal
-# 2. Call link(canonical_id, "pipedrive", pipedrive_deal_id)
+# 2. Call register_mapping(canonical_id, "pipedrive", pipedrive_deal_id)
 # 3. Optionally promote the record from "leads" to "clients" table
 #    OR update the leads table with the Pipedrive deal reference
 ```
@@ -160,16 +187,14 @@ When the deal generator marks a deal as "Won":
 
 ```python
 # 1. Update Pipedrive deal with contract details
-# 2. Update Postgres:
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE commercial_proposals
-            SET status = 'won', won_date = %s, contract_value = %s,
-                service_frequency = %s, start_date = %s
-            WHERE canonical_id = %s
-        """, (won_date, value, frequency, start_date, canonical_id))
-    conn.commit()
+# 2. Update PostgreSQL:
+db.execute("""
+    UPDATE commercial_proposals
+    SET status = 'won', won_date = %s, contract_value = %s,
+        service_frequency = %s, start_date = %s
+    WHERE canonical_id = %s
+""", (won_date, value, frequency, start_date, canonical_id))
+db.commit()
 ```
 
 ### Phase 4: Automation Creates Asana Tasks
@@ -181,7 +206,7 @@ The automation runner detects the won deal and creates onboarding tasks:
 # For each onboarding task:
 #   task_id = generate_id("TASK")
 #   create task in Asana
-#   link(task_id, "asana", asana_gid)
+#   register_mapping(task_id, "asana", asana_gid)
 ```
 
 ### Phase 5: Operations Generator Creates Jobber Client + Jobs
@@ -195,24 +220,25 @@ from auth import get_client
 session = get_client("jobber")
 # (see tool-api-patterns.md for the GraphQL mutation)
 jobber_id = create_jobber_client(session, client_data)
-link(canonical_id, "jobber", jobber_id)
+register_mapping(canonical_id, "jobber", jobber_id)
 
-# 3. Create the first job or recurring schedule
+# 3. Create the first job or recurring schedule.
+# NOTE: Jobber has no crew objects. Crews exist only in config/business.py.
+# Jobber jobs are assigned per job via assignedUsers from the 7-user
+# field-staff pool -- avoid time overlaps for the same user.
 job_canonical = generate_id("JOB")
 jobber_job_id = create_jobber_job(session, jobber_id, job_data)
-link(job_canonical, "jobber", jobber_job_id)
+register_mapping(job_canonical, "jobber", jobber_job_id)
 
-# 4. Insert job into Postgres jobs table
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO jobs (
-                canonical_id, client_id, crew_id, service_type,
-                scheduled_date, expected_duration_min, amount,
-                status, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-        """, (job_canonical, canonical_id, crew_id, ...))
-    conn.commit()
+# 4. Insert job into the jobs table
+db.execute("""
+    INSERT INTO jobs (
+        canonical_id, client_id, crew_id, service_type,
+        scheduled_date, expected_duration_min, amount,
+        status, created_at
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+""", (job_canonical, canonical_id, crew_id, ...))
+db.commit()
 ```
 
 ### Phase 5b: Operations Generator Marks Job Complete
@@ -225,14 +251,12 @@ After the scheduled duration elapses (with +/- 15% variance):
 session = get_client("jobber")
 complete_jobber_job(session, jobber_job_id, actual_duration)
 
-# Update Postgres
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE jobs SET status = 'completed', actual_duration_min = %s,
-            completed_at = %s, rating = %s WHERE canonical_id = %s
-        """, (actual_duration, completion_time, rating, job_canonical))
-    conn.commit()
+# Update PostgreSQL
+db.execute("""
+    UPDATE jobs SET status = 'completed', actual_duration_min = %s,
+    completed_at = %s, rating = %s WHERE canonical_id = %s
+""", (actual_duration, completion_time, rating, job_canonical))
+db.commit()
 
 # *** Do NOT create a QBO invoice here. ***
 # The automation runner detects completed Jobber jobs via poll_state
@@ -242,8 +266,8 @@ with get_connection() as conn:
 ### Phase 6: Automation Creates Invoice (Automatic)
 
 The automation runner handles this. The simulation does NOT write invoice code.
-The reconciliation engine checks for completed jobs older than 24 hours with no
-matching invoice, and flags missing invoices in #automation-failure.
+The reconciliation engine checks for completed jobs older than 24 hours with
+no matching invoice, and flags missing invoices in #automation-failure.
 
 ### Phase 7: Payment Recorded
 
@@ -251,23 +275,21 @@ matching invoice, and flags missing invoices in #automation-failure.
 payment_canonical = generate_id("PAYMENT")
 session = get_client("quickbooks")
 qbo_payment_id = create_qbo_payment(session, invoice)
-link(payment_canonical, "quickbooks", qbo_payment_id)
+register_mapping(payment_canonical, "quickbooks", qbo_payment_id)
 
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO payments (
-                canonical_id, invoice_id, client_id, amount,
-                payment_date, created_at
-            ) VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-        """, (payment_canonical, invoice_canonical, canonical_id, amount, payment_date))
+db.execute("""
+    INSERT INTO payments (
+        canonical_id, invoice_id, client_id, amount,
+        payment_date, created_at
+    ) VALUES (%s, %s, %s, %s, %s, %s)
+""", (payment_canonical, invoice_canonical, canonical_id, amount, ...))
 
-        # Update the invoice status
-        cur.execute("""
-            UPDATE invoices SET status = 'paid', amount_paid = %s, paid_date = %s
-            WHERE canonical_id = %s
-        """, (amount, payment_date, invoice_canonical))
-    conn.commit()
+# Update the invoice status
+db.execute("""
+    UPDATE invoices SET status = 'paid', amount_paid = %s, paid_date = %s
+    WHERE canonical_id = %s
+""", (amount, payment_date, invoice_canonical))
+db.commit()
 ```
 
 ---
@@ -277,15 +299,14 @@ with get_connection() as conn:
 When a client churns, use `cross_tool_mapping` to find all their tool IDs:
 
 ```python
-from database.mappings import lookup
-from database.connection import get_connection
+from database.mappings import get_tool_id
 
 canonical_id = "SS-CLIENT-0311"
 
 # Find all tool IDs for this client
-hubspot_id = lookup(canonical_id, "hubspot")
-pipedrive_id = lookup(canonical_id, "pipedrive")
-jobber_id = lookup(canonical_id, "jobber")
+hubspot_id = get_tool_id(canonical_id, "hubspot")
+pipedrive_id = get_tool_id(canonical_id, "pipedrive")
+jobber_id = get_tool_id(canonical_id, "jobber")
 mailchimp_email = "sarah.chen@example.com"  # used as hash for Mailchimp
 # Note: Mailchimp doesn't use a numeric ID. Use the email hash.
 
@@ -296,16 +317,14 @@ mailchimp_email = "sarah.chen@example.com"  # used as hash for Mailchimp
 # 4. Mailchimp: unsubscribe, add "churned" tag
 # 5. Asana: create retention follow-up task
 
-# Update Postgres last
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE clients
-            SET status = 'churned', churn_date = %s, churn_reason = %s,
-                lifetime_value = %s
-            WHERE canonical_id = %s
-        """, (churn_date, reason, ltv, canonical_id))
-    conn.commit()
+# Update PostgreSQL last
+db.execute("""
+    UPDATE clients
+    SET status = 'churned', churn_date = %s, churn_reason = %s,
+        lifetime_value = %s
+    WHERE canonical_id = %s
+""", (churn_date, reason, ltv, canonical_id))
+db.commit()
 ```
 
 ---
@@ -322,27 +341,25 @@ with get_connection() as conn:
 | `commercial_proposals` | `canonical_id` | client_id, status (open/won/lost), value, stage |
 | `tasks` | `canonical_id` | title, assignee, project, completed, due_date |
 | `recurring_agreements` | `canonical_id` | client_id, service_type, frequency, amount_per_visit |
-| `cross_tool_mapping` | `(canonical_id, tool_name)` | tool_id |
+| `cross_tool_mapping` | `(canonical_id, tool_name)` unique | entity_type, tool_specific_id, tool_specific_url |
 
 For the full schema with all columns, read `database/schema.py`.
-
-Row access: results from `get_connection()` are `RealDictRow` objects (dict-like). Always access columns by name: `row["canonical_id"]`, never `row[0]`.
 
 ---
 
 ## Anti-Patterns to Avoid
 
-**Never create a tool record without a Postgres record and mapping:**
+**Never create a tool record without a database record and mapping:**
 ```python
 # BAD
 hubspot_id = create_in_hubspot(profile)
-# Done! (no Postgres record, no mapping -- orphaned record)
+# Done! (no database record, no mapping -- orphaned record)
 
 # GOOD
 canonical_id = generate_id("LEAD")
-insert_into_postgres(canonical_id, profile)
+insert_into_db(canonical_id, profile)
 hubspot_id = create_in_hubspot(profile)
-link(canonical_id, "hubspot", hubspot_id)
+register_mapping(canonical_id, "hubspot", hubspot_id)
 ```
 
 **Never hardcode tool IDs:**
@@ -363,13 +380,13 @@ pipedrive_stage_id = tool_ids["pipedrive"]["stages"]["negotiation"]
 create_in_hubspot(profile)  # might already exist from a prior run
 
 # GOOD
-from database.mappings import lookup
-existing = lookup(canonical_id, "hubspot")
+from database.mappings import get_tool_id
+existing = get_tool_id(canonical_id, "hubspot")
 if existing:
     logger.info(f"Already mapped to HubSpot {existing}, skipping")
     return existing
 hubspot_id = create_in_hubspot(profile)
-link(canonical_id, "hubspot", hubspot_id)
+register_mapping(canonical_id, "hubspot", hubspot_id)
 ```
 
 **Always embed the canonical ID in the tool record:**

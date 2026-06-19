@@ -40,6 +40,24 @@ def _make_qbo_invoice_mock(invoice_id="qbo-inv-123"):
     return m
 
 
+def _make_jobber_invoice_mock(invoice_id="jobber-inv-123"):
+    m = MagicMock()
+    m.raise_for_status.return_value = None
+    m.json.return_value = {
+        "data": {
+            "invoiceCreate": {
+                "invoice": {
+                    "id": invoice_id,
+                    "invoiceNumber": "SS-INV-0001",
+                    "invoiceStatus": "draft",
+                },
+                "userErrors": [],
+            }
+        }
+    }
+    return m
+
+
 def _seed_commercial_agreement(
     db,
     *,
@@ -69,6 +87,18 @@ def _seed_commercial_agreement(
                 "monday,tuesday,wednesday,thursday,friday",
             ),
         )
+
+
+@pytest.fixture(autouse=True)
+def _patch_jobber_invoice_writeback(mock_clients):
+    def _post(*args, **kwargs):
+        payload = kwargs.get("json") or {}
+        query = payload.get("query") or ""
+        if "invoiceCreate" not in query:
+            raise AssertionError(f"Unexpected Jobber GraphQL query in test: {query}")
+        return _make_jobber_invoice_mock()
+
+    mock_clients.jobber.post.side_effect = _post
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,6 +159,98 @@ def test_invoice_created_commercial_net30(mock_post, mock_db, mock_clients):
     txn  = date.fromisoformat(body["TxnDate"])
     due  = date.fromisoformat(body["DueDate"])
     assert (due - txn).days == 30, "Commercial invoice must be Net-30"
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_jobber_writeback_creates_draft_invoice_and_mapping(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock(invoice_id="qbo-inv-999")
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message"):
+        auto.run(sample_triggers["completed_job"])
+
+    mock_clients.jobber.post.assert_called_once()
+    payload = mock_clients.jobber.post.call_args.kwargs["json"]
+    jobber_input = payload["variables"]["input"]
+    assert jobber_input["clientId"] == "301"
+    assert jobber_input["jobId"] == "601"
+    # Jobber rejects non-numeric invoice numbers ("Invoice number can only
+    # contain a number") — only the digits of the SS-INV id are sent.
+    assert jobber_input["invoiceNumber"].isdigit()
+    assert jobber_input["markSent"] is False
+    assert jobber_input["allowReviewRequest"] is False
+    assert jobber_input["tax"]["taxCalculationMethod"] == "EXCLUSIVE"
+    assert jobber_input["lineItems"][0]["category"] == "SERVICE"
+    assert "qbo-inv-999" in jobber_input["lineItems"][0]["description"]
+
+    inv = mock_db.execute(
+        "SELECT id FROM invoices ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert inv is not None
+
+    mapping = mock_db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name = 'jobber'",
+        (inv["id"],),
+    ).fetchone()
+    assert mapping is not None
+    assert mapping["tool_specific_id"] == "jobber-inv-123"
+
+    log = mock_db.execute(
+        "SELECT status, action_target FROM automation_log "
+        "WHERE action_name = 'create_jobber_invoice_writeback' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert log is not None
+    assert log["status"] == "success"
+    assert log["action_target"] == "jobber:invoice:jobber-inv-123"
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_jobber_writeback_failure_is_logged_without_blocking_rest_of_flow(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+
+    failed_jobber = MagicMock()
+    failed_jobber.raise_for_status.return_value = None
+    failed_jobber.json.return_value = {
+        "data": {
+            "invoiceCreate": {
+                "invoice": None,
+                "userErrors": [{"message": "Invoice number has already been taken"}],
+            }
+        }
+    }
+    mock_clients.jobber.post.side_effect = lambda *args, **kwargs: failed_jobber
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(sample_triggers["completed_job"])
+
+    assert mock_slack.called, "Slack summary should still run when Jobber writeback fails"
+
+    inv = mock_db.execute(
+        "SELECT id FROM invoices ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert inv is not None
+    mapping = mock_db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name = 'jobber'",
+        (inv["id"],),
+    ).fetchone()
+    assert mapping is None
+
+    log = mock_db.execute(
+        "SELECT status, error_message FROM automation_log "
+        "WHERE action_name = 'create_jobber_invoice_writeback' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert log is not None
+    assert log["status"] == "failed"
+    assert "already been taken" in (log["error_message"] or "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -534,6 +656,89 @@ def test_duration_variance_not_flagged_within_20_percent(
     )
 
 
+@patch("automations.job_completion_flow.requests.post")
+def test_slack_summary_prefers_canonical_crew_name_over_assignees(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+    with mock_db:
+        mock_db.execute(
+            "INSERT INTO crews (id, name, zone) VALUES (%s, %s, %s)",
+            ("crew-a", "Crew A", "West Austin"),
+        )
+        mock_db.execute(
+            "UPDATE jobs SET crew_id = %s WHERE id = %s",
+            ("crew-a", "SS-JOB-0001"),
+        )
+
+    trigger = dict(sample_triggers["completed_job"])
+    trigger["jobber_assigned_users"] = [
+        {
+            "id": "user-1",
+            "name": "Claudia Ramirez",
+            "email": "claudia.ramirez@oviodigital.com",
+        }
+    ]
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(trigger)
+
+    text = mock_slack.call_args[0][2]
+    assert "Crew: Crew A" in text
+    assert "Claudia Ramirez" not in text
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_slack_summary_falls_back_to_assignee_names(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+    trigger = dict(sample_triggers["completed_job"])
+    trigger["crew"] = None
+    trigger["jobber_assigned_users"] = [
+        {
+            "id": "user-1",
+            "name": "Claudia Ramirez",
+            "email": "claudia.ramirez@oviodigital.com",
+        },
+        {
+            "id": "user-2",
+            "name": "Leticia Morales",
+            "email": "leticia.morales@oviodigital.com",
+        },
+    ]
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(trigger)
+
+    text = mock_slack.call_args[0][2]
+    assert "Crew: Claudia Ramirez, Leticia Morales" in text
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_slack_summary_falls_back_to_canonical_duration(
+    mock_post, mock_db, mock_clients, sample_triggers
+):
+    mock_post.return_value = _make_qbo_invoice_mock()
+    with mock_db:
+        mock_db.execute(
+            "UPDATE jobs SET duration_minutes_actual = %s WHERE id = %s",
+            (125, "SS-JOB-0001"),
+        )
+
+    trigger = dict(sample_triggers["completed_job"])
+    trigger["duration_minutes"] = None
+
+    auto = JobCompletionFlow(clients=mock_clients, db=mock_db, dry_run=False)
+    with patch("automations.base.post_slack_message") as mock_slack:
+        auto.run(trigger)
+
+    text = mock_slack.call_args[0][2]
+    assert "Duration: 125 min" in text
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Fix 7: unknown Jobber client logs a resolve_canonical_id/failed entry
 # ─────────────────────────────────────────────────────────────────────────────
@@ -571,3 +776,207 @@ def test_unknown_jobber_client_logs_warning(mock_post, mock_db, mock_clients):
     assert row is not None, "Expected a resolve_canonical_id log entry"
     assert row["status"] == "failed"
     assert "UNMAPPED-999" in (row["error_message"] or "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Missing QBO customer mapping → queued retry + failure-time alert
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seed_client_without_qbo(db, *, suffix="0090"):
+    """Client with jobber mapping but NO quickbooks mapping, plus a completed job."""
+    client_id = f"SS-CLIENT-{suffix}"
+    job_id = f"SS-JOB-{suffix}"
+    with db:
+        db.execute(
+            "INSERT INTO clients (id, client_type, first_name, last_name, email, status) "
+            "VALUES (%s, 'residential', 'No', 'Qbo', %s, 'active') ON CONFLICT DO NOTHING",
+            (client_id, f"noqbo{suffix}@example.com"),
+        )
+        db.execute(
+            "INSERT INTO jobs (id, client_id, service_type_id, scheduled_date, status, completed_at) "
+            "VALUES (%s, %s, 'std-residential', '2026-06-09', 'completed', '2026-06-09T15:41:00') "
+            "ON CONFLICT DO NOTHING",
+            (job_id, client_id),
+        )
+        for cid, etype, tool, tid in [
+            (client_id, "CLIENT", "jobber", f"jc-{suffix}"),
+            (job_id, "JOB", "jobber", f"jj-{suffix}"),
+        ]:
+            db.execute(
+                "INSERT INTO cross_tool_mapping (canonical_id, entity_type, tool_name, tool_specific_id) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (cid, etype, tool, tid),
+            )
+    return client_id, job_id
+
+
+def _pending_create_invoice_rows(db, job_id):
+    return db.execute(
+        "SELECT * FROM pending_actions "
+        "WHERE action_name = 'create_invoice' AND trigger_context LIKE %s",
+        (f'%"{job_id}"%',),
+    ).fetchall()
+
+
+@patch("simulation.error_reporter.report_error")
+@patch("automations.job_completion_flow.requests.post")
+def test_missing_qbo_mapping_queues_retry_and_alerts(
+    mock_post, mock_report, auto
+):
+    _, job_id = _seed_client_without_qbo(auto.db)
+    event = {
+        "job_id": "jj-0090",
+        "client_id": "jc-0090",
+        "service_type": "Standard Residential Clean",
+        "duration_minutes": 120,
+        "is_recurring": False,
+        "completed_at": "2026-06-09",
+    }
+
+    with patch("automations.base.post_slack_message"):
+        auto.run(event)
+
+    # No QBO invoice POST happened (mapping check precedes the HTTP call)
+    qbo_calls = [c for c in mock_post.call_args_list if "/invoice" in str(c)]
+    assert qbo_calls == []
+
+    # A delayed retry was queued exactly once
+    rows = _pending_create_invoice_rows(auto.db, job_id)
+    assert len(rows) == 1
+    assert json.loads(rows[0]["trigger_context"])["canonical_job_id"] == job_id
+
+    # The failure alerted at failure time
+    mock_report.assert_called_once()
+    assert mock_report.call_args.kwargs["tool_name"] == "quickbooks"
+
+    # And was logged as failed
+    log = auto.db.execute(
+        "SELECT status FROM automation_log "
+        "WHERE action_name = 'create_quickbooks_invoice' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert log["status"] == "failed"
+
+
+@patch("simulation.error_reporter.report_error")
+@patch("automations.job_completion_flow.requests.post")
+def test_missing_qbo_mapping_does_not_duplicate_pending(
+    mock_post, mock_report, auto
+):
+    _, job_id = _seed_client_without_qbo(auto.db)
+    event = {
+        "job_id": "jj-0090",
+        "client_id": "jc-0090",
+        "service_type": "Standard Residential Clean",
+        "is_recurring": False,
+        "completed_at": "2026-06-09",
+    }
+    with patch("automations.base.post_slack_message"):
+        auto.run(event)
+        auto.run(event)
+
+    assert len(_pending_create_invoice_rows(auto.db, job_id)) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# run_invoice_retry
+# ─────────────────────────────────────────────────────────────────────────────
+
+@patch("automations.job_completion_flow.requests.post")
+def test_run_invoice_retry_creates_invoice(mock_post, auto, sample_triggers):
+    mock_post.return_value = _make_qbo_invoice_mock(invoice_id="qbo-retry-777")
+
+    result = auto.run_invoice_retry(sample_triggers["completed_job"])
+
+    assert result == "qbo-retry-777"
+    row = auto.db.execute(
+        "SELECT id, job_id, status FROM invoices WHERE job_id = 'SS-JOB-0001'"
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "sent"
+    mapping = auto.db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = %s AND tool_name = 'quickbooks'",
+        (row["id"],),
+    ).fetchone()
+    assert mapping["tool_specific_id"] == "qbo-retry-777"
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_run_invoice_retry_skips_existing_invoice(mock_post, auto, sample_triggers):
+    with auto.db:
+        auto.db.execute(
+            "INSERT INTO invoices (id, client_id, job_id, amount, status, issue_date, due_date) "
+            "VALUES ('SS-INV-9001', 'SS-CLIENT-0001', 'SS-JOB-0001', 150.0, 'sent', "
+            "'2026-03-15', '2026-03-15')"
+        )
+
+    result = auto.run_invoice_retry(sample_triggers["completed_job"])
+
+    assert result == "SS-INV-9001"
+    mock_post.assert_not_called()
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_run_invoice_retry_raises_on_missing_mapping(mock_post, auto):
+    """Retry failures must raise so pending mode marks the action failed."""
+    from automations.utils.id_resolver import MappingNotFoundError
+    _seed_client_without_qbo(auto.db, suffix="0091")
+    event = {
+        "job_id": "jj-0091",
+        "client_id": "jc-0091",
+        "service_type": "Standard Residential Clean",
+        "is_recurring": False,
+        "completed_at": "2026-06-09",
+    }
+    with pytest.raises(MappingNotFoundError):
+        auto.run_invoice_retry(event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jobber writeback: numeric invoice number + retry heals missing writeback
+# ─────────────────────────────────────────────────────────────────────────────
+
+@patch("automations.job_completion_flow.requests.post")
+def test_writeback_invoice_number_is_numeric(mock_post, auto, mock_clients, sample_triggers):
+    """Jobber rejects non-numeric invoiceNumber values ('Invoice number can
+    only contain a number') — send only the digits of the SS-INV id."""
+    mock_post.return_value = _make_qbo_invoice_mock()
+
+    with patch("automations.base.post_slack_message"):
+        auto.run(sample_triggers["completed_job"])
+
+    writeback_calls = [
+        c for c in mock_clients.jobber.post.call_args_list
+        if "invoiceCreate" in (c.kwargs.get("json") or {}).get("query", "")
+    ]
+    assert writeback_calls, "expected a Jobber invoiceCreate writeback call"
+    inv_input = writeback_calls[0].kwargs["json"]["variables"]["input"]
+    assert inv_input["invoiceNumber"].isdigit(), (
+        f"invoiceNumber must be numeric, got {inv_input['invoiceNumber']!r}"
+    )
+
+
+@patch("automations.job_completion_flow.requests.post")
+def test_run_invoice_retry_heals_missing_writeback(
+    mock_post, auto, mock_clients, sample_triggers
+):
+    """Invoice already exists locally but the Jobber draft was never created
+    (e.g. the writeback failed): the retry must attempt only the writeback."""
+    with auto.db:
+        auto.db.execute(
+            "INSERT INTO invoices (id, client_id, job_id, amount, status, issue_date, due_date) "
+            "VALUES ('SS-INV-9002', 'SS-CLIENT-0001', 'SS-JOB-0001', 150.0, 'sent', "
+            "'2026-03-15', '2026-03-15')"
+        )
+    from automations.utils.id_resolver import register_mapping
+    register_mapping(auto.db, "SS-INV-9002", "quickbooks", "qbo-prev-1")
+
+    result = auto.run_invoice_retry(sample_triggers["completed_job"])
+
+    assert result == "SS-INV-9002"
+    mock_post.assert_not_called()  # no second QBO invoice
+    mapping = auto.db.execute(
+        "SELECT tool_specific_id FROM cross_tool_mapping "
+        "WHERE canonical_id = 'SS-INV-9002' AND tool_name = 'jobber'"
+    ).fetchone()
+    assert mapping is not None, "expected the retry to register the Jobber draft"

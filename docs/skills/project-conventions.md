@@ -33,7 +33,7 @@ In the simulation engine, there is no regeneration step. Data is created once, l
 - **Do NOT write one-off SQL patches** to fix simulation-generated records. This creates invisible divergence between what the code produces and what the database contains.
 - **The only acceptable SQL patches** are for historical data created by the Phase 2 seeding scripts, which cannot be regenerated without resetting all 8 tools.
 
-If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong amounts), the fix is: (1) fix the generator, (2) write a migration script that updates the affected records in Postgres AND the corresponding tool records via API, (3) commit the migration script under `scripts/archive/` so the fix is documented and reproducible.
+If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong amounts), the fix is: (1) fix the generator, (2) write a migration script that updates the affected records in PostgreSQL AND the corresponding tool records via API, (3) commit the migration script so the fix is documented and reproducible.
 
 ---
 
@@ -53,18 +53,16 @@ The automation runner handles these creations:
 The simulation must NOT create any of the above. It creates the upstream trigger (HubSpot contact, Pipedrive won status, Jobber completed status) and lets the runner handle the downstream creation.
 
 **Rule 3: Register mappings only for the tool you wrote to.**
-When the simulation creates a HubSpot SQL contact, it registers `link(canonical_id, "hubspot", hubspot_id)` only. It does NOT register a Pipedrive mapping. The absence of the Pipedrive mapping is how the runner detects new SQLs. If a Pipedrive mapping is registered prematurely, the runner skips the contact forever.
+When the simulation creates a HubSpot SQL contact, it registers `register_mapping(canonical_id, "hubspot", hubspot_id)` only. It does NOT register a Pipedrive mapping. The absence of the Pipedrive mapping is how the runner detects new SQLs. If a Pipedrive mapping is registered prematurely, the runner skips the contact forever.
 
 ---
 
 ## Import Paths
 
-**CRITICAL:** Confirm these against `SIMULATION_AUDIT.md` before writing any imports. The paths below reflect what CLAUDE.md documents, but the actual repo may differ.
-
 ```python
-# Database access
-from database.connection import get_connection, column_exists, table_exists, get_column_names
-from database.mappings import generate_id, link, lookup, reverse_lookup, find_unmapped
+# Database access (PostgreSQL via DATABASE_URL — NEVER import sqlite3)
+from database.connection import get_connection, column_exists, table_exists, get_column_names, date_subtract_sql
+from database.mappings import generate_id, register_mapping, get_tool_id, get_canonical_id, find_unmapped, bulk_register
 
 # Auth (CONFIRMED: use get_client exclusively)
 from auth import get_client
@@ -120,7 +118,7 @@ from simulation.error_reporter import report_error
 |------|---------|---------|
 | Canonical ID | `canonical_id` | `"SS-CLIENT-0047"` |
 | Tool-specific ID | `{tool}_id` | `hubspot_id`, `pipedrive_id`, `jobber_id` |
-| Database connection | `conn` | `with get_connection() as conn:` |
+| Database connection | `db` | `db = get_connection()` |
 | API session | `session` | `session = requests.Session()` |
 
 ---
@@ -131,7 +129,7 @@ Every runner, pusher, generator, and automation supports a `--dry-run` flag. Whe
 
 - Log what WOULD happen (at INFO level)
 - Do NOT make any API calls
-- Do NOT write to Postgres
+- Do NOT write to the database
 - Do NOT post to Slack
 - Return results as if the operation succeeded (for testing downstream logic)
 
@@ -206,117 +204,83 @@ except Exception as e:
 
 ## PostgreSQL Patterns
 
-### Get a Connection via `database.connection`
+The PostgreSQL migration is complete. All running code uses psycopg2 via `from database.connection import get_connection`. SQLite syntax (`?` placeholders, `datetime('now')`, `INSERT OR REPLACE`, `PRAGMA`, `sqlite_master`) must never appear in new code. See "Database Patterns (PostgreSQL)" in CLAUDE.md for the canonical rules.
+
+### Always Use Parameterized Queries (with %s)
 
 ```python
-from database.connection import get_connection
+# BAD: SQL injection risk, breaks on apostrophes in names
+db.execute(f"INSERT INTO clients (name) VALUES ('{name}')")
 
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute("SELECT canonical_id FROM clients WHERE status = %s", ("active",))
-        rows = cur.fetchall()
-    conn.commit()
-```
-
-`get_connection()` reads `DATABASE_URL` from the environment and returns a psycopg2 connection with `RealDictCursor` row factory. Never call `psycopg2.connect()` directly — go through `get_connection()` so connection settings stay consistent.
-
-### Always Use `%s` Placeholders (Never `?`)
-
-```python
-# BAD: SQL injection risk
-cur.execute(f"INSERT INTO clients (name) VALUES ('{name}')")
-
-# BAD: `?` is SQLite syntax, will raise on Postgres
-cur.execute("INSERT INTO clients (name) VALUES (?)", (name,))
+# BAD: SQLite placeholder — psycopg2 will raise
+db.execute("INSERT INTO clients (name) VALUES (?)", (name,))
 
 # GOOD
-cur.execute("INSERT INTO clients (name) VALUES (%s)", (name,))
+db.execute("INSERT INTO clients (name) VALUES (%s)", (name,))
 ```
 
-### Access Rows by Column Name
+### Row Access Is Dict-Style Only
 
-Rows from `get_connection()` are `RealDictRow` objects (dict-like). Never use integer indexing.
+Rows are `RealDictRow` objects. Integer indexing raises `KeyError`.
 
 ```python
 # BAD
-cur.execute("SELECT canonical_id, status FROM clients WHERE id = %s", (id,))
-row = cur.fetchone()
-canonical_id = row[0]  # breaks: RealDictRow is not indexed by position
+count = cursor.fetchone()[0]
 
 # GOOD
-canonical_id = row["canonical_id"]
-
-# For scalar queries, alias the column:
-cur.execute("SELECT COUNT(*) AS cnt FROM clients")
-count = cur.fetchone()["cnt"]
+row = db.execute("SELECT COUNT(*) AS cnt FROM clients").fetchone()
+count = row["cnt"]
 ```
 
-### Commit After Writes; Rollback on Failure
+### Always Commit After Writes
 
 ```python
-with get_connection() as conn:
-    try:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO clients ...", (...))
-            cur.execute("INSERT INTO cross_tool_mapping ...", (...))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+db.execute("INSERT INTO ...", (...))
+db.commit()  # don't forget this
 ```
 
-The `with` block on the connection does NOT auto-commit. Always call `conn.commit()` explicitly or the writes are lost when the block exits.
-
-### Upserts: `ON CONFLICT`
+### Wrap Multi-Step Operations in Try/Rollback
 
 ```python
-# BAD: SQLite-only syntax
-cur.execute("INSERT OR REPLACE INTO ... VALUES (...)")
-cur.execute("INSERT OR IGNORE INTO ... VALUES (...)")
-
-# GOOD: Postgres
-cur.execute("""
-    INSERT INTO cross_tool_mapping (canonical_id, tool_name, tool_id)
-    VALUES (%s, %s, %s)
-    ON CONFLICT (canonical_id, tool_name) DO UPDATE SET tool_id = EXCLUDED.tool_id
-""", (canonical_id, tool_name, tool_id))
+try:
+    db.execute("INSERT INTO clients ...", (...))
+    db.execute("INSERT INTO cross_tool_mapping ...", (...))
+    db.commit()
+except Exception:
+    db.rollback()
+    raise
 ```
 
-### Dates and Times: Use SQL Functions Where Possible
+### Close Connections
 
 ```python
-# Current timestamp (server-side, timezone-aware)
-cur.execute("INSERT INTO events (created_at) VALUES (CURRENT_TIMESTAMP)")
-
-# Current date
-cur.execute("SELECT * FROM jobs WHERE scheduled_date = CURRENT_DATE")
-
-# Date arithmetic
-cur.execute("SELECT * FROM invoices WHERE due_date < CURRENT_DATE - INTERVAL '60 days'")
-
-# Or use the helper for parameterized intervals
-from database.connection import date_subtract_sql
-cur.execute(f"SELECT * FROM invoices WHERE due_date < {date_subtract_sql(60)}")
+db = get_connection()
+try:
+    # do work
+finally:
+    db.close()
 ```
 
-When a timestamp needs to come from Python (e.g., a value from an upstream tool), pass a `datetime` object — psycopg2 adapts it correctly:
+### Date/Time Patterns
+
+- SQL current timestamp: `CURRENT_TIMESTAMP` (never `datetime('now')`)
+- SQL current date: `CURRENT_DATE`
+- Date arithmetic: `CURRENT_DATE - INTERVAL '60 days'` or `date_subtract_sql(60)` from `database.connection`
+- Upserts: `INSERT ... ON CONFLICT ... DO NOTHING` / `DO UPDATE SET`
+- Python-side timestamps stored as ISO 8601 strings in UTC:
 
 ```python
-from datetime import datetime, timezone
-cur.execute("INSERT INTO events (created_at) VALUES (%s)", (datetime.now(timezone.utc),))
+from datetime import datetime, date
+now = datetime.utcnow().isoformat()  # "2026-03-27T14:30:00.000000"
+today = date.today().isoformat()     # "2026-03-27"
 ```
 
-### Schema Inspection: Don't Use `PRAGMA` or `sqlite_master`
+### Schema Introspection
+
+Never use `PRAGMA` or query `sqlite_master`. Use the helpers:
 
 ```python
-# BAD: SQLite-only
-cur.execute("PRAGMA table_info(clients)")
-cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-
-# GOOD: use helpers from database.connection
 from database.connection import column_exists, table_exists, get_column_names
-if not column_exists("clients", "churn_reason"):
-    cur.execute("ALTER TABLE clients ADD COLUMN churn_reason TEXT")
 ```
 
 ---
@@ -356,7 +320,7 @@ RUN_INTEGRATION=1 python tests/test_simulation.py -v
 
 1. **Correctness:** Does the code produce the right output?
 2. **Narrative consistency:** Do the numbers match the business story? (Less important for simulation tests since we're generating forward, but still relevant for the intelligence layer.)
-3. **Cross-tool consistency:** Does the Postgres record match the tool record?
+3. **Cross-tool consistency:** Does the PostgreSQL record match the tool record?
 4. **Error handling:** Does the code handle failures gracefully?
 
 ### Test Data Cleanup
@@ -367,7 +331,7 @@ Integration tests that create real records in SaaS tools should clean up after t
 def test_create_and_delete_contact(self):
     # Create
     result = gen.execute_one()
-    hubspot_id = lookup(result.canonical_id, "hubspot")
+    hubspot_id = get_tool_id(result.canonical_id, "hubspot")
 
     # Verify
     assert hubspot_id is not None
@@ -487,7 +451,7 @@ Add deal progression and won-deal completion (Step 3)
 Wire error reporter to Slack #automation-failure (Step 8)
 ```
 
-Do not commit `.env` or token JSON files (`.jobber_tokens.json`, `.quickbooks_tokens.json`, `token.json`). These are already in `.gitignore`.
+Do not commit `.env`, token JSON files, or `sparkle_shine.db`. These are already in `.gitignore`.
 
 ---
 

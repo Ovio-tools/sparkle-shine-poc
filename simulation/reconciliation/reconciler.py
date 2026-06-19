@@ -271,11 +271,15 @@ class Reconciler:
         if count > 20:
             id_list += f", ... (+{count - 20} more)"
 
+        queued = self._queue_invoice_retries(job_ids)
+
         description = (
             f"{count} completed job(s) from yesterday have no invoices. "
             f"The Jobber-to-QuickBooks automation may have missed them. "
             f"Job IDs: {id_list}"
         )
+        if queued:
+            description += f" ({queued} queued for automatic retry)"
 
         finding = Finding(
             category="reconciliation_automation_gap",
@@ -299,13 +303,64 @@ class Reconciler:
                     "details": (
                         f"{count} completed jobs from yesterday don't have invoices.\n"
                         f"The Jobber-to-QuickBooks automation may have missed them.\n"
-                        f"Job IDs: {id_list}"
+                        f"Job IDs: {id_list}\n"
+                        f"{queued} queued for automatic retry via pending_actions."
                     ),
                 },
                 dry_run=self.dry_run,
             )
 
         return [finding]
+
+    def _queue_invoice_retries(self, job_ids: list[str]) -> int:
+        """Queue a create_invoice pending action for each uninvoiced job.
+
+        Turns the health check from detector into healer: the runner's
+        PENDING mode re-attempts the invoice on its next cycle. Deduped
+        against already-pending retries so the daily sweep doesn't stack
+        duplicates. Jobs that cannot be invoiced (e.g. unresolved commercial
+        pricing) fail their retry and are re-queued the next day — the same
+        cadence as the pre-existing daily alert. Never raises; returns the
+        number of newly queued retries.
+        """
+        if self.dry_run or not job_ids:
+            return 0
+
+        queued = 0
+        now_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            conn = self._connect()
+            try:
+                for job_id in job_ids:
+                    already = conn.execute(
+                        "SELECT 1 FROM pending_actions "
+                        "WHERE action_name = 'create_invoice' "
+                        "AND status = 'pending' AND trigger_context LIKE %s",
+                        (f'%"{job_id}"%',),
+                    ).fetchone()
+                    if already:
+                        continue
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO pending_actions "
+                            "(automation_name, action_name, trigger_context, execute_after) "
+                            "VALUES (%s, %s, %s, %s)",
+                            (
+                                "ReconciliationHealer",
+                                "create_invoice",
+                                json.dumps({"canonical_job_id": job_id}),
+                                now_str,
+                            ),
+                        )
+                    queued += 1
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error("Could not queue invoice retries: %s", exc)
+        if queued:
+            logger.info("Queued %d create_invoice retr%s via pending_actions.",
+                        queued, "y" if queued == 1 else "ies")
+        return queued
 
     # ------------------------------------------------------------------
     # Per-tool checks
