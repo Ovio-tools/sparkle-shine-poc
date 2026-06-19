@@ -115,7 +115,7 @@ Every insight in the report (except pure factual statements like "revenue was $3
 **High confidence (include in report, state directly):**
 The insight is backed by concrete data from multiple consistent sources, covers a sufficient time window (2+ weeks for trends), and has a clear causal mechanism.
 
-Example: "Referral clients have a 14% churn rate versus 28% for Google Ads clients over the trailing 90 days." This is a factual comparison across a meaningful window, sourced from verifiable records in HubSpot and the SQLite client table.
+Example: "Referral clients have a 14% churn rate versus 28% for Google Ads clients over the trailing 90 days." This is a factual comparison across a meaningful window, sourced from verifiable records in HubSpot and the PostgreSQL clients table.
 
 **Medium confidence (include with qualifier):**
 The insight is backed by data but the sample is small, the timeframe is short, or the causal mechanism is unclear. Present it, but flag the uncertainty.

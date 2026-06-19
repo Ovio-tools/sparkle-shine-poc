@@ -33,13 +33,13 @@ In the simulation engine, there is no regeneration step. Data is created once, l
 - **Do NOT write one-off SQL patches** to fix simulation-generated records. This creates invisible divergence between what the code produces and what the database contains.
 - **The only acceptable SQL patches** are for historical data created by the Phase 2 seeding scripts, which cannot be regenerated without resetting all 8 tools.
 
-If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong amounts), the fix is: (1) fix the generator, (2) write a migration script that updates the affected records in SQLite AND the corresponding tool records via API, (3) commit the migration script so the fix is documented and reproducible.
+If a batch of bad simulation data needs correction (e.g., 50 invoices with wrong amounts), the fix is: (1) fix the generator, (2) write a migration script that updates the affected records in PostgreSQL AND the corresponding tool records via API, (3) commit the migration script so the fix is documented and reproducible.
 
 ---
 
 ## Automation Boundary Rules (L21)
 
-The simulation engine and the automation runner (`automations/runner.py`) share the same SaaS tools and SQLite database. These rules prevent them from creating duplicate records or desynchronizing state.
+The simulation engine and the automation runner (`automations/runner.py`) share the same SaaS tools and PostgreSQL database. These rules prevent them from creating duplicate records or desynchronizing state.
 
 **Rule 1: Never write to the `poll_state` table.**
 The automation runner uses `poll_state` timestamps to track what it has already processed. If the simulation writes to `poll_state`, the runner's watermarks desync -- it will either skip events or reprocess old ones. The simulation injects events at the source tool's API and lets the runner discover them through normal polling.
@@ -53,18 +53,16 @@ The automation runner handles these creations:
 The simulation must NOT create any of the above. It creates the upstream trigger (HubSpot contact, Pipedrive won status, Jobber completed status) and lets the runner handle the downstream creation.
 
 **Rule 3: Register mappings only for the tool you wrote to.**
-When the simulation creates a HubSpot SQL contact, it registers `link(canonical_id, "hubspot", hubspot_id)` only. It does NOT register a Pipedrive mapping. The absence of the Pipedrive mapping is how the runner detects new SQLs. If a Pipedrive mapping is registered prematurely, the runner skips the contact forever.
+When the simulation creates a HubSpot SQL contact, it registers `register_mapping(canonical_id, "hubspot", hubspot_id)` only. It does NOT register a Pipedrive mapping. The absence of the Pipedrive mapping is how the runner detects new SQLs. If a Pipedrive mapping is registered prematurely, the runner skips the contact forever.
 
 ---
 
 ## Import Paths
 
-**CRITICAL:** Confirm these against `SIMULATION_AUDIT.md` before writing any imports. The paths below reflect what CLAUDE.md documents, but the actual repo may differ.
-
 ```python
-# Database access
-from database.schema import ...          # NOT from db.schema
-from database.mappings import generate_id, link, lookup, reverse_lookup, find_unmapped
+# Database access (PostgreSQL via DATABASE_URL — NEVER import sqlite3)
+from database.connection import get_connection, column_exists, table_exists, get_column_names, date_subtract_sql
+from database.mappings import generate_id, register_mapping, get_tool_id, get_canonical_id, find_unmapped, bulk_register
 
 # Auth (CONFIRMED: use get_client exclusively)
 from auth import get_client
@@ -120,7 +118,7 @@ from simulation.error_reporter import report_error
 |------|---------|---------|
 | Canonical ID | `canonical_id` | `"SS-CLIENT-0047"` |
 | Tool-specific ID | `{tool}_id` | `hubspot_id`, `pipedrive_id`, `jobber_id` |
-| Database connection | `db` | `db = sqlite3.connect(self.db_path)` |
+| Database connection | `db` | `db = get_connection()` |
 | API session | `session` | `session = requests.Session()` |
 
 ---
@@ -131,7 +129,7 @@ Every runner, pusher, generator, and automation supports a `--dry-run` flag. Whe
 
 - Log what WOULD happen (at INFO level)
 - Do NOT make any API calls
-- Do NOT write to SQLite
+- Do NOT write to the database
 - Do NOT post to Slack
 - Return results as if the operation succeeded (for testing downstream logic)
 
@@ -204,16 +202,34 @@ except Exception as e:
 
 ---
 
-## SQLite Patterns
+## PostgreSQL Patterns
 
-### Always Use Parameterized Queries
+The PostgreSQL migration is complete. All running code uses psycopg2 via `from database.connection import get_connection`. SQLite syntax (`?` placeholders, `datetime('now')`, `INSERT OR REPLACE`, `PRAGMA`, `sqlite_master`) must never appear in new code. See "Database Patterns (PostgreSQL)" in CLAUDE.md for the canonical rules.
+
+### Always Use Parameterized Queries (with %s)
 
 ```python
 # BAD: SQL injection risk, breaks on apostrophes in names
 db.execute(f"INSERT INTO clients (name) VALUES ('{name}')")
 
-# GOOD
+# BAD: SQLite placeholder — psycopg2 will raise
 db.execute("INSERT INTO clients (name) VALUES (?)", (name,))
+
+# GOOD
+db.execute("INSERT INTO clients (name) VALUES (%s)", (name,))
+```
+
+### Row Access Is Dict-Style Only
+
+Rows are `RealDictRow` objects. Integer indexing raises `KeyError`.
+
+```python
+# BAD
+count = cursor.fetchone()[0]
+
+# GOOD
+row = db.execute("SELECT COUNT(*) AS cnt FROM clients").fetchone()
+count = row["cnt"]
 ```
 
 ### Always Commit After Writes
@@ -238,43 +254,33 @@ except Exception:
 ### Close Connections
 
 ```python
-db = sqlite3.connect(self.db_path)
+db = get_connection()
 try:
     # do work
 finally:
     db.close()
 ```
 
-### Date/Time Storage
+### Date/Time Patterns
 
-Store all timestamps as ISO 8601 strings in UTC:
+- SQL current timestamp: `CURRENT_TIMESTAMP` (never `datetime('now')`)
+- SQL current date: `CURRENT_DATE`
+- Date arithmetic: `CURRENT_DATE - INTERVAL '60 days'` or `date_subtract_sql(60)` from `database.connection`
+- Upserts: `INSERT ... ON CONFLICT ... DO NOTHING` / `DO UPDATE SET`
+- Python-side timestamps stored as ISO 8601 strings in UTC:
 
 ```python
-from datetime import datetime
+from datetime import datetime, date
 now = datetime.utcnow().isoformat()  # "2026-03-27T14:30:00.000000"
+today = date.today().isoformat()     # "2026-03-27"
 ```
 
-Store dates as `YYYY-MM-DD`:
+### Schema Introspection
+
+Never use `PRAGMA` or query `sqlite_master`. Use the helpers:
 
 ```python
-from datetime import date
-today = date.today().isoformat()  # "2026-03-27"
-```
-
-### Avoid SQLite-Specific Functions (Railway Prep)
-
-These will break when migrating to PostgreSQL:
-
-```python
-# AVOID (SQLite-specific)
-db.execute("SELECT datetime('now')")
-db.execute("INSERT OR REPLACE INTO ...")
-
-# USE INSTEAD
-from datetime import datetime
-now = datetime.utcnow().isoformat()
-db.execute("INSERT INTO ... VALUES (...)", (...))
-# Handle upserts with: SELECT first, then INSERT or UPDATE
+from database.connection import column_exists, table_exists, get_column_names
 ```
 
 ---
@@ -314,7 +320,7 @@ RUN_INTEGRATION=1 python tests/test_simulation.py -v
 
 1. **Correctness:** Does the code produce the right output?
 2. **Narrative consistency:** Do the numbers match the business story? (Less important for simulation tests since we're generating forward, but still relevant for the intelligence layer.)
-3. **Cross-tool consistency:** Does the SQLite record match the tool record?
+3. **Cross-tool consistency:** Does the PostgreSQL record match the tool record?
 4. **Error handling:** Does the code handle failures gracefully?
 
 ### Test Data Cleanup
@@ -325,7 +331,7 @@ Integration tests that create real records in SaaS tools should clean up after t
 def test_create_and_delete_contact(self):
     # Create
     result = gen.execute_one()
-    hubspot_id = lookup(result.canonical_id, "hubspot")
+    hubspot_id = get_tool_id(result.canonical_id, "hubspot")
 
     # Verify
     assert hubspot_id is not None
