@@ -79,7 +79,7 @@ IMPORTANT: All new code must use PostgreSQL via psycopg2. SQLite still appears i
 ### Troubleshooting Source Of Truth
 - For investigation and troubleshooting, default first to GitHub-tracked repository state for intended behavior, then to Railway for live runtime truth.
 - For production or production-like diagnosis, verify Railway first: Railway Postgres for data, Railway env for config, Railway logs/runtime for auth and tool behavior.
-- Use local PostgreSQL or SQLite only for local-dev reproduction, tests, seeding flows, or when the prompt is explicitly about local state.
+- Use local PostgreSQL only for local-dev reproduction, tests, seeding flows, or when the prompt is explicitly about local state.
 - If local state disagrees with Railway, assume local drift until Railway proves otherwise.
 - Preferred sequence for diagnosis: `railway status` -> `railway service status --all` -> `railway logs --service <name> --environment production` -> `railway ssh --service <name> --environment production` or `railway connect Postgres`, depending on whether runtime or DB verification is needed.
 
@@ -128,7 +128,8 @@ sparkle-shine-poc/
 ├── services/        # token_keeper.py (Jobber OAuth refresh — sole owner of rotating refresh tokens)
 ├── setup/           # configure_tools.py, populate_workspace.py (one-time tool provisioning)
 ├── demo/            # audit/, fixes/, hardening/, scenarios/, tuning/, walkthrough/, smoke_test.py
-├── scripts/         # migrate_to_postgres.py, extract_railway_env.py, backfill_pipedrive_orgs.py, etc.
+├── scripts/         # extract_railway_env.py, pg_health_check.py, railway_db.py, setup_*.py, start_*.sh, etc.
+│                    #   One-shot remediation/migration scripts live in scripts/archive/.
 ├── tests/           # test_phase{1,2,4}.py, test_phase5_operations.py, test_simulation.py, test_deals.py,
 │                    #   test_error_reporter.py, smoke_test_phase3.py, test_automations/ (7 module tests)
 ├── docs/skills/     # 5 skill docs for Claude Code sessions
