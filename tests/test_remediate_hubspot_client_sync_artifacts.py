@@ -1,4 +1,4 @@
-from scripts import remediate_hubspot_client_sync_artifacts as remediation
+from scripts.archive import remediate_hubspot_client_sync_artifacts as remediation
 
 
 def _insert_lead(conn, lead_id: str, email: str) -> None:
