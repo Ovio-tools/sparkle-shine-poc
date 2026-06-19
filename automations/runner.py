@@ -217,6 +217,19 @@ def run_poll(clients, db, dry_run: bool) -> dict:
 
 _LEAD_LEAK_SENTINEL = os.path.join(_LOGS_DIR, ".lead_leak_last_run")
 _OVERDUE_INVOICE_SENTINEL = os.path.join(_LOGS_DIR, ".overdue_invoice_last_run")
+_HUBSPOT_PRUNE_SENTINEL = os.path.join(_LOGS_DIR, ".hubspot_prune_last_run")
+
+
+def _should_run_hubspot_prune() -> bool:
+    """Return True if HubSpotContactPruner has not run successfully in the last 24 hours."""
+    if not os.path.exists(_HUBSPOT_PRUNE_SENTINEL):
+        return True
+    return (time.time() - os.path.getmtime(_HUBSPOT_PRUNE_SENTINEL)) >= 86400
+
+
+def _mark_hubspot_prune_ran() -> None:
+    """Touch the sentinel file to record that HubSpotContactPruner just completed."""
+    open(_HUBSPOT_PRUNE_SENTINEL, "w").close()
 
 
 def _should_run_lead_leak() -> bool:
@@ -284,6 +297,25 @@ def run_scheduled(clients, db, dry_run: bool) -> dict:
         logger.info("Skipping overdue invoice scan (already ran this week)")
     else:
         logger.info("Skipping overdue invoice scan (only runs on Mondays)")
+
+    time.sleep(0.5)
+
+    # HubSpot Contact Pruner -- at most once per 24 hours
+    if _should_run_hubspot_prune():
+        logger.info("Running HubSpot Contact Pruner...")
+        results["processed"] += 1
+        try:
+            from automations.hubspot_contact_pruner import HubSpotContactPruner
+            HubSpotContactPruner(clients, db, dry_run).run()
+            results["succeeded"] += 1
+            if not dry_run:
+                _mark_hubspot_prune_ran()
+        except Exception as e:
+            results["failed"] += 1
+            logger.error("HubSpot contact prune failed: %s", e)
+            report_error(e, tool_name="hubspot", context="HubSpot contact pruning", dry_run=dry_run)
+    else:
+        logger.info("Skipping HubSpot Contact Pruner (ran within the last 24 hours)")
 
     return results
 
@@ -536,6 +568,7 @@ def _run_health_check() -> None:
     _sentinels = [
         (_LEAD_LEAK_SENTINEL,       "Lead leak sentinel",       48 * 3600),
         (_OVERDUE_INVOICE_SENTINEL, "Overdue invoice sentinel", 14 * 86400),
+        (_HUBSPOT_PRUNE_SENTINEL,   "HubSpot prune sentinel",   48 * 3600),
     ]
     for sentinel_path, name, max_age_seconds in _sentinels:
         if not os.path.exists(sentinel_path):
@@ -559,6 +592,7 @@ def _run_health_check() -> None:
         ("automations.lead_leak_detection",     "LeadLeakDetection"),
         ("automations.overdue_invoice",         "OverdueInvoiceEscalation"),
         ("automations.hubspot_qualified_sync",       "HubSpotQualifiedSync"),
+        ("automations.hubspot_contact_pruner",  "HubSpotContactPruner"),
     ]
     for module_path, class_name in _AUTOMATION_IMPORTS:
         try:

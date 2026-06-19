@@ -143,6 +143,40 @@ def register_mapping(
         conn.close()
 
 
+def delete_mapping_on_conn(conn, canonical_id: str, tool_name: str) -> int:
+    """Delete the cross_tool_mapping row for (canonical_id, tool_name).
+
+    Connection-owned variant so the delete can be grouped in the caller's
+    transaction (e.g. alongside a HubSpot archive). Returns the number of rows
+    deleted (0 if no such mapping existed). The caller owns the ``with conn:``.
+
+    Removing a tool mapping does NOT touch the canonical entity row (clients /
+    leads); it only severs the pointer to that tool's copy of the record.
+    """
+    cursor = conn.execute(
+        "DELETE FROM cross_tool_mapping WHERE canonical_id = %s AND tool_name = %s",
+        (canonical_id, tool_name),
+    )
+    return cursor.rowcount
+
+
+def delete_mapping(
+    canonical_id: str,
+    tool_name: str,
+    db_path: str = "sparkle_shine.db",
+) -> int:
+    """Delete the cross_tool_mapping row for (canonical_id, tool_name).
+
+    Self-connecting variant. Returns the number of rows deleted.
+    """
+    conn = get_connection(db_path)
+    try:
+        with conn:
+            return delete_mapping_on_conn(conn, canonical_id, tool_name)
+    finally:
+        conn.close()
+
+
 def get_tool_id(
     canonical_id: str,
     tool_name: str,
