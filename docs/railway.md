@@ -27,3 +27,28 @@ a dashboard start command — the combination causes build failures.
 - `sales-outreach` was moved from `*/5` to `*/30` as a topic-spam mitigation.
   The root cause has since been fixed; the slower cadence is the intended
   current state. Restoring `*/5` is a deliberate decision, not a cleanup.
+
+## Pausing and resuming the project
+
+Full runbook, including the 2026-05-01 auto-redeploy incident write-up:
+`docs/operations/archive/2026-05-01-railway-pause-state.md`. Rules learned from it:
+
+- A Railway pause has two layers: deployment state (remove worker deployments,
+  clear cron schedules) **and** auto-deploy triggers (the GitHub source
+  connection). Any push to `main` redeploys every connected service — workers
+  come back to life and cron services run their start command once. Disconnect
+  the source (or switch the Source branch to a frozen branch) on **all six**
+  compute services *before* pushing anything.
+- Stop `simulation-engine` before clearing the `automation-runner` schedule, and
+  restore `automation-runner` before redeploying `simulation-engine`. Otherwise
+  the engine's daily reconciliation sweep alerts on un-invoiced jobs.
+- Prefer leaving `token-keeper` running through a pause: it only refreshes the
+  Jobber token, and keeping it up avoids the Jobber re-OAuth on resume.
+- `simulation/checkpoint.json` is container-local. Removing a deployment
+  discards it and the engine restarts fresh at today's date — there is no
+  "resume from checkpoint" on Railway.
+- OAuth flows run locally write to whatever `DATABASE_URL` points at. Set it to
+  the Postgres service's `DATABASE_PUBLIC_URL` when re-authorising for Railway.
+- No kill-switch env var exists yet. Adding one to the four entry points
+  (`simulation.engine`, `automations.runner`, `intelligence.runner`,
+  `automation_07_sales_outreach`) would turn a pause into a variable flip.

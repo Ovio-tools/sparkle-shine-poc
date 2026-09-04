@@ -4,7 +4,9 @@
 
 **Goal:** Bring the Sparkle & Shine POC out of the 2026-05-01 Railway pause and back to full production, with a staged rollout that limits blast radius if a token has expired or a service comes up dirty.
 
-**Architecture:** Operational restart, not code change. Follows the resume runbook in [docs/operations/2026-05-01-railway-pause-state.md](../../operations/2026-05-01-railway-pause-state.md), adapted for: (a) 24-day pause (Jobber near, but under, the ~30-day re-OAuth threshold), (b) unknown Google OAuth publication status, (c) unknown GitHub-disconnect state for cron services, (d) staged 24–48h resume cadence (workers + automation-runner today; intelligence + sales-outreach after a clean soak).
+**Architecture:** Operational restart, not code change. Follows the resume runbook in [docs/operations/2026-05-01-railway-pause-state.md](../../operations/archive/2026-05-01-railway-pause-state.md), adapted for: (a) 24-day pause (Jobber near, but under, the ~30-day re-OAuth threshold), (b) unknown Google OAuth publication status, (c) unknown GitHub-disconnect state for cron services, (d) staged 24–48h resume cadence (workers + automation-runner today; intelligence + sales-outreach after a clean soak).
+
+> **Status (2026-09-01):** This plan was evidently executed around 2026-05-25/26 (see git history), but "Phase 0 findings" was never filled in and Phase 8 (archive the pause runbook) was never done. Factual corrections applied 2026-09-01: checkpoint expectation and `#automation-failure` channel ID in Task 3.2, OAuth entry points and `DATABASE_URL` target in Phase 1, deprecated CLI command. For any future resume, the pause runbook's corrected order (restore `automation-runner` **before** redeploying `simulation-engine`) supersedes the Phase 3 → Phase 4 order here.
 
 **Tech Stack:** Railway CLI (`railway`), Railway dashboard (manual UI steps for cron schedules and GitHub source), Postgres via `railway connect Postgres`, local OAuth flows in `auth/jobber_auth.py` / `auth/quickbooks_auth.py` / `auth/google_auth.py`, Slack monitoring (`#automation-failure`, `#daily-briefing`).
 
@@ -21,15 +23,15 @@
 
 This plan is operational; no source files are created or modified. Artifacts produced:
 
-- **Modify (later, in Phase 8):** [docs/operations/2026-05-01-railway-pause-state.md](../../operations/2026-05-01-railway-pause-state.md) — moved to `docs/operations/archive/` once resume is verified for 2 consecutive days.
+- **Modify (later, in Phase 8):** [docs/operations/2026-05-01-railway-pause-state.md](../../operations/archive/2026-05-01-railway-pause-state.md) — moved to `docs/operations/archive/` once resume is verified for 2 consecutive days.
 - **Read-only references:**
-  - [docs/operations/2026-05-01-railway-pause-state.md](../../operations/2026-05-01-railway-pause-state.md) — the canonical runbook this plan adapts
+  - [docs/operations/2026-05-01-railway-pause-state.md](../../operations/archive/2026-05-01-railway-pause-state.md) — the canonical runbook this plan adapts
   - [CLAUDE.md](../../../CLAUDE.md) — Railway services table, troubleshooting source-of-truth rules
   - [auth/jobber_auth.py](../../../auth/jobber_auth.py), [auth/quickbooks_auth.py](../../../auth/quickbooks_auth.py), [auth/google_auth.py](../../../auth/google_auth.py) — OAuth flows
   - [config/tool_ids.json](../../../config/tool_ids.json) — Slack channel IDs for monitoring
-  - [simulation/engine.py](../../../simulation/engine.py) — checkpoint resume behavior (lines around `:100-101` per pause doc)
+  - [simulation/engine.py](../../../simulation/engine.py) — checkpoint behaviour: `simulation/checkpoint.json` is container-local and does not survive a removed deployment, so there is nothing to resume from (see pause doc Resume Step 5)
 
-**Why no code:** Per the [Simulation Data Integrity Rule (L5)](../../skills/project-conventions.md), the simulation engine resumes from its Postgres checkpoint with no regeneration step. Stale simulated data from the 2026-05-01 to 2026-05-04 auto-redeploy incident is documented and intentionally left in place.
+**Why no code:** Per the [Simulation Data Integrity Rule (L5)](../../skills/project-conventions.md), the simulation engine starts a fresh day from `date.today()` on redeploy (its file checkpoint does not survive a removed deployment) and there is no regeneration step. Stale simulated data from the 2026-05-01 to 2026-05-04 auto-redeploy incident is documented and intentionally left in place.
 
 ---
 
@@ -52,10 +54,10 @@ Expected: project `sparkle-shine-poc`, environment `production`. If not linked, 
 - [ ] **Step 2: Capture service inventory**
 
 ```bash
-railway service status --all
+railway service list   # `railway service status --all` is deprecated
 ```
 
-Expected: 6 services + Postgres. Compare against the table in [docs/operations/2026-05-01-railway-pause-state.md#service-inventory-as-captured-2026-05-01](../../operations/2026-05-01-railway-pause-state.md). Note any service whose status has drifted from the pause snapshot.
+Expected: 6 services + Postgres. Compare against the table in [docs/operations/2026-05-01-railway-pause-state.md#service-inventory-as-captured-2026-05-01](../../operations/archive/2026-05-01-railway-pause-state.md). Note any service whose status has drifted from the pause snapshot.
 
 - [ ] **Step 3: Tail the most recent logs on each compute service**
 
@@ -155,10 +157,10 @@ Expected: `200` and a JSON snippet with the company name. If `401`, the access t
 - [ ] **Step 2: If a full re-OAuth is required, run the local QBO flow**
 
 ```bash
-python -m auth.quickbooks_auth
+DATABASE_URL="$DATABASE_PUBLIC_URL" python -c "from auth.quickbooks_auth import run_initial_auth; run_initial_auth()"
 ```
 
-Follow the OAuth redirect, paste the callback URL when prompted. Token is written to `.quickbooks_tokens.json` AND `oauth_tokens` (the token store is dual-write).
+`auth/quickbooks_auth.py` has no `__main__` — call `run_initial_auth()` directly; the browser callback lands on `localhost:8020`. The token store dual-writes to `.quickbooks_tokens.json` and to `oauth_tokens` on **whatever `DATABASE_URL` points at** — set it to the Railway Postgres public URL (`DATABASE_PUBLIC_URL` on the Postgres service) or the token never reaches production.
 
 - [ ] **Step 3: Verify token landed in production Postgres**
 
@@ -196,10 +198,10 @@ Expected: `200` with `{"data": {"account": {"name": "..."}}}`. If `401`, the ref
 - [ ] **Step 2: If 401, run the local Jobber OAuth flow**
 
 ```bash
-python -m auth.jobber_auth
+DATABASE_URL="$DATABASE_PUBLIC_URL" python -m auth.jobber_auth
 ```
 
-Follow the browser flow; the callback writes new tokens to `.jobber_tokens.json` and `oauth_tokens`.
+Follow the browser flow (callback on `localhost:8019`); the flow writes new tokens to `.jobber_tokens.json` and to `oauth_tokens` on whatever `DATABASE_URL` points at — use the Railway public URL. `JOBBER_TOKEN_KEEPER_ENABLED` must be unset locally.
 
 - [ ] **Step 3: Verify in production Postgres**
 
@@ -241,10 +243,12 @@ Expected: a dict containing the OAuth account email. If it raises a `RefreshErro
 - [ ] **Step 3: Run the local Google OAuth flow**
 
 ```bash
-python -m auth.google_auth
+python scripts/railway_db.py clear-token google   # needs DATABASE_PUBLIC_URL exported
+rm -f token.json
+DATABASE_URL="$DATABASE_PUBLIC_URL" python -c "from auth.google_auth import get_google_credentials; get_google_credentials()"
 ```
 
-Follow the browser consent; new tokens land in `token.json` and `oauth_tokens`.
+`auth/google_auth.py` has no `__main__`, and `get_google_credentials()` raises on a failed refresh rather than falling through to the consent screen — so the stored token (DB row, `token.json`, and any `GOOGLE_REFRESH_TOKEN` env var) must be cleared first. Follow the browser consent (callback on `localhost:8025`); new tokens land in `token.json` and `oauth_tokens`.
 
 - [ ] **Step 4: Verify in production Postgres**
 
@@ -351,7 +355,7 @@ SELECT tool_name, updated_at FROM oauth_tokens WHERE tool_name = 'jobber';
 railway logs --service simulation-engine --environment production -f
 ```
 
-Expected: a "Loaded checkpoint" or equivalent message referencing a date around 2026-05-04 (the last day the workers ran during the incident), then normal tick output. The engine should **not** start from 2026-05-01.
+Expected: **no** "Resumed from checkpoint" line. The checkpoint (`simulation/checkpoint.json`) lived in the container that was removed on 2026-05-04, so `load_checkpoint()` finds nothing and the engine starts a fresh day at today's date, then normal tick output. The gap since 2026-05-04 is not backfilled (see Out of scope). A checkpoint message referencing 2026-05-04 would actually be a surprise worth investigating.
 
 - [ ] **Step 3: Watch for ~5 minutes**
 
@@ -359,7 +363,7 @@ Confirm at least one full tick cycle completes without errors. If `#automation-f
 
 - [ ] **Step 4: Spot-check `#automation-failure` in Slack**
 
-Channel ID `C0AML3Q8PSM` resolved from the [pause-time tool_ids.json snapshot](../../operations/2026-05-01-railway-pause-state.md). New alerts since the redeploy should be zero.
+`#automation-failure` is not in `tool_ids.json` — it is created on demand by [simulation/error_reporter.py](../../../simulation/error_reporter.py); find it by name in Slack. (`C0AML3Q8PSM` is `#daily-briefing`, not this channel.) New alerts since the redeploy should be zero.
 
 ---
 
@@ -406,7 +410,7 @@ Either of these means Phase 1 didn't fully land. Stop and re-verify token state.
 - [ ] **Step 2: After 24h, run the soak checklist**
 
 ```bash
-railway service status --all
+railway service list
 railway logs --service automation-runner --environment production -n 50
 railway logs --service simulation-engine --environment production -n 50
 railway logs --service token-keeper --environment production -n 20
@@ -464,7 +468,7 @@ Expected: a weekly report renders to stdout with the correct structure (6 sectio
 
 ### Task 6.3: Restore `sales-outreach` cron LAST
 
-**Why last:** Sales-outreach is the only service in the stack that sends **outbound** messages (emails to real-feeling addresses on the simulated lead list, plus Slack posts about outreach activity). Per the [historical memory on sales-outreach cron cadence](../../../../../.claude/projects/-Users-ovieoghor-Documents-Claude-Code-Exercises-Simulation-Exercise-sparkle-shine-poc/memory/project_sales_outreach_cron.md), this service was previously throttled from `*/5` to `*/30` to mitigate topic-spam during a different incident. Restore at `*/30`, not `*/5`.
+**Why last:** Sales-outreach is the only service in the stack that sends **outbound** messages (emails to real-feeling addresses on the simulated lead list, plus Slack posts about outreach activity). Per the cron cadence history in [docs/railway.md](../../railway.md#cron-cadence-history), this service was previously throttled from `*/5` to `*/30` to mitigate topic-spam during a different incident. Restore at `*/30`, not `*/5`.
 
 - [ ] **Step 1: Settings → Deploy → "Cron Schedule" → `*/30 * * * *`**
 
@@ -490,9 +494,11 @@ Expected: outreach decisions logged, any sent emails accounted for, no Slack flo
 
 - [ ] **Step 1: At end of each day after Phase 6 completes, run the soak checklist from Task 5.1.2**
 
-- [ ] **Step 2: Re-run the `cross_tool_mapping` audit from [the pause runbook's Section A](../../operations/2026-05-01-railway-pause-state.md#a-cross_tool_mapping-completeness)**
+- [ ] **Step 2: Re-run the `cross_tool_mapping` audit from [the pause runbook's Section A](../../operations/archive/2026-05-01-railway-pause-state.md#a-cross_tool_mapping-completeness)**
 
-Expected: counts match the pause-time snapshot plus normal growth (a handful of new clients, jobs, invoices reflecting two days of fresh simulation activity). Counts that **dropped** below pause-time numbers indicate data loss — investigate immediately.
+Expected: counts match the pause-time snapshot plus normal growth (a handful of new clients, jobs, invoices reflecting two days of fresh simulation activity).
+
+> **Correction (2026-09-01):** the audit reports *unmapped* records per tool, so a count that **drops** means records gained a mapping (healing), not data loss. Growth in the columns for tools that never map an entity type (e.g. `JOB.hubspot`, `INV.asana`) is the proxy for canonical-table growth. `CLIENT.hubspot` / `LEAD.hubspot` rising is expected once the HubSpot contact pruner (2026-06-19) is live — it deletes `hubspot` mapping rows by design. `railway ssh` needs a registered SSH key; the audit also runs locally with `DATABASE_URL` set to the Postgres service's `DATABASE_PUBLIC_URL` (read-only SELECTs).
 
 - [ ] **Step 3: Confirm `#daily-briefing` posted both mornings (or the appropriate weekday count)**
 
@@ -545,7 +551,7 @@ _Populated during Phase 0 execution. Phases 1-3 read from here._
 - Code changes (none required for resume per [Simulation Data Integrity Rule L5](../../skills/project-conventions.md))
 - Database migrations
 - Backfilling the simulation gap between 2026-05-04 and 2026-05-25 — engine resumes from checkpoint; the date gap is preserved as a known characteristic of this dataset, not a bug to fix
-- Reseed of any tool — only required under the [resume contingency](../../operations/2026-05-01-railway-pause-state.md#resume-contingency-a-tool-account-is-lost) if a tool account was lost; not the case today per the user
+- Reseed of any tool — only required under the [resume contingency](../../operations/archive/2026-05-01-railway-pause-state.md#resume-contingency-a-tool-account-is-lost) if a tool account was lost; not the case today per the user
 
 ## Rollback
 

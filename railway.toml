@@ -1,6 +1,7 @@
 # Default Railway config shared by the scheduled job services.
-# The always-on simulation worker should use /railway.simulation.toml
-# via the service's Custom Config File setting in Railway.
+# Always-on workers (simulation-engine, token-keeper) should use
+# /railway.worker.toml via the service's Custom Config File setting;
+# /railway.simulation.toml is kept only as a legacy alias.
 [build]
 builder = "nixpacks"
 
