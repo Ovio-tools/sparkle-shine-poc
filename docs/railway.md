@@ -30,6 +30,13 @@ a dashboard start command — the combination causes build failures.
 
 ## Pausing and resuming the project
 
+> **The project is PAUSED as of 2026-09-04 (fully quiet 2026-09-08).** Only
+> `token-keeper` and `Postgres` are running; the 6 compute services are stopped
+> or have empty cron schedules, and every service's Source branch is frozen at
+> `paused` so pushes to `main` cannot redeploy. To resume, follow
+> `docs/operations/2026-09-04-railway-pause-state.md`.
+
+
 Full runbook, including the 2026-05-01 auto-redeploy incident write-up:
 `docs/operations/archive/2026-05-01-railway-pause-state.md`. Rules learned from it:
 
